@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package simcore;
+
+// 단일 엔티티 상태 (CIGI Entity State Packet 기반)
+message EntityState {
+    uint32 entity_id = 1;   // 엔티티 고유 ID
+    double timestamp = 2;   // Unix timestamp (seconds)
+
+    // 위치
+    double lat      = 3;    // 위도 (degrees)
+    double lon      = 4;    // 경도 (degrees)
+    double alt      = 5;    // 고도 (meters)
+
+    // 자세
+    float heading   = 6;    // 방향각 (degrees, 0~360)
+    float pitch     = 7;    // 피치각 (degrees)
+    float roll      = 8;    // 롤각 (degrees)
+
+    // 동역학
+    float speed     = 9;    // 속도 (m/s)
+    float accel     = 10;   // 가속도 (m/s²)
+
+    // 차량 상태
+    float fuel      = 11;   // 연료량 (%)
+    float rpm       = 12;   // RPM
+}
+
+// 여러 엔티티를 한 패킷에 담을 때 사용
+message EntityStatePacket {
+    repeated EntityState entities = 1;
+}

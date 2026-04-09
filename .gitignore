@@ -1,0 +1,32 @@
+# ============================================================
+# Python
+# ============================================================
+python/relay_server/.venv/
+python/**/__pycache__/
+python/relay_server/.env
+
+# ============================================================
+# C++
+# ============================================================
+cpp/host/build/
+cpp/host/vcpkg/
+cpp/host/vcpkg_installed/
+cpp/host/compile_commands.json
+
+# ============================================================
+# Unreal Engine
+# ============================================================
+unreal/Binaries/
+unreal/Build/
+unreal/DerivedDataCache/
+unreal/Intermediate/
+unreal/Saved/
+unreal/.vs/
+unreal/*.sln
+unreal/**/*.vcxproj
+unreal/**/*.vcxproj.filters
+
+# ============================================================
+# macOS
+# ============================================================
+.DS_Store

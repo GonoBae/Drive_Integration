@@ -1,0 +1,16 @@
+{
+  "configurations": [
+    {
+      "name": "Mac",
+      "compileCommands": "${workspaceFolder}/cpp/host/build/compile_commands.json",
+      "includePath": [
+        "${workspaceFolder}/cpp/host/src",
+        "${workspaceFolder}/cpp/host/vcpkg_installed/arm64-osx/include",
+        "${workspaceFolder}/cpp/host/build"
+      ],
+      "cppStandard": "c++20",
+      "macFrameworkPath": ["/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/Frameworks"]
+    }
+  ],
+  "version": 4
+}
