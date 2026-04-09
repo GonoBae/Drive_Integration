@@ -3,7 +3,7 @@
 namespace Config {
 
     // ZMQ Publisher (→ Python Relay)
-    inline constexpr const char* ZMQ_BIND_ADDR = "tcp://0.0.0.0:5555";
+    inline constexpr const char* ZMQ_BIND_ADDR = "tcp://localhost:5555";
 
     // WebSocket Server (← Unreal input)
     inline constexpr unsigned short WS_PORT = 9000;

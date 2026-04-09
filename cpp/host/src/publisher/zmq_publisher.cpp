@@ -11,5 +11,9 @@ ZmqPublisher::ZmqPublisher(const std::string& bind_addr)
 }
 
 void ZmqPublisher::publish(const std::string& data) {
-    socket_.send(zmq::buffer(data), zmq::send_flags::dontwait);
+    try {
+        socket_.send(zmq::buffer(data), zmq::send_flags::dontwait);
+    } catch (const zmq::error_t& e) {
+        std::cerr << "[ZMQ] Publish failed: " << e.what() << "\n";
+    }
 }

@@ -70,13 +70,13 @@ VehicleState VehiclePhysics::update(double dt)
 
     // 핸드브레이크 드리프트 효과
     if (in.handbrake && std::abs(state_.speed) > 2.f)
-        heading_rate *= 1.8f;
+        heading_rate *= HANDBRAKE_DRIFT_MULT;
 
     // 360을 넘지 못하도록 설정
     state_.heading = std::fmod(state_.heading + heading_rate * fdt + 360.f, 360.f);
 
     // --- Roll (시각적 기울기) ---
-    state_.roll = -in.steering * std::min(std::abs(state_.speed) / MAX_SPEED, 1.f) * 6.f;
+    state_.roll = -in.steering * std::min(std::abs(state_.speed) / MAX_SPEED, 1.f) * ROLL_INTENSITY;
 
     // --- Position ---
     double hr  = state_.heading * DEG2RAD;

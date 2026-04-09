@@ -13,13 +13,14 @@
 // Protobuf generated
 #include "vehicle.pb.h"
 
-namespace net  = boost::asio;
+namespace net  = boost::asio;   // 비동기 네트워크
 namespace json = boost::json;
 
 // VehicleState → Protobuf 직렬화
-static std::string serialize_state(const VehicleState& s) {
+static std::string serialize_state(const VehicleState& s)
+{
     simcore::EntityStatePacket packet;
-    auto* e = packet.add_entities();
+    auto* e = packet.add_entities();    // 추가된 항목의 주소를 반환
     e->set_entity_id(s.entity_id);
     e->set_timestamp(s.timestamp);
     e->set_lat(s.lat);
@@ -36,15 +37,19 @@ static std::string serialize_state(const VehicleState& s) {
 }
 
 // Unreal JSON 입력 → VehicleInput 파싱
+// 편의성을 위해 JSON 사용
 static VehicleInput parse_input(const std::string& msg) {
     VehicleInput in;
-    try {
+    try
+    {
         auto obj = json::parse(msg).as_object();
         if (obj.contains("throttle"))  in.throttle  = json::value_to<float>(obj.at("throttle"));
         if (obj.contains("brake"))     in.brake      = json::value_to<float>(obj.at("brake"));
         if (obj.contains("steering"))  in.steering   = json::value_to<float>(obj.at("steering"));
         if (obj.contains("handbrake")) in.handbrake  = obj.at("handbrake").as_bool();
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception& e)
+    {
         std::cerr << "[Input] Parse error: " << e.what() << "\n";
     }
     return in;

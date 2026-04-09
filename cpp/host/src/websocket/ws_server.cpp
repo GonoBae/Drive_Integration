@@ -40,6 +40,7 @@ void WsSession::do_write_init(const std::string& msg) {
         });
 }
 
+// 수신 대기
 void WsSession::do_read() {
     ws_.async_read(buf_,
         [self = shared_from_this()](beast::error_code ec, std::size_t) {
@@ -68,6 +69,7 @@ void WsServer::start() {
     do_accept();
 }
 
+// 연결 대기
 void WsServer::do_accept() {
     acceptor_.async_accept(
         [this](beast::error_code ec, tcp::socket socket) {
