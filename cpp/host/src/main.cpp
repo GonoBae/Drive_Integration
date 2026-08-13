@@ -94,9 +94,13 @@ int main() {
     // 60Hz 물리 계산 + ZMQ publish 타이머
     net::steady_timer timer(ioc);
     std::function<void()> schedule = [&]() {
+        // 타이머 만료 시간 설정
         timer.expires_after(std::chrono::microseconds(
             static_cast<long>(1'000'000.0 / Config::PHYSICS_HZ)));
 
+        // 타이머 만료 시 실행할 콜백
+        // 정상 만료 -> ec = 0(false) -> 계속 실행
+        // 타이머 취소 -> ec != 0(true) -> return 으로 중단
         timer.async_wait([&](boost::system::error_code ec) {
             if (ec) return;
             auto state = physics.update(Config::PHYSICS_DT);
