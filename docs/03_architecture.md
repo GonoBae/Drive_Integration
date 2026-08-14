@@ -4,7 +4,7 @@
 
 | 항목 | 값 |
 |---|---|
-| 버전 | 0.3 |
+| 버전 | 0.5 |
 | 작성일 | 2026-08-14 |
 | 대상 | R1 수동운전 및 R2/R3 자율주행 확장 기반 |
 | 관련 문서 | [일정표](./01_schedule.md), [기능표](./02_feature_matrix.md) |
@@ -24,17 +24,18 @@
 
 ```mermaid
 flowchart LR
-    UE["Unreal 입력"] -->|"JSON WebSocket :9000"| CPP["C++ Host\n종방향 힘 + Bicycle 1단계"]
-    CPP -->|"Protobuf / ZMQ :5555"| PY["Python Relay"]
-    PY -->|"JSON WebSocket :8000/ws"| UE2["Unreal IG"]
+    UE["Unreal client\n프로젝트 미생성"] <-->|"WebSocket binary Protobuf :9000"| CPP["C++ Host\n종방향 힘 + Bicycle 1단계"]
+    CPP -->|"Protobuf / ZMQ :5555\nobserver"| PY["Python Relay"]
+    PY -->|"JSON WebSocket :8000/ws\nobserver"| DBG["Debug clients"]
 ```
 
 현재 구조의 한계는 다음과 같다.
 
 - C++ 물리는 ENU에서 종방향 힘과 kinematic bicycle 조향을 계산하지만 6DoF·타이어 슬립·서스펜션·충돌은 아직 없다.
-- Proto는 루트 `protocol/vehicle.proto`로 통합됐지만 Envelope, ControlCommand와 Unreal 코드 생성은 아직 없다.
-- 수동운전 상태가 Python relay를 반드시 거쳐 지연과 장애 지점이 늘어난다.
-- 메시지에 simulation time, sequence, map checksum, control mode가 없다.
+- Proto는 루트 `protocol/vehicle.proto`로 통합됐고 Envelope, ControlCommand, WorldState가 추가됐지만 Unreal 코드 생성은 아직 없다.
+- C++ host는 WebSocket binary Protobuf로 ControlCommand를 받고 WorldState를 직접 broadcast하지만, 저장소에 Unreal client 구현이 아직 없다.
+- simulation time과 sequence는 Envelope에 실리지만 절대 deadline 기반 SimulationClock, command timeout, 재연결 handshake는 아직 없다.
+- map checksum은 필드만 있고 현재 기본값은 `unset`이다.
 - 저장소에 추적되는 Unreal 프로젝트 구현이 아직 없다.
 
 ### 3.2 목표 구조
@@ -179,9 +180,9 @@ NYC Digital City Map의 street centerline은 도로명과 폭을 가진 공식 �
 ### 7.2 소스 패키지 예시
 
 ```text
-maps/wall_broad/
+map_packages/wall_broad_v1/
   manifest.json
-  origin.json
+  georeference.json
   lane_graph.json
   road_semantics.json
   collision_mesh.glb
@@ -293,13 +294,14 @@ R1에서 “정확한 C++ 물리”는 다음을 의미한다.
 
 ## 10. 통신 아키텍처
 
-### 10.1 R1 transport 후보
+### 10.1 R1 transport 결정
 
-현재 1순위 후보는 기존 Boost WebSocket 서버를 전이중 binary 채널로 확장하고, 최신성이 중요한 상태 채널을 분리하는 것이다. WebSocket binary, UDP, Protobuf, FlatBuffers의 최종 조합은 Unreal 통합 난이도·지연·패킷 크기 측정 후 별도 결정한다.
+R1 수동운전의 runtime control/state 통신은 `WebSocket binary + Protobuf`로 확정한다. C++ host의 현행 JSON 입력 파서는 제거됐으며, UDP는 초기값이 아니라 측정 결과가 나쁠 때 재검토하는 대안이다. Python relay의 JSON WebSocket은 수동운전 runtime protocol이 아니라 observer/debug 경로로만 취급한다.
 
 - 신뢰성 채널에서 handshake·reset·설정·생명주기 메시지를 교환
 - 실시간 채널에서 Unreal→C++ command와 C++→Unreal state를 교환
-- JSON은 개발용 콘솔·디버깅에서만 허용
+- runtime control/state 메시지는 Protobuf `Envelope`를 사용
+- JSON은 runtime driving protocol에 사용하지 않음
 - Python relay는 수동운전 경로에서 제거
 - transport와 serialization은 각각 인터페이스 뒤에 두어 측정 결과에 따라 교체 가능
 - 센서 영상은 같은 socket에 싣지 않음
@@ -485,7 +487,7 @@ release/
 | ADR-002 | 확정 | C++가 단일 물리 권한 | C++/Unreal 충돌 보정 경쟁 제거와 headless 확장 |
 | ADR-003 | 확정 | Python을 수동운전 필수 경로에서 제거 | 지연·장애 지점 감소, Python을 FSD 역할로 한정 |
 | ADR-004 | 확정 | MapPackage를 지도 single source of truth로 사용 | 차선·충돌·경로 데이터 불일치 방지 |
-| ADR-005 | 제안 | R1은 전이중 WebSocket+binary Protobuf | 현재 코드 재사용과 직접 연결의 구현량 균형 |
+| ADR-005 | 확정 | R1은 WebSocket binary + Protobuf | JSON 혼용을 제거하고, UDP는 측정 결과로 재검토 |
 | ADR-006 | 확정 | 현재 C++ 서버에 자체 차량 물리 구현 | 차량 수식·상태·오차를 직접 설명하고 수정하는 학습·포트폴리오 목표 |
 | ADR-007 | 확정 | R1은 수동운전, 학습은 연기 | 8월 품질과 기반 구조에 집중 |
 | ADR-008 | 확정 | 핵심부 보행 중심, 주변 도로 주행 | Wall/Broad의 실제 공간 특성과 사용자 요구 반영 |
@@ -497,7 +499,7 @@ release/
 |---|---|---|
 | Unreal/Cesium 버전 | 호환성과 목표 PC 안정성이 확인된 고정 버전 | D1 |
 | 자체 물리 Windows 게이트 | MSVC Release 빌드와 동일 입력 회귀 시험 | D5 전 |
-| 실시간 transport·serialization | WebSocket binary/UDP와 Protobuf/FlatBuffers 비교 측정 | D3 전 |
+| UDP 전환 기준 | WebSocket binary + Protobuf 측정값이 ADR-005 기준을 넘으면 재검토 | D3 전 |
 | 기준 차량 | 확보한 차량 에셋과 제원이 일치하는 일반 승용차 | D3 |
 | 지도 경계 | NYSE·Federal Hall과 주변 차량 루프를 포함하는 4~6블록 | D8 전 |
 | 배경 방식 | 로컬 핵심부 + 성능 통과 시 제한된 Cesium 중·원경 | D16 프로파일링 후 최종 |
@@ -517,6 +519,8 @@ release/
 
 | 버전 | 날짜 | 변경 내용 |
 |---|---|---|
+| 0.5 | 2026-08-14 | C++ host의 binary Protobuf ControlCommand 수신과 WorldState broadcast 구현 상태 반영 |
+| 0.4 | 2026-08-14 | R1 통신을 WebSocket binary + Protobuf로 확정하고 JSON runtime protocol 제거 방향 반영 |
 | 0.3 | 2026-08-14 | ADR-006을 자체 C++ 물리엔진 결정으로 변경하고 D1 기본 모델·공통 Proto 상태 반영 |
 | 0.2 | 2026-08-14 | Chrono::Vehicle 스파이크와 통합안을 기록; 0.3에서 런타임 채택 철회 |
 | 0.1 | 2026-08-14 | C++ 단일 물리 권한, 공통 MapPackage, 직접 통신, 센서 확장 구조 최초 작성 |

@@ -4,46 +4,54 @@
 #include <boost/beast/core.hpp>
 #include <boost/beast/websocket.hpp>
 
+#include <deque>
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace beast = boost::beast;
 namespace net   = boost::asio;
 using tcp       = net::ip::tcp;
 
-using InputCallback   = std::function<void(const std::string&)>;
-using ConnectCallback = std::function<std::string()>; // 접속 시 초기 상태 JSON 반환
+using BinaryMessageCallback = std::function<void(const std::string&)>;
+using ConnectMessageFactory = std::function<std::string()>;
 
 // 단일 WebSocket 연결 세션
 class WsSession : public std::enable_shared_from_this<WsSession> {
 public:
-    WsSession(tcp::socket socket, InputCallback on_msg, ConnectCallback on_connect);
+    WsSession(tcp::socket socket, BinaryMessageCallback on_msg,
+              ConnectMessageFactory on_connect);
     void start();
+    void send_binary(std::shared_ptr<const std::string> message);
 
 private:
-    void do_write_init(const std::string& msg);
     void do_read();
+    void do_write();
 
     beast::websocket::stream<tcp::socket> ws_;
     beast::flat_buffer                    buf_;
-    InputCallback                         on_message_;
-    ConnectCallback                       on_connect_;
+    BinaryMessageCallback                 on_message_;
+    ConnectMessageFactory                 on_connect_;
+    std::deque<std::shared_ptr<const std::string>> write_queue_;
 };
 
-// WebSocket 서버 (Unreal 입력 수신)
+// WebSocket 서버 (Unreal binary control 수신 + state broadcast)
 class WsServer {
 public:
     WsServer(net::io_context& ioc, unsigned short port,
-             InputCallback on_msg, ConnectCallback on_connect);
+             BinaryMessageCallback on_msg, ConnectMessageFactory on_connect);
 
     void start();
+    void broadcast_binary(const std::string& message);
 
 private:
     void do_accept();
+    void prune_sessions();
 
-    net::io_context& ioc_;
-    tcp::acceptor    acceptor_;
-    InputCallback    on_message_;
-    ConnectCallback  on_connect_;
+    net::io_context&                  ioc_;
+    tcp::acceptor                     acceptor_;
+    BinaryMessageCallback             on_message_;
+    ConnectMessageFactory             on_connect_;
+    std::vector<std::weak_ptr<WsSession>> sessions_;
 };

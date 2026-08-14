@@ -9,7 +9,9 @@
 | [01_schedule.md](./01_schedule.md) | 일정과 작업량 관리 | 일별 일정, 마일스톤, 완료 게이트, 지연 대응 |
 | [02_feature_matrix.md](./02_feature_matrix.md) | 범위와 완료 조건 관리 | 8월 기능, 향후 자율주행 기능, 기능별 검증 기준 |
 | [03_architecture.md](./03_architecture.md) | 시스템 설계 관리 | C++·Unreal·Python 책임, 지도·충돌·통신·센서 구조 |
+| [ADR-005](./decisions/ADR-005-realtime-transport-protocol.md) | 실시간 통신 결정 | WebSocket binary + Protobuf, JSON runtime 제거, UDP 재검토 조건 |
 | [ADR-006](./decisions/ADR-006-custom-vehicle-physics.md) | 자체 차량 물리 결정 | C++ 직접 구현 근거, 단계별 범위, 비교 시험과 재검토 조건 |
+| [ADR 목록](./decisions/README.md) | 기술 결정 색인 | 현재 ADR과 후속 번호 관리 |
 | [2026-08-14 작업일지](./worklogs/2026-08-14.md) | 일별 실행 기록 | D1 구현, 검증 결과, 남은 위험과 다음 작업 |
 
 ## 현재 합의된 방향
@@ -22,6 +24,7 @@
 - 주행: 주변 차량 통행 도로에 제한된 주행 루프 구성
 - 물리 권한: C++ SimCore
 - 차량 물리: 현재 C++ 서버에서 직접 개발; Chrono·PhysX·Chaos는 비교 기준으로만 사용
+- 실시간 통신: R1은 WebSocket binary + Protobuf, JSON runtime protocol은 제거
 - Unreal 역할: 입력, IG(영상 생성), UI, 센서, 에이전트 표현
 - Python 역할: 향후 자율주행 판단; 수동운전 필수 경로에서는 제외
 - 차량 사고 파손 및 변형: 제외
@@ -52,6 +55,6 @@
 ## 문서 기준 정보
 
 - 최초 작성일: 2026-08-14
-- 문서 버전: 0.3
-- 프로젝트 상태: D1 자체 물리 기초 모델·공통 proto·회귀 시험 완료, D2 통신 계약 작업 대기
+- 문서 버전: 0.6
+- 프로젝트 상태: D1 자체 물리 기초 모델·공통 proto·회귀 시험 완료, D2 C++ host binary Protobuf 통신 및 공통 개발 경로 정리 완료, Unreal client·timeout 대기
 - 기준 저장소: `Drive_Integration`

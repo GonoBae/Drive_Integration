@@ -5,11 +5,20 @@
       "compileCommands": "${workspaceFolder}/cpp/host/build/compile_commands.json",
       "includePath": [
         "${workspaceFolder}/cpp/host/src",
-        "${workspaceFolder}/cpp/host/vcpkg_installed/arm64-osx/include",
+        "${workspaceFolder}/cpp/host/build/vcpkg_installed/arm64-osx/include",
         "${workspaceFolder}/cpp/host/build"
       ],
       "cppStandard": "c++20",
       "macFrameworkPath": ["/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/Frameworks"]
+    },
+    {
+      "name": "Windows",
+      "includePath": [
+        "${workspaceFolder}/cpp/host/src",
+        "${workspaceFolder}/cpp/host/build/vcpkg_installed/x64-windows/include",
+        "${workspaceFolder}/cpp/host/build"
+      ],
+      "cppStandard": "c++20"
     }
   ],
   "version": 4

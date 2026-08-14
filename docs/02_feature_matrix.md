@@ -4,7 +4,7 @@
 
 | 항목 | 값 |
 |---|---|
-| 버전 | 0.3 |
+| 버전 | 0.5 |
 | 작성일 | 2026-08-14 |
 | R1 | 2026-08-31 수동운전 버티컬 슬라이스 |
 | R2 | 자율주행 환경·경로계획 기반, 일정 추후 확정 |
@@ -89,12 +89,12 @@ R1은 다음 장면을 완성하는 릴리스다.
 
 | ID | 우선순위 | 상태 | 기능 | R1 완료 기준 | 향후 재사용 |
 |---|---|---|---|---|---|
-| NET-001 | Must | 결정 | Unreal↔C++ 직접 연결 | Python relay 없이 명령과 상태가 양방향 전달됨 | 지연과 장애 지점 감소 |
-| NET-002 | Must | 구현 중 | 단일 공통 Protobuf 스키마 | C++·Unreal·Python 생성물이 루트 `protocol/`의 하나의 원본에서 생성됨 | 스키마 중복 제거 |
-| NET-003 | Must | 결정 | 메시지 Envelope | schema version, sequence, simulation time, source, map checksum 포함 | 기록·재생·오류 진단 |
+| NET-001 | Must | 구현 중 | Unreal↔C++ 직접 연결 | Python relay 없이 명령과 상태가 양방향 전달됨 | 지연과 장애 지점 감소 |
+| NET-002 | Must | 구현 중 | 단일 공통 Protobuf 스키마 | C++·Python 생성물이 루트 `protocol/`의 하나의 원본에서 생성되고 Unreal 생성 대기 | 스키마 중복 제거 |
+| NET-003 | Must | 구현 중 | 메시지 Envelope | schema version, sequence, simulation time, source, map checksum 포함 | 기록·재생·오류 진단 |
 | NET-004 | Must | 결정 | 재연결·중복·순서 처리 | 오래되거나 중복된 command를 버리고 재연결 후 handshake 수행 | 네트워크 견고성 |
 | NET-005 | Must | 결정 | MapPackage handshake | Unreal과 C++ 체크섬이 다르면 주행 시작을 거부하고 이유 표시 | 충돌 불일치 방지 |
-| NET-006 | Must | 제안 | 전이중 WebSocket transport | R1은 기존 Boost WebSocket을 확장하고 transport interface로 격리 | 이후 IPC/ZMQ로 교체 가능 |
+| NET-006 | Must | 구현 중 | WebSocket binary + Protobuf transport | JSON 없이 ControlCommand와 WorldState가 C++↔Unreal 사이에서 전이중 전달됨 | 이후 측정 결과에 따라 UDP/IPC로 교체 가능 |
 | NET-007 | Future | 연기 | 고대역 센서 transport | 이미지·LiDAR는 control/state와 분리된 shared memory/전용 채널 사용 | FSD 처리량 확보 |
 
 ### 4.4 Unreal IG와 수동운전
@@ -185,15 +185,18 @@ R1은 다음 장면을 완성하는 릴리스다.
 |---|---|---|---|
 | DEC-F01 | 기준 Unreal Engine·Cesium 버전 | D1 | 플러그인·빌드 재작업 가능 |
 | DEC-F02 | **완료: 현재 C++ 서버에 자체 차량 물리 구현** ([ADR-006](./decisions/ADR-006-custom-vehicle-physics.md)) | 2026-08-14 결정 | 구현량·검증 책임이 증가하므로 단계별 시험 실패 시 후속 일정 재검토 |
-| DEC-F03 | 대상 차량 종류와 기본 제원 | D3 | 물리는 동작하지만 현실성 검증 기준이 불명확 |
-| DEC-F04 | Wall/Broad 정확한 지도 경계와 주행 루프 | D8 이전 | LaneGraph와 환경 범위 변동 |
-| DEC-F05 | 사용할 건물·차량·보행자 에셋과 라이선스 | D8 이전 | 영상 품질 또는 배포 가능성 저하 |
-| DEC-F06 | 주말·공휴일 포함 실제 작업 가능 여부 | 즉시 | 8월 31일 또는 9월 9일로 완료일 변동 |
+| DEC-F03 | **완료: R1 통신은 WebSocket binary + Protobuf** ([ADR-005](./decisions/ADR-005-realtime-transport-protocol.md)) | 2026-08-14 결정 | C++ JSON 입력 파서는 제거, UDP는 측정 후 재검토 |
+| DEC-F04 | 대상 차량 종류와 기본 제원 | D3 | 물리는 동작하지만 현실성 검증 기준이 불명확 |
+| DEC-F05 | Wall/Broad 정확한 지도 경계와 주행 루프 | D8 이전 | LaneGraph와 환경 범위 변동 |
+| DEC-F06 | 사용할 건물·차량·보행자 에셋과 라이선스 | D8 이전 | 영상 품질 또는 배포 가능성 저하 |
+| DEC-F07 | 주말·공휴일 포함 실제 작업 가능 여부 | 즉시 | 8월 31일 또는 9월 9일로 완료일 변동 |
 
 ## 8. 변경 이력
 
 | 버전 | 날짜 | 변경 내용 |
 |---|---|---|
+| 0.5 | 2026-08-14 | C++ host의 binary Protobuf ControlCommand 수신과 WorldState broadcast 구현 상태 반영 |
+| 0.4 | 2026-08-14 | R1 통신 방식을 WebSocket binary + Protobuf로 확정하고 JSON 제거 방향 반영 |
 | 0.3 | 2026-08-14 | PHY-002와 DEC-F02를 자체 C++ 물리엔진 결정으로 변경하고 D1 구현 상태 반영 |
 | 0.2 | 2026-08-14 | Chrono::Vehicle 스파이크 결정을 기록; 0.3에서 런타임 채택 철회 |
 | 0.1 | 2026-08-14 | R1 수동운전과 R2/R3 자율주행 확장 기능을 최초 분리 |

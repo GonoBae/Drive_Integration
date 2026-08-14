@@ -8,6 +8,12 @@ enum VehicleGear {
     VEHICLE_GEAR_REVERSE = 2;
 }
 
+enum ControlMode {
+    CONTROL_MODE_MANUAL = 0;
+    CONTROL_MODE_AUTONOMY = 1;
+    CONTROL_MODE_ESTOP = 2;
+}
+
 // 단일 엔티티 상태 (CIGI Entity State Packet 기반)
 message EntityState {
     uint32 entity_id = 1;   // 엔티티 고유 ID
@@ -42,4 +48,47 @@ message EntityState {
 // 여러 엔티티를 한 패킷에 담을 때 사용
 message EntityStatePacket {
     repeated EntityState entities = 1;
+}
+
+message WorldState {
+    repeated EntityState entities = 1;
+}
+
+message ControlCommand {
+    ControlMode mode = 1;
+    float throttle = 2;      // 0 ~ 1
+    float brake = 3;         // 0 ~ 1
+    float steering = 4;      // -1(left) ~ 1(right)
+    bool handbrake = 5;
+    optional VehicleGear gear = 6;
+    bool estop = 7;
+    uint64 client_time_ns = 8;
+}
+
+message Hello {
+    string build = 1;
+    string schema = 2;
+    repeated string capabilities = 3;
+}
+
+message Health {
+    string status = 1;
+    uint32 tick_overrun_count = 2;
+    uint64 last_command_age_ns = 3;
+    string message = 4;
+}
+
+message Envelope {
+    uint32 schema_version = 1;
+    uint64 sequence = 2;
+    uint64 simulation_time_ns = 3;
+    string source_id = 4;
+    string map_package_checksum = 5;
+
+    oneof payload {
+        Hello hello = 10;
+        ControlCommand control_command = 11;
+        WorldState world_state = 12;
+        Health health = 13;
+    }
 }

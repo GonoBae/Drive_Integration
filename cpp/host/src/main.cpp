@@ -1,82 +1,23 @@
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <iostream>
-#include <stdexcept>
 
 #include <boost/asio.hpp>
-#include <boost/json.hpp>
 
 #include "config.hpp"
 #include "physics/vehicle_physics.hpp"
+#include "protocol/vehicle_messages.hpp"
 #include "publisher/zmq_publisher.hpp"
 #include "websocket/ws_server.hpp"
 
-// Protobuf generated
-#include "vehicle.pb.h"
-
 namespace net  = boost::asio;   // 비동기 네트워크
-namespace json = boost::json;
 
-// VehicleState → Protobuf 직렬화
-static std::string serialize_state(const VehicleState& s)
+static std::uint64_t simulation_time_ns(std::uint64_t tick_index)
 {
-    simcore::EntityStatePacket packet;
-    auto* e = packet.add_entities();    // 추가된 항목의 주소를 반환
-    e->set_entity_id(s.entity_id);
-    e->set_timestamp(s.timestamp);
-    e->set_lat(s.lat);
-    e->set_lon(s.lon);
-    e->set_alt(s.alt);
-    e->set_heading(s.heading);
-    e->set_pitch(s.pitch);
-    e->set_roll(s.roll);
-    e->set_speed(s.speed);
-    e->set_accel(s.accel);
-    e->set_fuel(s.fuel);
-    e->set_rpm(s.rpm);
-    e->set_east(s.east);
-    e->set_north(s.north);
-    e->set_yaw_rate(s.yaw_rate);
-    e->set_steering_angle(s.steering_angle);
-    e->set_gear(static_cast<simcore::VehicleGear>(s.gear));
-    return packet.SerializeAsString();
-}
-
-static VehicleGear parse_gear(const json::value& value)
-{
-    if (value.is_string()) {
-        const auto gear = value.as_string();
-        if (gear == "drive" || gear == "D") return VehicleGear::Drive;
-        if (gear == "reverse" || gear == "R") return VehicleGear::Reverse;
-        if (gear == "neutral" || gear == "N") return VehicleGear::Neutral;
-    } else if (value.is_int64()) {
-        switch (value.as_int64()) {
-        case -1: return VehicleGear::Reverse;
-        case 0:  return VehicleGear::Neutral;
-        case 1:  return VehicleGear::Drive;
-        }
-    }
-    throw std::invalid_argument("gear must be drive/D/1, neutral/N/0, or reverse/R/-1");
-}
-
-// Unreal JSON 입력 → VehicleInput 파싱
-// 편의성을 위해 JSON 사용
-static VehicleInput parse_input(const std::string& msg) {
-    VehicleInput in;
-    try
-    {
-        auto obj = json::parse(msg).as_object();
-        if (obj.contains("throttle"))  in.throttle  = json::value_to<float>(obj.at("throttle"));
-        if (obj.contains("brake"))     in.brake      = json::value_to<float>(obj.at("brake"));
-        if (obj.contains("steering"))  in.steering   = json::value_to<float>(obj.at("steering"));
-        if (obj.contains("handbrake")) in.handbrake  = obj.at("handbrake").as_bool();
-        if (obj.contains("gear"))      in.gear       = parse_gear(obj.at("gear"));
-    }
-    catch (const std::exception& e)
-    {
-        std::cerr << "[Input] Parse error: " << e.what() << "\n";
-    }
-    return in;
+    constexpr long double kNanosecondsPerSecond = 1'000'000'000.0L;
+    return static_cast<std::uint64_t>(
+        static_cast<long double>(tick_index) * kNanosecondsPerSecond / Config::PHYSICS_HZ);
 }
 
 int main() {
@@ -84,8 +25,8 @@ int main() {
 
     // Physics engine
     VehiclePhysics physics(
-        Config::INIT_LAT, Config::INIT_LON,
-        Config::INIT_ALT, Config::INIT_HEADING);
+        Config::DEFAULT_ORIGIN_LAT, Config::DEFAULT_ORIGIN_LON,
+        Config::DEFAULT_ORIGIN_ALT, Config::DEFAULT_SPAWN_HEADING);
 
     // ZMQ Publisher (→ Python Relay)
     ZmqPublisher publisher(Config::ZMQ_BIND_ADDR);
@@ -93,29 +34,42 @@ int main() {
     // Asio io_context (single-threaded)
     net::io_context ioc;
 
-    // WebSocket Server (← Unreal 입력)
+    std::uint64_t message_sequence = 1;
+    std::uint64_t tick_index = 0;
+
+    auto make_metadata = [&](std::uint64_t sim_time_ns) {
+        return simcore_host::EnvelopeMetadata{
+            message_sequence++,
+            sim_time_ns,
+            Config::SOURCE_ID,
+            Config::MAP_PACKAGE_CHECKSUM,
+        };
+    };
+
+    // WebSocket Server (Unreal ↔ C++ binary Protobuf)
     WsServer ws_server(
         ioc,
         Config::WS_PORT,
-        // 입력 수신 시: physics 업데이트
+        // 입력 수신 시: ControlCommand 적용
         [&physics](const std::string& msg) {
-            physics.set_input(parse_input(msg));
+            std::string error;
+            auto input = simcore_host::parse_control_command_envelope(msg, &error);
+            if (!input) {
+                std::cerr << "[Input] " << error << "\n";
+                return;
+            }
+            physics.set_input(*input);
         },
-        // Unreal 접속 시: 초기 스폰 위치 전송
-        [&physics]() -> std::string {
-            auto s = physics.get_state();
-            json::object obj;
-            obj["type"]    = "init";
-            obj["lat"]     = s.lat;
-            obj["lon"]     = s.lon;
-            obj["alt"]     = s.alt;
-            obj["heading"] = s.heading;
-            return json::serialize(obj);
+        // Unreal 접속 시: 현재 state를 binary Protobuf로 전송
+        [&physics, &make_metadata, &tick_index]() -> std::string {
+            return simcore_host::serialize_world_state_envelope(
+                physics.get_state(),
+                make_metadata(simulation_time_ns(tick_index)));
         });
 
     ws_server.start();
 
-    // 60Hz 물리 계산 + ZMQ publish 타이머
+    // 60Hz 물리 계산 + Unreal direct broadcast + ZMQ observer publish
     net::steady_timer timer(ioc);
     std::function<void()> schedule = [&]() {
         // 타이머 만료 시간 설정
@@ -127,14 +81,19 @@ int main() {
         // 타이머 취소 -> ec != 0(true) -> return 으로 중단
         timer.async_wait([&](boost::system::error_code ec) {
             if (ec) return;
+            ++tick_index;
             auto state = physics.update(Config::PHYSICS_DT);
-            publisher.publish(serialize_state(state));
+            ws_server.broadcast_binary(
+                simcore_host::serialize_world_state_envelope(
+                    state,
+                    make_metadata(simulation_time_ns(tick_index))));
+            publisher.publish(simcore_host::serialize_entity_state_packet(state));
             schedule();
         });
     };
     schedule();
 
-    std::cout << "[SimCore] WS :" << Config::WS_PORT
+    std::cout << "[SimCore] WS binary :" << Config::WS_PORT
               << "  ZMQ " << Config::ZMQ_BIND_ADDR << "\n";
 
     ioc.run();

@@ -6,6 +6,25 @@
 
 # 빌드/실행 명령어
 
+## C++ host
+
+- 의존성 준비(macOS/Linux): `bash cpp/host/scripts/setup.sh`
+- 빌드(macOS/Linux): `bash cpp/host/scripts/build.sh`
+- 테스트: `cd cpp/host && ctest --preset release`
+- Windows: `cpp/host/scripts/setup.ps1`, `cpp/host/scripts/build.ps1`
+
+## Python observer
+
+- 실행: `make run-python`
+- Proto 재생성: `make generate-proto`
+
 # 개발 컨벤션이나 주의사항
+
+- 공통 Protobuf 원본은 `protocol/vehicle.proto` 하나만 유지한다.
+- C++ Protobuf 생성물은 `cpp/host/build/`에만 생성한다.
+- Python Protobuf 생성물은 `python/relay_server/generated/`에 둔다.
+- `cpp/host/build/`, `cpp/host/vcpkg/`, Python `.venv`, Unreal 생성물은 커밋하지 않는다.
+- 수동운전 runtime은 Unreal과 C++ host가 직접 통신하며 Python relay는 observer/debug 용도다.
+- 향후 자율주행 코드는 `python/autonomy_server/`로 분리하고 relay에 혼합하지 않는다.
 
 # Team B
