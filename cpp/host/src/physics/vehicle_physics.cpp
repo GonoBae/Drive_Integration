@@ -3,24 +3,75 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <numbers>
+#include <stdexcept>
 
-static constexpr double DEG2RAD = M_PI / 180.0;
-static constexpr double RAD2DEG = 180.0 / M_PI;
+namespace {
 
-VehiclePhysics::VehiclePhysics(double lat, double lon, double alt, float heading) {
+constexpr double DEG2RAD = std::numbers::pi_v<double> / 180.0;
+constexpr double RAD2DEG = 180.0 / std::numbers::pi_v<double>;
+
+float gear_direction(VehicleGear gear)
+{
+    switch (gear) {
+    case VehicleGear::Drive:   return 1.f;
+    case VehicleGear::Reverse: return -1.f;
+    case VehicleGear::Neutral: return 0.f;
+    }
+    return 0.f;
+}
+
+double normalize_heading(double radians)
+{
+    const double full_turn = 2.0 * std::numbers::pi_v<double>;
+    radians = std::fmod(radians, full_turn);
+    return radians < 0.0 ? radians + full_turn : radians;
+}
+
+} // namespace
+
+VehiclePhysics::VehiclePhysics(double lat, double lon, double alt, float heading,
+                               VehicleParameters parameters)
+    : parameters_(parameters)
+    , origin_lat_(lat)
+    , origin_lon_(lon)
+    , heading_rad_(heading * DEG2RAD)
+{
+    if (parameters_.mass_kg <= 0.f || parameters_.wheelbase_m <= 0.f ||
+        parameters_.tire_radius_m <= 0.f) {
+        throw std::invalid_argument("Vehicle parameters must be positive");
+    }
+
     state_.lat     = lat;
     state_.lon     = lon;
     state_.alt     = alt;
     state_.heading = heading;
+    state_.rpm     = parameters_.idle_rpm;
 }
 
 void VehiclePhysics::set_input(const VehicleInput& input) {
     std::lock_guard lock(input_mutex_);
     input_ = input;
+    input_.throttle = std::isfinite(input_.throttle)
+        ? std::clamp(input_.throttle, 0.f, 1.f) : 0.f;
+    input_.brake = std::isfinite(input_.brake)
+        ? std::clamp(input_.brake, 0.f, 1.f) : 0.f;
+    input_.steering = std::isfinite(input_.steering)
+        ? std::clamp(input_.steering, -1.f, 1.f) : 0.f;
+
+    if (input_.gear != VehicleGear::Neutral &&
+        input_.gear != VehicleGear::Drive &&
+        input_.gear != VehicleGear::Reverse) {
+        input_.gear = VehicleGear::Neutral;
+    }
 }
 
 VehicleState VehiclePhysics::update(double dt)
 {
+    if (!std::isfinite(dt) || dt <= 0.0 || dt > 0.1) {
+        throw std::invalid_argument("Physics dt must be in the range (0, 0.1]");
+    }
+
     VehicleInput in;
     {
         std::lock_guard lock(input_mutex_);
@@ -33,66 +84,100 @@ VehicleState VehiclePhysics::update(double dt)
     auto now = std::chrono::system_clock::now();
     state_.timestamp = std::chrono::duration<double>(now.time_since_epoch()).count();
 
-    // --- Acceleration ---
-    // 공기저항: 속도 방향 반대로 작용 (후진 시에도 자연스럽게 감속)
-    float drag = DRAG_COEFF * state_.speed * std::abs(state_.speed);
+    // --- Longitudinal forces ---
+    const float previous_speed = state_.speed;
+    const float gear_sign = gear_direction(in.gear);
+    const float available_drive_force = in.gear == VehicleGear::Reverse
+        ? parameters_.max_reverse_force_n
+        : parameters_.max_drive_force_n;
+    const float drive_force = gear_sign * in.throttle * available_drive_force;
 
-    float net_accel;
-    if (state_.speed >= 0.f) {
-        // 전진 또는 정지: throttle=전진, brake=감속/후진 진입
-        net_accel = in.throttle * MAX_ACCEL
-                  - in.brake    * MAX_BRAKE
-                  - drag;
-    } else {
-        // 후진 중: throttle=후진 탈출, brake=후진 가속
-        net_accel = in.throttle * MAX_BRAKE
-                  - in.brake    * MAX_REVERSE_ACCEL
-                  - drag;
+    float drag_force = 0.f;
+    float rolling_force = 0.f;
+    if (std::abs(previous_speed) > STOP_EPSILON) {
+        const float motion_sign = std::copysign(1.f, previous_speed);
+        drag_force = -0.5f * parameters_.air_density_kg_m3
+                   * parameters_.drag_coefficient
+                   * parameters_.frontal_area_m2
+                   * previous_speed * std::abs(previous_speed);
+        rolling_force = -motion_sign * parameters_.rolling_resistance_coeff
+                      * parameters_.mass_kg * GRAVITY;
     }
 
-    // 핸드브레이크: 현재 이동 방향 반대로 감속
-    if (in.handbrake)
-        net_accel -= std::copysign(HANDBRAKE_DECEL, state_.speed);
+    const float unbraked_accel =
+        (drive_force + drag_force + rolling_force) / parameters_.mass_kg;
+    float next_speed = previous_speed + unbraked_accel * fdt;
 
-    state_.accel  = net_accel;
-    state_.speed += net_accel * fdt;
-    state_.speed  = std::clamp(state_.speed, -MAX_REVERSE_SPEED, MAX_SPEED);
+    // Passive resistance must not make a stopped vehicle roll in reverse.
+    if (std::abs(previous_speed) > STOP_EPSILON &&
+        previous_speed * next_speed < 0.f &&
+        drive_force * previous_speed >= 0.f) {
+        next_speed = 0.f;
+    }
 
-    // --- Steering ---
-    // 속도에 비례해서 조향 반응, 후진 시 방향 반전
-    // 5m/s -> 18km/h 부터 최대 조항이 되도록 튜닝
-    float speed_factor = std::min(std::abs(state_.speed) / 5.f, 1.f);
-    // 핸들을 최대 조항으로 운전 시 초당 60도 회전 -> 60hz 에서 1 프레임에 1도 회전
-    // U턴 3초 걸림
-    float heading_rate = in.steering * MAX_STEER_RATE * speed_factor;
-    if (state_.speed < 0.f)
-        heading_rate = -heading_rate;
+    const float service_brake_force = in.brake * parameters_.max_service_brake_n;
+    const float brake_force = in.handbrake
+        ? std::max(service_brake_force, parameters_.max_handbrake_force_n)
+        : service_brake_force;
+    if (brake_force > 0.f && std::abs(next_speed) > 0.f) {
+        const float brake_delta = std::min(
+            std::abs(next_speed), brake_force / parameters_.mass_kg * fdt);
+        next_speed -= std::copysign(brake_delta, next_speed);
+    }
 
-    // 핸드브레이크 드리프트 효과
-    if (in.handbrake && std::abs(state_.speed) > 2.f)
-        heading_rate *= HANDBRAKE_DRIFT_MULT;
+    if (std::abs(next_speed) < STOP_EPSILON && in.throttle == 0.f) {
+        next_speed = 0.f;
+    }
 
-    // 360을 넘지 못하도록 설정
-    state_.heading = std::fmod(state_.heading + heading_rate * fdt + 360.f, 360.f);
+    state_.speed = std::clamp(next_speed,
+                              -parameters_.max_reverse_speed_mps,
+                              parameters_.max_forward_speed_mps);
+    state_.accel = (state_.speed - previous_speed) / fdt;
 
-    // --- Roll (시각적 기울기) ---
-    state_.roll = -in.steering * std::min(std::abs(state_.speed) / MAX_SPEED, 1.f) * ROLL_INTENSITY;
+    // --- Kinematic bicycle steering ---
+    state_.steering_angle = in.steering * parameters_.max_steering_angle_rad;
+    state_.yaw_rate = state_.speed / parameters_.wheelbase_m
+                    * std::tan(state_.steering_angle);
+    heading_rad_ = normalize_heading(heading_rad_ + state_.yaw_rate * dt);
+    state_.heading = static_cast<float>(heading_rad_ * RAD2DEG);
 
-    // --- Position ---
-    double hr  = state_.heading * DEG2RAD;
-    // 동<->서 , 남<->북 속도 나눔
-    double vx  = state_.speed * std::sin(hr);
-    double vy  = state_.speed * std::cos(hr);
+    east_m_  += state_.speed * std::sin(heading_rad_) * dt;
+    north_m_ += state_.speed * std::cos(heading_rad_) * dt;
+    state_.east  = east_m_;
+    state_.north = north_m_;
 
-    state_.lat += (vy / EARTH_R) * RAD2DEG * dt;
-    state_.lon += (vx / (EARTH_R * std::cos(state_.lat * DEG2RAD))) * RAD2DEG * dt;
+    state_.lat = origin_lat_ + (north_m_ / EARTH_R) * RAD2DEG;
+    state_.lon = origin_lon_ +
+        (east_m_ / (EARTH_R * std::cos(origin_lat_ * DEG2RAD))) * RAD2DEG;
 
-    // --- RPM ---
-    state_.rpm = IDLE_RPM + (std::abs(state_.speed) / MAX_SPEED) * (MAX_RPM - IDLE_RPM);
+    // R1 visual attitude approximation. Suspension dynamics will replace this later.
+    const float lateral_accel = state_.speed * state_.yaw_rate;
+    state_.roll = std::clamp(
+        static_cast<float>(-std::atan2(lateral_accel, GRAVITY) * RAD2DEG),
+        -8.f, 8.f);
+    state_.pitch = std::clamp(
+        static_cast<float>(-std::atan2(state_.accel, GRAVITY) * RAD2DEG),
+        -6.f, 6.f);
+
+    // --- RPM (single-ratio driveline for the first physics milestone) ---
+    const float wheel_rpm = std::abs(state_.speed)
+        / (2.f * std::numbers::pi_v<float> * parameters_.tire_radius_m) * 60.f;
+    const float gear_ratio = in.gear == VehicleGear::Reverse
+        ? parameters_.reverse_gear_ratio
+        : parameters_.drive_gear_ratio;
+    const float coupled_rpm = wheel_rpm * gear_ratio * parameters_.final_drive_ratio;
+    const float neutral_rpm = parameters_.idle_rpm
+        + in.throttle * (parameters_.max_rpm - parameters_.idle_rpm) * 0.5f;
+    state_.rpm = std::clamp(
+        in.gear == VehicleGear::Neutral ? neutral_rpm : coupled_rpm,
+        parameters_.idle_rpm,
+        parameters_.max_rpm);
+    state_.gear = in.gear;
 
     // --- Fuel ---
     if (state_.fuel > 0.f)
-        state_.fuel = std::max(0.f, state_.fuel - in.throttle * FUEL_RATE * fdt);
+        state_.fuel = std::max(
+            0.f, state_.fuel - in.throttle * parameters_.fuel_rate_percent_s * fdt);
 
     return state_;
 }

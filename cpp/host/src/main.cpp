@@ -1,6 +1,7 @@
 #include <chrono>
 #include <functional>
 #include <iostream>
+#include <stdexcept>
 
 #include <boost/asio.hpp>
 #include <boost/json.hpp>
@@ -33,7 +34,29 @@ static std::string serialize_state(const VehicleState& s)
     e->set_accel(s.accel);
     e->set_fuel(s.fuel);
     e->set_rpm(s.rpm);
+    e->set_east(s.east);
+    e->set_north(s.north);
+    e->set_yaw_rate(s.yaw_rate);
+    e->set_steering_angle(s.steering_angle);
+    e->set_gear(static_cast<simcore::VehicleGear>(s.gear));
     return packet.SerializeAsString();
+}
+
+static VehicleGear parse_gear(const json::value& value)
+{
+    if (value.is_string()) {
+        const auto gear = value.as_string();
+        if (gear == "drive" || gear == "D") return VehicleGear::Drive;
+        if (gear == "reverse" || gear == "R") return VehicleGear::Reverse;
+        if (gear == "neutral" || gear == "N") return VehicleGear::Neutral;
+    } else if (value.is_int64()) {
+        switch (value.as_int64()) {
+        case -1: return VehicleGear::Reverse;
+        case 0:  return VehicleGear::Neutral;
+        case 1:  return VehicleGear::Drive;
+        }
+    }
+    throw std::invalid_argument("gear must be drive/D/1, neutral/N/0, or reverse/R/-1");
 }
 
 // Unreal JSON 입력 → VehicleInput 파싱
@@ -47,6 +70,7 @@ static VehicleInput parse_input(const std::string& msg) {
         if (obj.contains("brake"))     in.brake      = json::value_to<float>(obj.at("brake"));
         if (obj.contains("steering"))  in.steering   = json::value_to<float>(obj.at("steering"));
         if (obj.contains("handbrake")) in.handbrake  = obj.at("handbrake").as_bool();
+        if (obj.contains("gear"))      in.gear       = parse_gear(obj.at("gear"));
     }
     catch (const std::exception& e)
     {

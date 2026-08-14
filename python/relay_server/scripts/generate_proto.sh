@@ -5,13 +5,16 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+RELAY_DIR="$(dirname "$SCRIPT_DIR")"
+REPOSITORY_DIR="$(cd "$RELAY_DIR/../.." && pwd)"
+PROTOCOL_DIR="$REPOSITORY_DIR/protocol"
+GENERATED_DIR="$RELAY_DIR/generated"
 
-cd "$ROOT_DIR"
+mkdir -p "$GENERATED_DIR"
 
 python3 -m grpc_tools.protoc \
-    -I proto \
-    --python_out=generated \
-    proto/vehicle.proto
+    -I "$PROTOCOL_DIR" \
+    --python_out="$GENERATED_DIR" \
+    "$PROTOCOL_DIR/vehicle.proto"
 
-echo "generated/vehicle_pb2.py 생성 완료"
+echo "$GENERATED_DIR/vehicle_pb2.py 생성 완료"

@@ -4,7 +4,7 @@
 
 | 항목 | 값 |
 |---|---|
-| 버전 | 0.1 |
+| 버전 | 0.3 |
 | 작성일 | 2026-08-14 |
 | 대상 | R1 수동운전 및 R2/R3 자율주행 확장 기반 |
 | 관련 문서 | [일정표](./01_schedule.md), [기능표](./02_feature_matrix.md) |
@@ -24,15 +24,15 @@
 
 ```mermaid
 flowchart LR
-    UE["Unreal 입력"] -->|"JSON WebSocket :9000"| CPP["C++ Host\n단순 위·경도 적분"]
+    UE["Unreal 입력"] -->|"JSON WebSocket :9000"| CPP["C++ Host\n종방향 힘 + Bicycle 1단계"]
     CPP -->|"Protobuf / ZMQ :5555"| PY["Python Relay"]
     PY -->|"JSON WebSocket :8000/ws"| UE2["Unreal IG"]
 ```
 
 현재 구조의 한계는 다음과 같다.
 
-- C++ 물리는 속도와 heading으로 위·경도를 직접 적분하며 지면·커브·건물·동적 객체 충돌을 모른다.
-- C++와 Python에 Proto가 중복되어 스키마 불일치 가능성이 있다.
+- C++ 물리는 ENU에서 종방향 힘과 kinematic bicycle 조향을 계산하지만 6DoF·타이어 슬립·서스펜션·충돌은 아직 없다.
+- Proto는 루트 `protocol/vehicle.proto`로 통합됐지만 Envelope, ControlCommand와 Unreal 코드 생성은 아직 없다.
 - 수동운전 상태가 Python relay를 반드시 거쳐 지연과 장애 지점이 늘어난다.
 - 메시지에 simulation time, sequence, map checksum, control mode가 없다.
 - 저장소에 추적되는 Unreal 프로젝트 구현이 아직 없다.
@@ -65,7 +65,7 @@ flowchart LR
 |---|---|---|
 | `SimulationClock` | 고정 tick, substep, pause/reset, overrun 계측 | sim time, tick index |
 | `ControlMux` | 수동/자율 명령 선택, timeout, E-stop | 현재 control lease와 command |
-| `VehicleDynamicsAdapter` | 선택한 물리 SDK를 공통 인터페이스로 감춤 | 차체·휠·타이어·구동계 상태 |
+| `VehicleDynamics` | 자체 강체·조향·구동계·타이어·서스펜션 계산 | 차체·휠·타이어·구동계 상태 |
 | `CollisionWorld` | 정적·동적 충돌 검출과 해결 | collision shapes, contact state |
 | `EntityWorld` | Ego, NPC 차량, 보행자 proxy 생명주기 | authoritative entity state |
 | `MapLoader` | MapPackage 검증과 물리용 데이터 로드 | map checksum, cooked collision |
@@ -150,7 +150,7 @@ EmergencyStop > Active control lease(Manual 또는 Autonomous) > SafeStop
 ### 6.2 시간 모델
 
 - 기본 physics tick: 고정 60Hz
-- 차량 SDK 안정성에 필요하면 한 tick 안에서 설정 가능한 substep 사용
+- 자체 물리 모델의 수치 안정성에 필요하면 한 tick 안에서 설정 가능한 substep 사용
 - 기본 WorldState 발행: 60Hz
 - Unreal render tick: physics와 독립
 - 모든 명령·상태·센서에 `tick_index` 또는 `simulation_time_ns` 포함
@@ -219,7 +219,7 @@ LaneGraph는 다음 정보를 가진 방향 그래프다.
 ### 7.4 충돌 일치 절차
 
 1. 로컬 주행면과 충돌 source mesh를 Map Builder가 생성한다.
-2. C++는 source checksum을 확인하고 SDK 전용 collision cache를 cooking한다.
+2. C++는 source checksum을 확인하고 자체 충돌 월드용 표현과 cache를 생성한다.
 3. Unreal은 같은 source를 디버그 표현 및 query geometry로 import한다.
 4. 실행 handshake에서 `map_package_checksum`과 `collision_source_checksum`을 비교한다.
 5. 다르면 물리 시뮬레이션을 시작하지 않는다.
@@ -250,7 +250,7 @@ Google Photorealistic 3D Tiles는 현재 목표 PC에서 측정된 성능 문제
 
 ## 9. 차량 물리 구조
 
-### 9.1 SDK 격리
+### 9.1 자체 물리 경계
 
 ```cpp
 class IVehicleDynamics {
@@ -263,21 +263,22 @@ public:
 };
 ```
 
-실제 인터페이스는 구현 중 조정할 수 있지만, SimCore의 transport·recording·entity 코드는 특정 SDK 타입을 직접 노출하지 않는다.
+실제 인터페이스는 구현 중 조정할 수 있지만, SimCore의 transport·recording·entity 코드는 구체적인 차량 수식과 내부 상태 타입을 직접 노출하지 않는다. 이후 비교 검증이나 요구 변경으로 외부 SDK를 시험하더라도 이 경계 밖의 코드를 바꾸지 않는 것이 목적이다.
 
-### 9.2 SDK 선정 기준
+### 9.2 구현 결정과 현재 단계
 
-| 기준 | 검증 내용 |
-|---|---|
-| 빌드·배포 | Windows, 현재 compiler, CMake/vcpkg 통합 가능 여부 |
-| 차량 기능 | 휠, 조향, 브레이크, 구동계, 타이어, 서스펜션 |
-| 충돌 | triangle mesh/heightfield, convex, dynamic body 지원 |
-| 성능 | 목표 PC에서 60Hz tick과 소수 차량의 headroom |
-| 튜닝 | JSON 등 외부 파라미터와 telemetry 접근 |
-| 재현성 | 고정 tick replay 오차와 실행 안정성 |
-| 유지보수 | 라이선스, 문서, 업데이트, 디버깅 난이도 |
+D1에 외부 차량 SDK를 런타임으로 채택하지 않고 현재 C++ 서버에 차량 물리를 직접 구현하기로 결정했다. Chrono::Vehicle 10.0.0의 차량 1대·4대, 정적 벽 충돌, 반복성 결과는 비교 기준으로 보존하며 제품 의존성에는 포함하지 않는다. 상세 근거는 [ADR-006](./decisions/ADR-006-custom-vehicle-physics.md)에 기록한다.
 
-PhysX Vehicle2를 우선 검증하고, Chrono::Vehicle을 차량 정확도와 통합 비용의 비교 대상으로 둔다. 최종 선택은 D1 스파이크 결과를 아키텍처 결정 기록에 반영한다.
+현재 1단계 모델은 다음을 계산한다.
+
+- 질량과 구동력·제동력으로 종방향 가속도 계산
+- 공기저항과 구름저항
+- Drive, Neutral, Reverse와 단일 기어비 RPM 근사
+- 휠베이스와 road wheel angle을 사용하는 kinematic bicycle yaw rate
+- Local ENU east/north 위치와 WGS84 출력
+- 입력 clamp, 비정상 `dt` 방어, 정지·가속·제동·후진·회전 회귀 시험
+
+다음 단계에서 3D 강체, 바퀴별 접촉, 타이어 힘, 서스펜션, 노면과 충돌을 같은 인터페이스 안에 추가한다. Unreal은 자체 물리 결과를 표시하며 Chaos로 Ego pose를 다시 해결하지 않는다.
 
 ### 9.3 정확도의 정의
 
@@ -292,14 +293,15 @@ R1에서 “정확한 C++ 물리”는 다음을 의미한다.
 
 ## 10. 통신 아키텍처
 
-### 10.1 R1 transport
+### 10.1 R1 transport 후보
 
-R1 제안은 기존 Boost WebSocket 서버를 전이중으로 확장하고 binary Protobuf를 사용하는 것이다.
+현재 1순위 후보는 기존 Boost WebSocket 서버를 전이중 binary 채널로 확장하고, 최신성이 중요한 상태 채널을 분리하는 것이다. WebSocket binary, UDP, Protobuf, FlatBuffers의 최종 조합은 Unreal 통합 난이도·지연·패킷 크기 측정 후 별도 결정한다.
 
-- 하나의 세션에서 Unreal→C++ command와 C++→Unreal state를 교환
+- 신뢰성 채널에서 handshake·reset·설정·생명주기 메시지를 교환
+- 실시간 채널에서 Unreal→C++ command와 C++→Unreal state를 교환
 - JSON은 개발용 콘솔·디버깅에서만 허용
 - Python relay는 수동운전 경로에서 제거
-- transport는 `ITransport` 뒤에 두어 향후 local IPC 또는 ZMQ로 교체 가능
+- transport와 serialization은 각각 인터페이스 뒤에 두어 측정 결과에 따라 교체 가능
 - 센서 영상은 같은 socket에 싣지 않음
 
 ### 10.2 메시지 계층
@@ -484,7 +486,7 @@ release/
 | ADR-003 | 확정 | Python을 수동운전 필수 경로에서 제거 | 지연·장애 지점 감소, Python을 FSD 역할로 한정 |
 | ADR-004 | 확정 | MapPackage를 지도 single source of truth로 사용 | 차선·충돌·경로 데이터 불일치 방지 |
 | ADR-005 | 제안 | R1은 전이중 WebSocket+binary Protobuf | 현재 코드 재사용과 직접 연결의 구현량 균형 |
-| ADR-006 | 실험 후 결정 | PhysX Vehicle2 우선, Chrono 비교 | 정확도·실시간 성능·통합 비용을 D1에서 측정 |
+| ADR-006 | 확정 | 현재 C++ 서버에 자체 차량 물리 구현 | 차량 수식·상태·오차를 직접 설명하고 수정하는 학습·포트폴리오 목표 |
 | ADR-007 | 확정 | R1은 수동운전, 학습은 연기 | 8월 품질과 기반 구조에 집중 |
 | ADR-008 | 확정 | 핵심부 보행 중심, 주변 도로 주행 | Wall/Broad의 실제 공간 특성과 사용자 요구 반영 |
 | ADR-009 | 확정 | 센서 payload를 제어 채널과 분리 | 이미지 readback이 physics/control 지연을 만들지 않도록 함 |
@@ -494,7 +496,8 @@ release/
 | 항목 | 현재안 | 기한 |
 |---|---|---|
 | Unreal/Cesium 버전 | 호환성과 목표 PC 안정성이 확인된 고정 버전 | D1 |
-| 차량 물리 SDK | PhysX Vehicle2 우선 검증 | D1 |
+| 자체 물리 Windows 게이트 | MSVC Release 빌드와 동일 입력 회귀 시험 | D5 전 |
+| 실시간 transport·serialization | WebSocket binary/UDP와 Protobuf/FlatBuffers 비교 측정 | D3 전 |
 | 기준 차량 | 확보한 차량 에셋과 제원이 일치하는 일반 승용차 | D3 |
 | 지도 경계 | NYSE·Federal Hall과 주변 차량 루프를 포함하는 4~6블록 | D8 전 |
 | 배경 방식 | 로컬 핵심부 + 성능 통과 시 제한된 Cesium 중·원경 | D16 프로파일링 후 최종 |
@@ -514,4 +517,6 @@ release/
 
 | 버전 | 날짜 | 변경 내용 |
 |---|---|---|
+| 0.3 | 2026-08-14 | ADR-006을 자체 C++ 물리엔진 결정으로 변경하고 D1 기본 모델·공통 Proto 상태 반영 |
+| 0.2 | 2026-08-14 | Chrono::Vehicle 스파이크와 통합안을 기록; 0.3에서 런타임 채택 철회 |
 | 0.1 | 2026-08-14 | C++ 단일 물리 권한, 공통 MapPackage, 직접 통신, 센서 확장 구조 최초 작성 |

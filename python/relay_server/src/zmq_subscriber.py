@@ -24,6 +24,11 @@ def _state_to_dict(state) -> dict:
         "accel":     state.accel,
         "fuel":      state.fuel,
         "rpm":       state.rpm,
+        "east":      state.east,
+        "north":     state.north,
+        "yaw_rate":  state.yaw_rate,
+        "steering_angle": state.steering_angle,
+        "gear":      state.gear,
     }
 
 

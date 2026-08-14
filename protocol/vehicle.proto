@@ -2,6 +2,12 @@ syntax = "proto3";
 
 package simcore;
 
+enum VehicleGear {
+    VEHICLE_GEAR_NEUTRAL = 0;
+    VEHICLE_GEAR_DRIVE = 1;
+    VEHICLE_GEAR_REVERSE = 2;
+}
+
 // 단일 엔티티 상태 (CIGI Entity State Packet 기반)
 message EntityState {
     uint32 entity_id = 1;   // 엔티티 고유 ID
@@ -24,6 +30,13 @@ message EntityState {
     // 차량 상태
     float fuel      = 11;   // 연료량 (%)
     float rpm       = 12;   // RPM
+
+    // 로컬 물리 좌표와 조향 상태
+    double east          = 13; // Local ENU X (meters)
+    double north         = 14; // Local ENU Y (meters)
+    float yaw_rate       = 15; // rad/s, positive = right turn
+    float steering_angle = 16; // road wheel angle (radians)
+    VehicleGear gear     = 17;
 }
 
 // 여러 엔티티를 한 패킷에 담을 때 사용
