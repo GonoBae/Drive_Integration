@@ -17,13 +17,15 @@ cpp/host/CMakeUserPresets.json
 # ============================================================
 # Unreal Engine
 # ============================================================
-unreal/Binaries/
-unreal/Build/
-unreal/DerivedDataCache/
-unreal/Intermediate/
-unreal/Saved/
-unreal/.vs/
-unreal/*.sln
+unreal/**/Binaries/
+unreal/**/Build/
+unreal/**/DerivedDataCache/
+unreal/**/Intermediate/
+unreal/**/Saved/
+unreal/**/.vs/
+unreal/**/.idea/
+unreal/**/*.sln
+unreal/**/*.suo
 unreal/**/*.vcxproj
 unreal/**/*.vcxproj.filters
 

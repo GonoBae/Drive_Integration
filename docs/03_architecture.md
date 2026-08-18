@@ -497,7 +497,7 @@ release/
 
 | 항목 | 현재안 | 기한 |
 |---|---|---|
-| Unreal/Cesium 버전 | 호환성과 목표 PC 안정성이 확인된 고정 버전 | D1 |
+| Unreal/Cesium 버전 | Unreal Engine 5.6.1 확정, Cesium 호환 버전은 설치 시 고정 | D1 |
 | 자체 물리 Windows 게이트 | MSVC Release 빌드와 동일 입력 회귀 시험 | D5 전 |
 | UDP 전환 기준 | WebSocket binary + Protobuf 측정값이 ADR-005 기준을 넘으면 재검토 | D3 전 |
 | 기준 차량 | 확보한 차량 에셋과 제원이 일치하는 일반 승용차 | D3 |

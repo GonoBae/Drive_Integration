@@ -101,8 +101,8 @@ R1은 다음 장면을 완성하는 릴리스다.
 
 | ID | 우선순위 | 상태 | 기능 | R1 완료 기준 | 향후 재사용 |
 |---|---|---|---|---|---|
-| UE-001 | Must | 결정 | ManualInputComponent | 키보드 또는 게임패드 입력을 정규화된 ControlCommand로 전송 | AI 명령과 같은 포맷 사용 |
-| UE-002 | Must | 결정 | ExternalVehiclePawn | C++ pose와 wheel state를 표시하고 Ego Chaos 동역학은 비활성 | 외부 물리 엔티티 공통 기반 |
+| UE-001 | Must | 구현 중 | ManualInputComponent | 키보드 또는 게임패드 입력을 정규화된 ControlCommand로 전송 | AI 명령과 같은 포맷 사용 |
+| UE-002 | Must | 구현 중 | ExternalVehiclePawn | C++ pose와 wheel state를 표시하고 Ego Chaos 동역학은 비활성 | 외부 물리 엔티티 공통 기반 |
 | UE-003 | Must | 결정 | 상태 보간 | 상태 패킷 사이를 렌더링 보간하고 제한 없이 장시간 외삽하지 않음 | 네트워크 지연 완화 |
 | UE-004 | Must | 결정 | 좌표 변환 어댑터 | ENU pose를 Cesium/Unreal transform으로 일관되게 변환 | 지도 원점 변경 대응 |
 | UE-005 | Must | 결정 | 운전자 카메라와 외부 카메라 | 운전·검증·영상 촬영에 필요한 고정 camera rig 제공 | 센서와 촬영 분리 |
