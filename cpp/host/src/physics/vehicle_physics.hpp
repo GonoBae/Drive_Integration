@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <array>
 #include <mutex>
 
 enum class VehicleGear : uint8_t {
@@ -38,6 +39,39 @@ struct VehicleParameters {
     float idle_rpm                = 800.f;
     float max_rpm                 = 7000.f;
     float fuel_rate_percent_s     = 0.004f;
+    float front_track_m           = 1.58f;
+    float rear_track_m            = 1.58f;
+    float cg_height_m             = 0.55f;
+    float yaw_inertia_kg_m2       = 2500.f;
+    float pitch_inertia_kg_m2     = 2200.f;
+    float roll_inertia_kg_m2      = 700.f;
+    float attitude_spring_n_m_rad = 45000.f;
+    float attitude_damping_n_m_s_rad = 7500.f;
+    float tire_corner_stiffness_n_rad = 55000.f;
+    float tire_longitudinal_stiffness_n = 14000.f;
+    float tire_friction           = 1.0f;
+    float wheel_inertia_kg_m2     = 1.8f;
+    float low_speed_lateral_cutoff_mps = 0.5f;
+};
+
+struct Vector3State {
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+};
+
+struct WheelState {
+    uint32_t wheel_index = 0;
+    bool in_contact = true;
+    float steering_angle = 0.f;
+    float angular_speed = 0.f;
+    float normal_load = 0.f;
+    float longitudinal_slip = 0.f;
+    float slip_angle = 0.f;
+    float longitudinal_force = 0.f;
+    float lateral_force = 0.f;
+    Vector3State contact_point_enu;
+    Vector3State contact_normal_enu{0.0, 0.0, 1.0};
 };
 
 struct VehicleState {
@@ -58,6 +92,10 @@ struct VehicleState {
     float    yaw_rate  = 0.f;   // rad/s, positive = right turn
     float    steering_angle = 0.f; // road wheel angle (radians)
     VehicleGear gear   = VehicleGear::Drive;
+    Vector3State position_enu;
+    Vector3State linear_velocity_body;
+    Vector3State angular_velocity_body;
+    std::array<WheelState, 4> wheels;
 };
 
 class VehiclePhysics {
@@ -80,6 +118,14 @@ private:
     double east_m_      = 0.0;
     double north_m_     = 0.0;
     double heading_rad_ = 0.0;
+    float body_longitudinal_speed_mps_ = 0.f;
+    float body_lateral_speed_mps_ = 0.f;
+    float yaw_rate_rad_s_ = 0.f;
+    float pitch_rad_ = 0.f;
+    float roll_rad_ = 0.f;
+    float pitch_rate_rad_s_ = 0.f;
+    float roll_rate_rad_s_ = 0.f;
+    std::array<float, 4> wheel_angular_speed_rad_s_{};
 
     static constexpr float  GRAVITY          = 9.80665f;
     static constexpr float  STOP_EPSILON     = 0.01f;

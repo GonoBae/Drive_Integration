@@ -40,6 +40,12 @@ void test_world_state_envelope_roundtrip()
     state.east = 3.0;
     state.north = 4.0;
     state.gear = VehicleGear::Drive;
+    state.position_enu = {3.0, 4.0, 0.5};
+    state.linear_velocity_body = {8.5, 0.2, 0.0};
+    state.angular_velocity_body = {0.0, 0.0, 0.1};
+    state.wheels[0].wheel_index = 0;
+    state.wheels[0].in_contact = true;
+    state.wheels[0].normal_load = 3500.f;
 
     const auto bytes = simcore_host::serialize_world_state_envelope(
         state, make_metadata());
@@ -62,6 +68,12 @@ void test_world_state_envelope_roundtrip()
             "speed must roundtrip");
     require(entity.gear() == simcore::VEHICLE_GEAR_DRIVE,
             "gear must roundtrip");
+    require(entity.has_position_enu() && entity.position_enu().x() == 3.0,
+            "3D ENU position must roundtrip");
+    require(entity.wheels_size() == 4,
+            "all four wheel states must roundtrip");
+    require(entity.wheels(0).in_contact() && entity.wheels(0).normal_load() == 3500.f,
+            "wheel contact state must roundtrip");
 }
 
 void test_control_command_envelope_maps_to_input()
@@ -86,14 +98,16 @@ void test_control_command_envelope_maps_to_input()
         envelope.SerializeAsString(), &error);
 
     require(input.has_value(), "ControlCommand must parse: " + error);
-    require(std::abs(input->throttle - 0.75f) < 1e-5f,
+    require(input->sequence == 100 && input->source_id == "unreal",
+            "control envelope metadata must be exposed for ordering checks");
+    require(std::abs(input->input.throttle - 0.75f) < 1e-5f,
             "throttle must map");
-    require(std::abs(input->brake - 0.1f) < 1e-5f,
+    require(std::abs(input->input.brake - 0.1f) < 1e-5f,
             "brake must map");
-    require(std::abs(input->steering + 0.25f) < 1e-5f,
+    require(std::abs(input->input.steering + 0.25f) < 1e-5f,
             "steering must map");
-    require(input->handbrake, "handbrake must map");
-    require(input->gear == VehicleGear::Reverse, "gear must map");
+    require(input->input.handbrake, "handbrake must map");
+    require(input->input.gear == VehicleGear::Reverse, "gear must map");
 }
 
 void test_missing_gear_keeps_default_drive()
@@ -107,7 +121,7 @@ void test_missing_gear_keeps_default_drive()
         envelope.SerializeAsString(), &error);
 
     require(input.has_value(), "ControlCommand must parse: " + error);
-    require(input->gear == VehicleGear::Drive,
+    require(input->input.gear == VehicleGear::Drive,
             "missing gear must keep VehicleInput default Drive");
 }
 
@@ -124,9 +138,9 @@ void test_estop_maps_to_safe_brake()
         envelope.SerializeAsString(), &error);
 
     require(input.has_value(), "E-stop command must parse: " + error);
-    require(input->throttle == 0.f, "E-stop must clear throttle");
-    require(input->brake == 1.f, "E-stop must apply full brake");
-    require(input->handbrake, "E-stop must apply handbrake");
+    require(input->input.throttle == 0.f, "E-stop must clear throttle");
+    require(input->input.brake == 1.f, "E-stop must apply full brake");
+    require(input->input.handbrake, "E-stop must apply handbrake");
 }
 
 void test_rejects_non_envelope_payload()

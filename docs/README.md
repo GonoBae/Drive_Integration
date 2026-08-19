@@ -13,6 +13,8 @@
 | [ADR-006](./decisions/ADR-006-custom-vehicle-physics.md) | 자체 차량 물리 결정 | C++ 직접 구현 근거, 단계별 범위, 비교 시험과 재검토 조건 |
 | [ADR 목록](./decisions/README.md) | 기술 결정 색인 | 현재 ADR과 후속 번호 관리 |
 | [2026-08-14 작업일지](./worklogs/2026-08-14.md) | 일별 실행 기록 | D1 구현, 검증 결과, 남은 위험과 다음 작업 |
+| [2026-08-19 작업일지](./worklogs/2026-08-19.md) | 일별 실행 기록 | D6 4륜 물리, Unreal 통합, 지연 계측과 송신 FIFO 해결 |
+| [UE 5.6 WebSocket 입력 지연 해결 사례](./troubleshooting/ue56-websocket-growing-input-delay.md) | 문제 해결 기록 | 60Hz producer/30Hz consumer FIFO 누적, event-loop·20Hz heartbeat 수정과 진단 기준 |
 
 ## 현재 합의된 방향
 
@@ -55,6 +57,6 @@
 ## 문서 기준 정보
 
 - 최초 작성일: 2026-08-14
-- 문서 버전: 0.6
-- 프로젝트 상태: D1 자체 물리 기초 모델·공통 proto·회귀 시험 완료, D2 C++ host binary Protobuf 통신 및 공통 개발 경로 정리 완료, Unreal client·timeout 대기
+- 문서 버전: 0.7
+- 프로젝트 상태: D6 4륜 평면 물리·Unreal 직접 연결·저지연 수동입력과 UE 5.6 송신 FIFO 누적 해결 완료
 - 기준 저장소: `Drive_Integration`

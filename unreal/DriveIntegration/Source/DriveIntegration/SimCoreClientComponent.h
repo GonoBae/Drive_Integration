@@ -16,12 +16,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="SimCore|Connection") FString ServerUrl = TEXT("ws://127.0.0.1:9000");
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="SimCore|Connection") FString SourceId = TEXT("unreal-manual");
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="SimCore|Connection") FString MapPackageChecksum = TEXT("unset");
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="SimCore|Control", meta=(ClampMin="1.0", ClampMax="120.0")) float CommandRateHz = 60.0f;
+	// Input changes are sent immediately. The periodic message is only a
+	// heartbeat and deliberately stays below UE 5.6's default 30 Hz socket
+	// service rate so its internal FIFO cannot accumulate latency.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="SimCore|Control", meta=(ClampMin="1.0", ClampMax="30.0")) float CommandRateHz = 20.0f;
 	UFUNCTION(BlueprintCallable, Category="SimCore") void Connect();
 	UFUNCTION(BlueprintCallable, Category="SimCore") void Disconnect();
 	UFUNCTION(BlueprintPure, Category="SimCore") bool IsConnected() const;
 	void SetControl(float Throttle, float Brake, float Steering, bool bHandbrake);
-	bool GetLatestState(SimCoreProtocol::FVehicleState& OutState) const;
+	bool GetLatestState(SimCoreProtocol::FVehicleState& OutState, float& OutStateAgeSeconds) const;
 
 protected:
 	virtual void BeginPlay() override;
@@ -39,7 +42,14 @@ private:
 	SimCoreProtocol::FVehicleState LatestState;
 	TArray<uint8> IncomingMessage;
 	uint64 OutgoingSequence = 1;
+	double LatestStateReceiveTimeSeconds = 0.0;
+	double LastStateArrivalTimeSeconds = 0.0;
+	double MaxStateIntervalSeconds = 0.0;
+	double LatestStateWallAgeMs = 0.0;
 	float SendAccumulator = 0.0f;
+	float TelemetryAccumulator = 0.0f;
+	uint32 ReceivedStateCount = 0;
+	uint32 DroppedOutOfOrderStateCount = 0;
 	bool bHasState = false;
 	bool bConnectionPending = false;
 };

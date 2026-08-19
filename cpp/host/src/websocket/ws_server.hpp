@@ -34,6 +34,9 @@ private:
     BinaryMessageCallback                 on_message_;
     ConnectMessageFactory                 on_connect_;
     std::deque<std::shared_ptr<const std::string>> write_queue_;
+    bool                                  handshake_complete_ = false;
+    bool                                  write_in_progress_ = false;
+    bool                                  closed_ = false;
 };
 
 // WebSocket 서버 (Unreal binary control 수신 + state broadcast)
@@ -44,6 +47,7 @@ public:
 
     void start();
     void broadcast_binary(const std::string& message);
+    unsigned short port() const;
 
 private:
     void do_accept();

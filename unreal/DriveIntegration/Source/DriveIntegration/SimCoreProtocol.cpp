@@ -119,6 +119,37 @@ namespace
 
 	bool ParseEntity(TArrayView<const uint8> Data, FVehicleState& State)
 	{
+		auto ParseVector = [](TArrayView<const uint8> VectorData, FVector3d& Out) {
+			FReader VectorReader(VectorData);
+			while (!VectorReader.AtEnd()) {
+				uint32 VectorField; uint8 VectorWire;
+				if (!VectorReader.ReadTag(VectorField, VectorWire)) return false;
+				double* Value = VectorField == 1 ? &Out.X : VectorField == 2 ? &Out.Y : VectorField == 3 ? &Out.Z : nullptr;
+				if (Value) { if (VectorWire != 1 || !VectorReader.ReadFixed64(*Value)) return false; }
+				else if (!VectorReader.Skip(VectorWire)) return false;
+			}
+			return true;
+		};
+		auto ParseWheel = [](TArrayView<const uint8> WheelData, FVehicleState::FWheelState& Wheel) {
+			FReader WheelReader(WheelData);
+			while (!WheelReader.AtEnd()) {
+				uint32 WheelField; uint8 WheelWire; uint64 Integer = 0;
+				if (!WheelReader.ReadTag(WheelField, WheelWire)) return false;
+				switch (WheelField) {
+				case 1: if (WheelWire != 0 || !WheelReader.ReadVarint(Integer)) return false; Wheel.WheelIndex = static_cast<uint32>(Integer); break;
+				case 2: if (WheelWire != 0 || !WheelReader.ReadVarint(Integer)) return false; Wheel.bInContact = Integer != 0; break;
+				case 3: if (WheelWire != 5 || !WheelReader.ReadFixed32(Wheel.SteeringAngleRad)) return false; break;
+				case 4: if (WheelWire != 5 || !WheelReader.ReadFixed32(Wheel.AngularSpeedRad)) return false; break;
+				case 5: if (WheelWire != 5 || !WheelReader.ReadFixed32(Wheel.NormalLoadN)) return false; break;
+				case 6: if (WheelWire != 5 || !WheelReader.ReadFixed32(Wheel.LongitudinalSlip)) return false; break;
+				case 7: if (WheelWire != 5 || !WheelReader.ReadFixed32(Wheel.SlipAngleRad)) return false; break;
+				case 8: if (WheelWire != 5 || !WheelReader.ReadFixed32(Wheel.LongitudinalForceN)) return false; break;
+				case 9: if (WheelWire != 5 || !WheelReader.ReadFixed32(Wheel.LateralForceN)) return false; break;
+				default: if (!WheelReader.Skip(WheelWire)) return false; break;
+				}
+			}
+			return true;
+		};
 		FReader Reader(Data);
 		while (!Reader.AtEnd())
 		{
@@ -142,6 +173,21 @@ namespace
 			case 15: if (Wire != 5 || !Reader.ReadFixed32(State.YawRateRad)) return false; break;
 			case 16: if (Wire != 5 || !Reader.ReadFixed32(State.SteeringAngleRad)) return false; break;
 			case 17: if (Wire != 0 || !Reader.ReadVarint(Integer)) return false; State.Gear = static_cast<EVehicleGear>(Integer); break;
+			case 18:
+			case 19:
+			case 20: {
+				if (Wire != 2) return false; TArrayView<const uint8> VectorData;
+				if (!Reader.ReadMessage(VectorData)) return false;
+				FVector3d& Vector = Field == 18 ? State.PositionEnu : Field == 19 ? State.LinearVelocityBody : State.AngularVelocityBody;
+				if (!ParseVector(VectorData, Vector)) return false; break;
+			}
+			case 21: {
+				if (Wire != 2) return false; TArrayView<const uint8> WheelData;
+				if (!Reader.ReadMessage(WheelData)) return false;
+				FVehicleState::FWheelState Wheel;
+				if (!ParseWheel(WheelData, Wheel)) return false;
+				State.Wheels.Add(Wheel); break;
+			}
 			default: if (!Reader.Skip(Wire)) return false; break;
 			}
 		}

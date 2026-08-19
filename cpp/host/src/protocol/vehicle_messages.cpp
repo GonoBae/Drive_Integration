@@ -46,6 +46,29 @@ void fill_entity_state(simcore::EntityState& entity, const VehicleState& state)
     entity.set_yaw_rate(state.yaw_rate);
     entity.set_steering_angle(state.steering_angle);
     entity.set_gear(to_proto_gear(state.gear));
+
+    auto fill_vector = [](simcore::Vector3d* target, const Vector3State& source) {
+        target->set_x(source.x);
+        target->set_y(source.y);
+        target->set_z(source.z);
+    };
+    fill_vector(entity.mutable_position_enu(), state.position_enu);
+    fill_vector(entity.mutable_linear_velocity_body(), state.linear_velocity_body);
+    fill_vector(entity.mutable_angular_velocity_body(), state.angular_velocity_body);
+    for (const auto& source_wheel : state.wheels) {
+        auto* wheel = entity.add_wheels();
+        wheel->set_wheel_index(source_wheel.wheel_index);
+        wheel->set_in_contact(source_wheel.in_contact);
+        wheel->set_steering_angle(source_wheel.steering_angle);
+        wheel->set_angular_speed(source_wheel.angular_speed);
+        wheel->set_normal_load(source_wheel.normal_load);
+        wheel->set_longitudinal_slip(source_wheel.longitudinal_slip);
+        wheel->set_slip_angle(source_wheel.slip_angle);
+        wheel->set_longitudinal_force(source_wheel.longitudinal_force);
+        wheel->set_lateral_force(source_wheel.lateral_force);
+        fill_vector(wheel->mutable_contact_point_enu(), source_wheel.contact_point_enu);
+        fill_vector(wheel->mutable_contact_normal_enu(), source_wheel.contact_normal_enu);
+    }
 }
 
 void fill_envelope(simcore::Envelope& envelope, const EnvelopeMetadata& metadata)
@@ -82,7 +105,7 @@ std::string serialize_world_state_envelope(const VehicleState& state,
     return envelope.SerializeAsString();
 }
 
-std::optional<VehicleInput> parse_control_command_envelope(
+std::optional<ParsedControlCommand> parse_control_command_envelope(
     std::string_view data,
     std::string* error)
 {
@@ -109,14 +132,20 @@ std::optional<VehicleInput> parse_control_command_envelope(
 
     const auto& command = envelope.control_command();
 
-    VehicleInput input;
-    if (command.estop() || command.mode() == simcore::CONTROL_MODE_ESTOP) {
+    ParsedControlCommand parsed;
+    parsed.sequence = envelope.sequence();
+    parsed.source_id = envelope.source_id();
+    parsed.map_package_checksum = envelope.map_package_checksum();
+    parsed.client_time_ns = command.client_time_ns();
+    parsed.estop = command.estop() || command.mode() == simcore::CONTROL_MODE_ESTOP;
+    VehicleInput& input = parsed.input;
+    if (parsed.estop) {
         input.throttle = 0.f;
         input.brake = 1.f;
         input.steering = 0.f;
         input.handbrake = true;
         input.gear = VehicleGear::Drive;
-        return input;
+        return parsed;
     }
 
     input.throttle = command.throttle();
@@ -127,7 +156,7 @@ std::optional<VehicleInput> parse_control_command_envelope(
         input.gear = to_host_gear(command.gear());
     }
 
-    return input;
+    return parsed;
 }
 
 } // namespace simcore_host

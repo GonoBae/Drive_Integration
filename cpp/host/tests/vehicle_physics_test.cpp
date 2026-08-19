@@ -42,6 +42,10 @@ void test_idle_and_handbrake_are_stable()
     require(state.speed == 0.f, "handbrake at rest must not create reverse speed");
     require(state.east == 0.0 && state.north == 0.0,
             "stationary vehicle must not move");
+    for (const auto& wheel : state.wheels) {
+        require(wheel.angular_speed == 0.f,
+                "stationary chassis must publish zero wheel angular speed");
+    }
 }
 
 void test_throttle_accelerates_and_input_is_clamped()
@@ -86,6 +90,10 @@ void test_service_brake_stops_without_reversing()
     }
 
     require(vehicle.get_state().speed == 0.f, "service brake must stop the vehicle");
+    for (const auto& wheel : vehicle.get_state().wheels) {
+        require(wheel.angular_speed == 0.f,
+                "stopped vehicle must not publish residual wheel rotation");
+    }
 }
 
 void test_reverse_requires_reverse_gear()
@@ -123,6 +131,43 @@ void test_bicycle_model_turns_right()
     require(state.east > 0.0, "right turn from north must move east");
 }
 
+void test_four_wheel_contact_and_force_limits()
+{
+    auto vehicle = make_vehicle();
+    VehicleInput input;
+    input.throttle = 0.7f;
+    input.steering = 0.2f;
+    vehicle.set_input(input);
+    advance(vehicle, 120);
+
+    const auto state = vehicle.get_state();
+    require(state.linear_velocity_body.x > 0.0,
+            "body-frame longitudinal velocity must be published");
+    require(state.position_enu.y > 0.0,
+            "3D ENU position must track north travel");
+    for (std::size_t index = 0; index < state.wheels.size(); ++index) {
+        const auto& wheel = state.wheels[index];
+        require(wheel.in_contact, "flat-ground wheel must remain in contact");
+        require(wheel.normal_load > 0.f, "contact wheel must carry normal load");
+        require(std::isfinite(wheel.slip_angle), "wheel slip angle must be finite");
+        const float force = std::hypot(wheel.longitudinal_force, wheel.lateral_force);
+        require(force <= wheel.normal_load + 1e-3f,
+                "tire force must remain inside the friction circle");
+        if (index < 2) {
+            require(wheel.steering_angle > 0.f, "front wheels must steer right");
+        } else {
+            require(wheel.steering_angle == 0.f, "rear wheels must not steer");
+        }
+    }
+    require(std::abs(state.wheels[2].longitudinal_slip) > 1e-5f ||
+            std::abs(state.wheels[3].longitudinal_slip) > 1e-5f,
+            "driven wheels must publish longitudinal slip under throttle");
+    require(state.wheels[0].angular_speed == state.wheels[1].angular_speed,
+            "front left/right wheel angular speeds must be synchronized");
+    require(state.wheels[2].angular_speed == state.wheels[3].angular_speed,
+            "rear left/right wheel angular speeds must be synchronized");
+}
+
 } // namespace
 
 int main()
@@ -133,6 +178,7 @@ int main()
         test_service_brake_stops_without_reversing();
         test_reverse_requires_reverse_gear();
         test_bicycle_model_turns_right();
+        test_four_wheel_contact_and_force_limits();
         std::cout << "vehicle_physics_tests: all tests passed\n";
         return 0;
     } catch (const std::exception& error) {

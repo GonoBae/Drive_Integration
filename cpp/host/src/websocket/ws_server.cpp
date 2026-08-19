@@ -26,14 +26,19 @@ void WsSession::start() {
     ws_.async_accept([self = shared_from_this()](beast::error_code ec) {
         if (ec) {
             std::cerr << "[WS] accept error: " << ec.message() << "\n";
+            self->closed_ = true;
+            self->write_queue_.clear();
             return;
         }
         std::cout << "[WS] Unreal connected\n";
 
+        self->handshake_complete_ = true;
         self->ws_.binary(true);
         self->do_read();
 
-        // 접속 즉시 현재 authoritative state 전송
+        // 접속 직전 쌓인 상태보다 accept 완료 시점의 authoritative state가
+        // 더 최신이다. HTTP 101 응답이 완료된 뒤 첫 binary frame을 보낸다.
+        self->write_queue_.clear();
         auto initial_message = self->on_connect_();
         if (!initial_message.empty()) {
             self->send_binary(std::make_shared<const std::string>(
@@ -43,16 +48,30 @@ void WsSession::start() {
 }
 
 void WsSession::send_binary(std::shared_ptr<const std::string> message) {
-    const bool write_in_progress = !write_queue_.empty();
+    if (closed_) {
+        return;
+    }
 
     // State broadcast is latest-wins; keep the write in progress and one pending update.
-    if (write_in_progress && write_queue_.size() >= 2) {
+    if (write_in_progress_ && write_queue_.size() >= 2) {
         write_queue_.back() = std::move(message);
         return;
     }
 
+    // Before async_accept completes there must be no WebSocket writes. Beast's
+    // accept operation owns the HTTP 101 response; writing a frame concurrently
+    // can put binary bytes before that response and corrupt the handshake.
+    if (!handshake_complete_) {
+        if (write_queue_.empty()) {
+            write_queue_.push_back(std::move(message));
+        } else {
+            write_queue_.back() = std::move(message);
+        }
+        return;
+    }
+
     write_queue_.push_back(std::move(message));
-    if (!write_in_progress) {
+    if (!write_in_progress_) {
         do_write();
     }
 }
@@ -63,6 +82,7 @@ void WsSession::do_read() {
         [self = shared_from_this()](beast::error_code ec, std::size_t) {
             if (ec) {
                 std::cout << "[WS] Unreal disconnected\n";
+                self->closed_ = true;
                 return;
             }
 
@@ -81,16 +101,21 @@ void WsSession::do_read() {
 }
 
 void WsSession::do_write() {
-    if (write_queue_.empty()) {
+    if (closed_ || !handshake_complete_ || write_in_progress_ || write_queue_.empty()) {
         return;
     }
 
+    write_in_progress_ = true;
     ws_.binary(true);
     auto message = write_queue_.front();
     ws_.async_write(net::buffer(*message),
         [self = shared_from_this(), message](beast::error_code ec, std::size_t) {
+            self->write_in_progress_ = false;
             if (ec) {
-                std::cerr << "[WS] write error: " << ec.message() << "\n";
+                if (!self->closed_ && ec != net::error::operation_aborted) {
+                    std::cerr << "[WS] write error: " << ec.message() << "\n";
+                }
+                self->closed_ = true;
                 self->write_queue_.clear();
                 return;
             }
@@ -124,6 +149,10 @@ void WsServer::broadcast_binary(const std::string& message) {
             session->send_binary(shared_message);
         }
     }
+}
+
+unsigned short WsServer::port() const {
+    return acceptor_.local_endpoint().port();
 }
 
 // 연결 대기

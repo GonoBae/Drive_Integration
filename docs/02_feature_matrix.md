@@ -4,8 +4,8 @@
 
 | 항목 | 값 |
 |---|---|
-| 버전 | 0.5 |
-| 작성일 | 2026-08-14 |
+| 버전 | 0.8 |
+| 작성일 | 2026-08-19 |
 | R1 | 2026-08-31 수동운전 버티컬 슬라이스 |
 | R2 | 자율주행 환경·경로계획 기반, 일정 추후 확정 |
 | R3 | 학습·평가 기반 FSD 연구, 일정 추후 확정 |
@@ -20,6 +20,7 @@
 | Could | 선택 기능 또는 품질 개선 |
 | Future | R2/R3 범위 |
 | 결정 | 구현 방향이 합의됨 |
+| 구현 | 현재 단계의 코드와 자동·통합 시험이 완료 기준을 충족 |
 | 구현 중 | 일부 코드와 시험이 존재하지만 R1 완료 기준은 아직 미충족 |
 | 실험 | 정해진 스파이크 결과로 상세 구현을 확정 |
 | 제안 | 사용자 확인이 필요한 항목 |
@@ -52,6 +53,16 @@ R1은 다음 장면을 완성하는 릴리스다.
 - 실차 계측 데이터 기반 정밀 차량 동정
 - Google Photorealistic 3D Tiles 의존
 
+### 3.3 8월 31일 확장 범위
+
+8월 27일까지 모든 Must 기능과 인수 게이트를 Core RC로 먼저 완료한다. 그 이후에만 다음 Should 기능을 추가하며, 핵심 성능·안정성을 깨면 해당 확장 기능만 제외한다.
+
+- 속도·기어·FPS·연결·state age·SafeStop을 한 화면에 표시하는 운전 HUD
+- 운전자·추적·고정·자유 카메라 전환
+- reset·reconnect·scenario restart 퀵 액션과 데모 시나리오 프리셋
+- 충돌·차선·휠 접촉·타이어 힘 디버그 오버레이
+- replay timeline, play/pause, 배속, seek, 카메라 조작
+
 ## 4. 기능 상세
 
 ### 4.1 지도와 환경
@@ -74,13 +85,13 @@ R1은 다음 장면을 완성하는 릴리스다.
 |---|---|---|---|---|---|
 | PHY-001 | Must | 결정 | C++ 최종 물리 권한 | Ego 및 충돌 참여 엔티티의 최종 pose를 C++가 확정 | 수동·자율 모드 동일 |
 | PHY-002 | Must | 구현 중 | 자체 C++ 차량 동역학 코어 | 외부 차량 SDK 없이 단계별 모델과 회귀 시험이 macOS·Windows에서 동작 | 수식·파라미터·상태를 직접 확장 가능 |
-| PHY-003 | Must | 구현 중 | 로컬 ENU 물리 좌표 | 위·경도를 직접 적분하지 않고 meter 단위 ENU에서 계산 | GNSS 변환과 대규모 월드 대응 |
-| PHY-004 | Must | 결정 | 고정 시뮬레이션 tick | 렌더 FPS 변화와 무관하게 기본 60Hz로 진행; substep 설정 가능 | headless·재생·학습에 재사용 |
-| PHY-005 | Must | 구현 중 | 기본 차량 동역학 | 현재 종방향 힘·기어·bicycle 모델에서 6DoF, 바퀴별 타이어, 서스펜션까지 확장 | 차량 설정 교체로 다른 차종 지원 |
+| PHY-003 | Must | 구현 | 로컬 ENU 물리 좌표 | 위·경도를 직접 적분하지 않고 meter 단위 ENU에서 계산 | GNSS 변환과 대규모 월드 대응 |
+| PHY-004 | Must | 구현 | 고정 시뮬레이션 tick | 렌더 FPS 변화와 무관하게 기본 60Hz로 진행; substep 설정 가능 | headless·재생·학습에 재사용 |
+| PHY-005 | Must | 구현 중 | 기본 차량 동역학 | 4륜 평면 접촉·종횡 타이어 힘·차체 roll/pitch 응답에서 지형 raycast와 서스펜션으로 확장 | 차량 설정 교체로 다른 차종 지원 |
 | PHY-006 | Must | 결정 | 정적 충돌 | 지면, 커브, 벽과 지속 관통하지 않고 C++에서 접촉 해결 | 시나리오 지도 공통 |
 | PHY-007 | Must | 결정 | 동적 충돌 프록시 | NPC OBB와 보행자 capsule이 같은 tick 기준으로 충돌 월드에 존재 | 향후 다중 에이전트 |
 | PHY-008 | Must | 결정 | 노면 재질·마찰 | MapPackage의 표면 ID로 마찰 파라미터를 선택 | 젖은 노면 등 시나리오 확장 |
-| PHY-009 | Must | 구현 중 | 입력 안전장치 | 입력 범위 clamp, 250ms 기본 timeout, 연결 중단 시 감속·정지 | 자율주행 fail-safe |
+| PHY-009 | Must | 구현 | 입력 안전장치 | 입력 범위 clamp, 250ms 기본 timeout, 연결 중단 시 감속·정지 | 자율주행 fail-safe |
 | PHY-010 | Must | 결정 | 물리 파라미터 파일화 | 차량 수치가 코드가 아닌 버전 관리 설정 파일에 존재 | 차량 교체·튜닝·시험 |
 | PHY-011 | Must | 구현 중 | 물리 회귀 시험 | 직진, 정지, 회전, 경사, 충돌, replay 시험 자동 실행 | 수식·파라미터 변경 검증 |
 | PHY-012 | Future | 연기 | 실차 파라미터 동정 | 대상 차량 계측 데이터와 기준 주행에 맞춰 오차 검증 | 차량별 현실성 향상 |
@@ -89,26 +100,30 @@ R1은 다음 장면을 완성하는 릴리스다.
 
 | ID | 우선순위 | 상태 | 기능 | R1 완료 기준 | 향후 재사용 |
 |---|---|---|---|---|---|
-| NET-001 | Must | 구현 중 | Unreal↔C++ 직접 연결 | Python relay 없이 명령과 상태가 양방향 전달됨 | 지연과 장애 지점 감소 |
-| NET-002 | Must | 구현 중 | 단일 공통 Protobuf 스키마 | C++·Python 생성물이 루트 `protocol/`의 하나의 원본에서 생성되고 Unreal 생성 대기 | 스키마 중복 제거 |
-| NET-003 | Must | 구현 중 | 메시지 Envelope | schema version, sequence, simulation time, source, map checksum 포함 | 기록·재생·오류 진단 |
+| NET-001 | Must | 구현 | Unreal↔C++ 직접 연결 | Python relay 없이 명령과 상태가 양방향 전달됨 | 지연과 장애 지점 감소 |
+| NET-002 | Must | 구현 | 단일 공통 Protobuf 스키마 | C++·Python 생성물과 Unreal wire adapter가 루트 `protocol/`의 하나의 필드 계약을 사용 | 스키마 중복 제거 |
+| NET-003 | Must | 구현 | 메시지 Envelope | schema version, sequence, simulation time, source, map checksum 포함 | 기록·재생·오류 진단 |
 | NET-004 | Must | 결정 | 재연결·중복·순서 처리 | 오래되거나 중복된 command를 버리고 재연결 후 handshake 수행 | 네트워크 견고성 |
 | NET-005 | Must | 결정 | MapPackage handshake | Unreal과 C++ 체크섬이 다르면 주행 시작을 거부하고 이유 표시 | 충돌 불일치 방지 |
-| NET-006 | Must | 구현 중 | WebSocket binary + Protobuf transport | JSON 없이 ControlCommand와 WorldState가 C++↔Unreal 사이에서 전이중 전달됨 | 이후 측정 결과에 따라 UDP/IPC로 교체 가능 |
+| NET-006 | Must | 구현 | WebSocket binary + Protobuf transport | JSON 없이 ControlCommand와 WorldState가 C++↔Unreal 사이에서 전이중 전달되고 HTTP 101보다 payload가 선행하지 않음 | 이후 측정 결과에 따라 UDP/IPC로 교체 가능 |
 | NET-007 | Future | 연기 | 고대역 센서 transport | 이미지·LiDAR는 control/state와 분리된 shared memory/전용 채널 사용 | FSD 처리량 확보 |
+| NET-008 | Must | 구현 중 | 저지연 60Hz 전달 | Windows 로컬 state 간격 p95 18.5ms 이하, 입력 변화 즉시 전송; packaged build에서 command/state age를 재측정 | LAN·다중 엔티티 확장 시 transport 판단 기준 |
 
 ### 4.4 Unreal IG와 수동운전
 
 | ID | 우선순위 | 상태 | 기능 | R1 완료 기준 | 향후 재사용 |
 |---|---|---|---|---|---|
-| UE-001 | Must | 구현 중 | ManualInputComponent | 키보드 또는 게임패드 입력을 정규화된 ControlCommand로 전송 | AI 명령과 같은 포맷 사용 |
-| UE-002 | Must | 구현 중 | ExternalVehiclePawn | C++ pose와 wheel state를 표시하고 Ego Chaos 동역학은 비활성 | 외부 물리 엔티티 공통 기반 |
-| UE-003 | Must | 결정 | 상태 보간 | 상태 패킷 사이를 렌더링 보간하고 제한 없이 장시간 외삽하지 않음 | 네트워크 지연 완화 |
+| UE-001 | Must | 구현 | 수동 입력 경로(현재 Pawn 내장) | W/S/A/D·Space 입력을 정규화하고 변화 시 즉시, 유지 중 20Hz lease heartbeat로 전송하며 장시간 FIFO 지연이 증가하지 않음 | 향후 ManualInputComponent로 분리해 AI 명령과 같은 포맷 사용 |
+| UE-002 | Must | 구현 | ExternalVehiclePawn | C++ pose와 4개 wheel state를 표시하고 Ego Chaos 동역학은 비활성 | 외부 물리 엔티티 공통 기반 |
+| UE-003 | Must | 구현 중 | 상태 표시·제한 외삽 | 최신 body velocity로 최대 50ms만 dead reckoning하고 이후 transform을 고정; packet gap 경고·재연결은 후속 | 네트워크 지연 완화 |
 | UE-004 | Must | 결정 | 좌표 변환 어댑터 | ENU pose를 Cesium/Unreal transform으로 일관되게 변환 | 지도 원점 변경 대응 |
-| UE-005 | Must | 결정 | 운전자 카메라와 외부 카메라 | 운전·검증·영상 촬영에 필요한 고정 camera rig 제공 | 센서와 촬영 분리 |
-| UE-006 | Must | 결정 | 디버그 HUD | 연결, sim tick, packet age, 속도, map checksum, collision 상태 표시 | 통합 문제 진단 |
-| UE-007 | Should | 제안 | 충돌·차선 디버그 오버레이 | C++ 충돌 proxy와 LaneGraph를 Unreal 화면에서 켜고 끌 수 있음 | 지도 보정과 FSD 디버깅 |
+| UE-005 | Must | 결정 | 운전자 카메라와 외부 카메라 | 운전용 카메라와 영상·검증용 외부 고정 camera rig 제공 | 센서와 촬영 분리 |
+| UE-006 | Must | 결정 | 핵심 디버그 HUD | 연결, sim tick, packet age, 속도, map checksum, collision, SafeStop 상태 표시 | 통합 문제 진단 |
+| UE-007 | Should | 결정 | 충돌·차선·휠 디버그 오버레이 | C++ 충돌 proxy, LaneGraph, 휠 접촉, 타이어 힘을 Unreal 화면에서 개별로 켜고 끌 수 있음 | 지도·차량 물리 보정과 FSD 디버깅 |
 | UE-008 | Must | 결정 | 패키지 실행 설정 | 개발 PC가 아닌 목표 Windows PC에서 서버 주소와 지도 설정을 외부 파일로 지정 | 배포 재사용 |
+| UE-009 | Should | 결정 | 운영 퀵 액션과 데모 프리셋 | reset·reconnect·scenario restart를 화면에서 실행하고 대표 데모 시나리오를 선택해 같은 초기 상태로 시작 | 반복 QA와 포트폴리오 시연 |
+| UE-010 | Should | 결정 | 4종 카메라 모드 | 운전자·추적·고정·자유 카메라를 실행 중 전환하고 조작과 replay 촬영에 사용 | 센서와 촬영 분리 |
+| UE-011 | Should | 결정 | 통합 운전 대시보드 | 속도·기어·FPS·연결·state age·SafeStop을 운전 중 한 화면에서 확인 | 데모 운전과 성능·지연 진단 |
 
 ### 4.5 신호, 차량 AI, 보행자
 
@@ -134,6 +149,7 @@ R1은 다음 장면을 완성하는 릴리스다.
 | REC-001 | Must | 결정 | 주행 기록 | 명령, 상태, 이벤트, map·vehicle config checksum 저장 | 회귀 시험과 데이터셋 |
 | REC-002 | Must | 결정 | 결정적 재생 | 동일 빌드·설정에서 최종 pose 오차가 허용치 안에 있음 | 버그 재현과 영상 촬영 |
 | REC-003 | Should | 결정 | replay 기반 영상 | 실시간 플레이와 촬영을 분리해 동일 주행을 재생 가능 | Movie Render Queue 촬영 |
+| REC-004 | Should | 결정 | replay 조작 UI | timeline, play/pause, 배속, seek, 카메라를 조작해 기록을 탐색·촬영 가능 | 회귀 분석과 데이터 검수 |
 
 ### 4.7 자율주행 확장
 
@@ -164,13 +180,14 @@ R1은 다음 장면을 완성하는 릴리스다.
 | NFR-009 | Must | 관측 가능성 | tick overrun, packet age, sequence gap, collision, reconnect를 구조화 로그로 기록 |
 | NFR-010 | Must | 라이선스 | 지도와 배포 에셋의 출처·라이선스·attribution 기록 |
 | NFR-011 | Should | CI 회귀 | C++ 단위 시험과 Proto/MapPackage schema 검증을 명령 하나로 실행 |
+| NFR-012 | Must | 로컬 제어 반응 | 목표 Windows PC의 loopback에서 state 간격 p95 18.5ms 이하, 최대 25ms 이하, 입력→첫 상태 변화 50ms 이하 |
 
 ## 6. R1 인수 시험
 
 | 시험 ID | 시나리오 | 성공 조건 | 관련 기능 |
 |---|---|---|---|
 | AT-01 | 서버 실행 및 지도 handshake | 동일 체크섬일 때 시작, 불일치일 때 명확히 거부 | MAP-001, NET-005 |
-| AT-02 | 수동 가속·제동·조향 | 입력이 C++ 고정 tick에 반영되고 Unreal에 표시 | PHY-004~005, UE-001~003 |
+| AT-02 | 수동 가속·제동·조향 | 입력이 C++ 고정 tick에 반영되고 Unreal에 표시되며 NFR-012 지연 기준 통과 | PHY-004~005, UE-001~003, NFR-012 |
 | AT-03 | 커브·벽 충돌 | 지속 관통하지 않고 C++ 결과와 Unreal 표시가 일치 | PHY-006, NFR-006 |
 | AT-04 | NPC·보행자 상호작용 | 동적 proxy가 충돌 월드와 화면에서 같은 엔티티를 나타냄 | PHY-007, TRA-003~005 |
 | AT-05 | 신호 동작 | 차량과 보행자가 자신의 신호에 맞춰 정지·이동 | TRA-001~004 |
@@ -189,12 +206,16 @@ R1은 다음 장면을 완성하는 릴리스다.
 | DEC-F04 | 대상 차량 종류와 기본 제원 | D3 | 물리는 동작하지만 현실성 검증 기준이 불명확 |
 | DEC-F05 | Wall/Broad 정확한 지도 경계와 주행 루프 | D8 이전 | LaneGraph와 환경 범위 변동 |
 | DEC-F06 | 사용할 건물·차량·보행자 에셋과 라이선스 | D8 이전 | 영상 품질 또는 배포 가능성 저하 |
-| DEC-F07 | 주말·공휴일 포함 실제 작업 가능 여부 | 즉시 | 8월 31일 또는 9월 9일로 완료일 변동 |
+| DEC-F07 | **완료: 8월 20일 이후 주말을 제외하고 AI 협업 2배 기준 적용** | 2026-08-19 결정 | 핵심 R1은 8월 27일, 확장 포함 최종 릴리스는 8월 31일로 관리 |
+| DEC-F08 | **완료: Core RC 통과 후 운전 UX·카메라·디버그·replay·데모 기능 추가** | 2026-08-19 결정 | Must 회귀 시 해당 Should 확장만 제외하고 핵심 릴리스를 보호 |
 
 ## 8. 변경 이력
 
 | 버전 | 날짜 | 변경 내용 |
 |---|---|---|
+| 0.8 | 2026-08-19 | 8월 27일 Core RC 이후 운전 HUD·4종 카메라·복구 퀵 액션·디버그 오버레이·replay 조작·데모 프리셋 확장 범위 확정 |
+| 0.7 | 2026-08-19 | UE 5.6 command FIFO 누적 해결, event-loop service와 20Hz lease heartbeat 완료 기준 반영 |
+| 0.6 | 2026-08-19 | Unreal 직접 연결·Envelope·binary transport 완료 상태와 저지연 60Hz 전달·제한 외삽·NFR-012 반영 |
 | 0.5 | 2026-08-14 | C++ host의 binary Protobuf ControlCommand 수신과 WorldState broadcast 구현 상태 반영 |
 | 0.4 | 2026-08-14 | R1 통신 방식을 WebSocket binary + Protobuf로 확정하고 JSON 제거 방향 반영 |
 | 0.3 | 2026-08-14 | PHY-002와 DEC-F02를 자체 C++ 물리엔진 결정으로 변경하고 D1 구현 상태 반영 |

@@ -26,6 +26,19 @@ namespace SimCoreProtocol
 
 	struct FVehicleState
 	{
+		struct FWheelState
+		{
+			uint32 WheelIndex = 0;
+			bool bInContact = false;
+			float SteeringAngleRad = 0.0f;
+			float AngularSpeedRad = 0.0f;
+			float NormalLoadN = 0.0f;
+			float LongitudinalSlip = 0.0f;
+			float SlipAngleRad = 0.0f;
+			float LongitudinalForceN = 0.0f;
+			float LateralForceN = 0.0f;
+		};
+
 		uint32 EntityId = 0;
 		double Timestamp = 0.0;
 		double Latitude = 0.0;
@@ -43,6 +56,10 @@ namespace SimCoreProtocol
 		EVehicleGear Gear = EVehicleGear::Drive;
 		uint64 Sequence = 0;
 		uint64 SimulationTimeNs = 0;
+		FVector3d PositionEnu = FVector3d::ZeroVector;
+		FVector3d LinearVelocityBody = FVector3d::ZeroVector;
+		FVector3d AngularVelocityBody = FVector3d::ZeroVector;
+		TArray<FWheelState> Wheels;
 	};
 
 	DRIVEINTEGRATION_API TArray<uint8> SerializeControlEnvelope(

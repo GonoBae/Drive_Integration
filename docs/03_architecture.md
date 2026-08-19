@@ -4,8 +4,8 @@
 
 | 항목 | 값 |
 |---|---|
-| 버전 | 0.5 |
-| 작성일 | 2026-08-14 |
+| 버전 | 0.7 |
+| 작성일 | 2026-08-19 |
 | 대상 | R1 수동운전 및 R2/R3 자율주행 확장 기반 |
 | 관련 문서 | [일정표](./01_schedule.md), [기능표](./02_feature_matrix.md) |
 
@@ -17,6 +17,7 @@
 4. 지도·차선·충돌 데이터를 한 번 생성하여 C++·Unreal·Python이 함께 사용한다.
 5. 수동 입력과 자율주행 명령이 동일한 제어 인터페이스를 사용한다.
 6. Wall/Broad에 종속된 코드는 데이터 패키지로 격리하여 다른 지역과 트랙에 재사용한다.
+7. 로컬 수동운전은 60Hz 상태 전달의 jitter와 표시 지연을 측정하고 제한된 예측으로 보완한다.
 
 ## 3. 현재 구조와 목표 구조
 
@@ -24,19 +25,21 @@
 
 ```mermaid
 flowchart LR
-    UE["Unreal client\n프로젝트 미생성"] <-->|"WebSocket binary Protobuf :9000"| CPP["C++ Host\n종방향 힘 + Bicycle 1단계"]
+    INPUT["Unreal W/S/A/D·Space\n변화 즉시 + 60Hz 유지 명령"] --> UE["UE 5.6 ExternalVehiclePawn\n최대 50ms dead reckoning"]
+    UE <-->|"WebSocket binary Protobuf :9000"| CPP["C++ Host 60Hz\n4륜 평면 접촉 + SafeStop"]
     CPP -->|"Protobuf / ZMQ :5555\nobserver"| PY["Python Relay"]
     PY -->|"JSON WebSocket :8000/ws\nobserver"| DBG["Debug clients"]
 ```
 
 현재 구조의 한계는 다음과 같다.
 
-- C++ 물리는 ENU에서 종방향 힘과 kinematic bicycle 조향을 계산하지만 6DoF·타이어 슬립·서스펜션·충돌은 아직 없다.
-- Proto는 루트 `protocol/vehicle.proto`로 통합됐고 Envelope, ControlCommand, WorldState가 추가됐지만 Unreal 코드 생성은 아직 없다.
-- C++ host는 WebSocket binary Protobuf로 ControlCommand를 받고 WorldState를 직접 broadcast하지만, 저장소에 Unreal client 구현이 아직 없다.
-- simulation time과 sequence는 Envelope에 실리지만 절대 deadline 기반 SimulationClock, command timeout, 재연결 handshake는 아직 없다.
+- C++ 물리는 4륜의 longitudinal slip·slip angle·friction circle과 차체 yaw/roll/pitch 응답을 계산하지만 접촉면은 아직 z=0 평면이다.
+- Proto는 루트 `protocol/vehicle.proto`로 통합됐고 C++·Python 생성물과 Unreal 경량 wire adapter가 같은 필드 계약을 사용한다.
+- C++ host는 절대 deadline 60Hz clock, command source/sequence 검사, 250ms SafeStop과 E-stop latch를 적용한다.
+- WebSocket 세션은 HTTP 101 accept 완료 전 state frame을 쓰지 않으며, 전송 중 state queue는 latest-wins로 제한한다.
+- Unreal client는 입력 변화를 즉시 보내고 WorldState의 pose·body velocity·4개 wheel state를 표시한다.
 - map checksum은 필드만 있고 현재 기본값은 `unset`이다.
-- 저장소에 추적되는 Unreal 프로젝트 구현이 아직 없다.
+- 재연결 handshake, packet gap HUD, MapPackage 지형·충돌, 실제 suspension stroke는 아직 없다.
 
 ### 3.2 목표 구조
 
@@ -270,16 +273,19 @@ public:
 
 D1에 외부 차량 SDK를 런타임으로 채택하지 않고 현재 C++ 서버에 차량 물리를 직접 구현하기로 결정했다. Chrono::Vehicle 10.0.0의 차량 1대·4대, 정적 벽 충돌, 반복성 결과는 비교 기준으로 보존하며 제품 의존성에는 포함하지 않는다. 상세 근거는 [ADR-006](./decisions/ADR-006-custom-vehicle-physics.md)에 기록한다.
 
-현재 1단계 모델은 다음을 계산한다.
+현재 2단계 모델은 다음을 계산한다.
 
 - 질량과 구동력·제동력으로 종방향 가속도 계산
 - 공기저항과 구름저항
 - Drive, Neutral, Reverse와 단일 기어비 RPM 근사
-- 휠베이스와 road wheel angle을 사용하는 kinematic bicycle yaw rate
+- 4개 바퀴의 평면 접촉점, normal load, steering, angular speed
+- wheel inertia와 longitudinal slip 기반 종력, slip angle 기반 횡력, friction circle 제한
+- 가감속·선회에 따른 종·횡 normal-load transfer, 후륜 구동과 4륜 제동
+- yaw 관성 및 suspension-equivalent spring/damper 기반 roll/pitch 응답
 - Local ENU east/north 위치와 WGS84 출력
 - 입력 clamp, 비정상 `dt` 방어, 정지·가속·제동·후진·회전 회귀 시험
 
-다음 단계에서 3D 강체, 바퀴별 접촉, 타이어 힘, 서스펜션, 노면과 충돌을 같은 인터페이스 안에 추가한다. Unreal은 자체 물리 결과를 표시하며 Chaos로 Ego pose를 다시 해결하지 않는다.
+다음 단계에서 MapPackage 지형 raycast, 실제 suspension stroke, 경사·노면 마찰과 충돌을 같은 인터페이스 안에 추가한다. 현재 바퀴 접촉은 z=0 평면을 전제로 한다. Unreal은 자체 물리 결과를 표시하며 Chaos로 Ego pose를 다시 해결하지 않는다.
 
 ### 9.3 정확도의 정의
 
@@ -332,10 +338,37 @@ Envelope
 ### 10.3 상태 표시
 
 - C++는 매 physics tick에 immutable snapshot을 생성한다.
-- Unreal은 짧은 상태 버퍼를 사용해 render frame에서 보간한다.
-- 최신 상태 이후의 외삽은 짧은 제한 시간만 허용하고, 제한을 넘으면 상태를 고정하고 연결 경고를 표시한다.
+- 현재 Unreal 구현은 snapshot 수신 시각과 body-frame 선·각속도로 render frame의 pose를 예측한다.
+- 외삽은 `MaxExtrapolationSeconds=0.05`로 제한하며, 50ms를 넘으면 마지막 제한 pose를 유지한다.
+- 기존 `VInterpTo/RInterpTo` 추종 보간은 설정값상 약 80~100ms의 추가 추종 지연을 만들 수 있어 제거했다.
+- D11에서 packet gap 경고, reconnect 후 full snapshot, 필요 시 짧은 interpolation buffer를 추가한다.
 - Unreal collision response가 Ego transform을 변경하지 않는다.
 - 시각 오차는 C++ pose와 보간 기준 pose를 함께 HUD에 표시하여 측정한다.
+
+### 10.4 로컬 저지연 경로와 측정
+
+60Hz 물리와 네트워크 I/O는 같은 단일 `io_context`에서 순서대로 처리한다. 로컬 수동운전 경로는 다음 규칙을 사용한다.
+
+- 입력 값이 바뀌면 다음 periodic send를 기다리지 않고 즉시 `ControlCommand`를 보낸다.
+- 입력 유지 중에는 20Hz heartbeat로 250ms timeout lease를 갱신한다. 물리와 WorldState는 60Hz를 유지한다.
+- Windows UE 5.6 client는 libWebSockets event-loop service를 사용한다. polling fallback은 240Hz이며, producer가 consumer보다 빨라지는 무제한 command FIFO를 허용하지 않는다.
+- Editor PIE에서는 background CPU throttling을 꺼 frame hitch가 command timeout을 반복시키지 않게 한다.
+- Windows host 실행 중 1ms timer resolution을 요청하고 종료 시 반드시 반환한다.
+- TCP `no_delay`를 사용하며, state write가 밀리면 진행 중 패킷과 최신 대기 패킷만 유지한다.
+- WebSocket accept가 완료되기 전 binary payload를 쓰지 않아 HTTP 101 handshake 순서를 보장한다.
+
+2026-08-19 Windows loopback Release 측정은 Python probe로 240개 state를 수신해 비교했다. 이는 렌더 프레임까지 포함한 최종 제품 지연이 아니라 host transport scheduler의 기준값이다.
+
+| 지표 | 개선 전 | 개선 후 |
+|---|---:|---:|
+| state 간격 p95 | 30.05ms | 17.08ms |
+| state 간격 최대 | 49.82ms | 17.20ms |
+| 25ms 초과 interval | 26/239 | 0/239 |
+| command 전송→첫 speed 변화 | 약 35.62ms | 약 27.32ms |
+
+현재 수치에서는 WebSocket을 UDP로 교체할 근거가 없다. packaged Unreal의 render 시점 state age, 장시간 overrun, LAN과 다중 엔티티 조건은 별도로 다시 측정한다. 상세 결정은 [ADR-010](./decisions/ADR-010-low-latency-control-presentation.md)에 기록한다.
+
+실제 PIE에서 시간이 지날수록 입력 지연이 증가한 원인은 UE 5.6 내부 command FIFO의 60Hz 생산/약 30Hz 소비 불균형이었다. 서버 도착 이후 지연만으로는 발견할 수 없었으며, event-loop service와 20Hz heartbeat 적용 후 장시간 반복 조작에서 해소됐다. 진단 과정은 [해결 사례](./troubleshooting/ue56-websocket-growing-input-delay.md)를 따른다.
 
 ## 11. Traffic과 보행자
 
@@ -447,6 +480,8 @@ R1은 SensorRig, mount config, timestamp/frame metadata와 선택적인 저주�
 - 목표 Windows PC의 패키지 빌드에서 수행
 - 동일한 replay, 카메라, 해상도, 그래픽 설정 사용
 - Game thread, Render thread, GPU, frame p50/p95, streaming hitch 기록
+- command age, state arrival interval·age, sequence gap, 입력→첫 상태 변화의 p50/p95/max 기록
+- loopback과 LAN을 구분하고 timer resolution·서버 build·Unreal FPS를 결과에 함께 기록
 - NPC 수, 보행자 수, 센서 활성 상태를 결과에 함께 기록
 - Cesium 배경 on/off를 별도 측정해 R1 포함 여부 결정
 
@@ -492,6 +527,7 @@ release/
 | ADR-007 | 확정 | R1은 수동운전, 학습은 연기 | 8월 품질과 기반 구조에 집중 |
 | ADR-008 | 확정 | 핵심부 보행 중심, 주변 도로 주행 | Wall/Broad의 실제 공간 특성과 사용자 요구 반영 |
 | ADR-009 | 확정 | 센서 payload를 제어 채널과 분리 | 이미지 readback이 physics/control 지연을 만들지 않도록 함 |
+| ADR-010 | 확정 | Windows 60Hz timer 안정화 + 입력 즉시 전송 + 최대 50ms dead reckoning | loopback jitter와 추종 보간 지연을 줄이면서 C++ 물리 권한 유지 |
 
 ## 18. 결정 대기 사항
 
@@ -514,11 +550,14 @@ release/
 - [Project Chrono Vehicle 문서](https://api.projectchrono.org/manual_vehicle.html)
 - [Unreal Engine Set Actor Transform](https://dev.epicgames.com/documentation/unreal-engine/BlueprintAPI/Transformation/SetActorTransform)
 - [Google Map Tiles API 정책](https://developers.google.com/maps/documentation/tile/policies)
+- [Microsoft timeBeginPeriod 문서](https://learn.microsoft.com/windows/win32/api/timeapi/nf-timeapi-timebeginperiod)
 
 ## 20. 변경 이력
 
 | 버전 | 날짜 | 변경 내용 |
 |---|---|---|
+| 0.7 | 2026-08-19 | UE 5.6 WebSocket command FIFO의 60Hz 생산/30Hz 소비 불균형과 event-loop·20Hz heartbeat 해결 반영 |
+| 0.6 | 2026-08-19 | 현재 UE/C++ 수직 절단과 4륜 상태를 반영하고 handshake 순서, Windows 60Hz jitter, 입력 즉시 전송, 최대 50ms dead reckoning 및 측정값 기록 |
 | 0.5 | 2026-08-14 | C++ host의 binary Protobuf ControlCommand 수신과 WorldState broadcast 구현 상태 반영 |
 | 0.4 | 2026-08-14 | R1 통신을 WebSocket binary + Protobuf로 확정하고 JSON runtime protocol 제거 방향 반영 |
 | 0.3 | 2026-08-14 | ADR-006을 자체 C++ 물리엔진 결정으로 변경하고 D1 기본 모델·공통 Proto 상태 반영 |

@@ -5,6 +5,11 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+if(MSVC)
+    add_compile_options(/utf-8)
+    add_compile_definitions(_WIN32_WINNT=0x0A00)
+endif()
+
 set(SIMCORE_PROTOCOL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../protocol")
 set(SIMCORE_VEHICLE_PROTO "${SIMCORE_PROTOCOL_DIR}/vehicle.proto")
 
@@ -56,6 +61,10 @@ target_link_libraries(simcore_publisher PRIVATE
     cppzmq
 )
 
+if(WIN32)
+    target_link_libraries(simcore_publisher PRIVATE winmm)
+endif()
+
 include(CTest)
 
 if(BUILD_TESTING)
@@ -79,4 +88,29 @@ if(BUILD_TESTING)
     )
 
     add_test(NAME vehicle_protocol_tests COMMAND vehicle_protocol_tests)
+
+    add_executable(simulation_clock_tests
+        tests/simulation_clock_test.cpp
+    )
+
+    target_include_directories(simulation_clock_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
+    add_test(NAME simulation_clock_tests COMMAND simulation_clock_tests)
+
+    add_executable(websocket_server_tests
+        tests/websocket_server_test.cpp
+        src/websocket/ws_server.cpp
+    )
+
+    target_include_directories(websocket_server_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
+    target_link_libraries(websocket_server_tests PRIVATE
+        Boost::system
+    )
+
+    add_test(NAME websocket_server_tests COMMAND websocket_server_tests)
 endif()

@@ -14,6 +14,26 @@ enum ControlMode {
     CONTROL_MODE_ESTOP = 2;
 }
 
+message Vector3d {
+    double x = 1;
+    double y = 2;
+    double z = 3;
+}
+
+message WheelState {
+    uint32 wheel_index = 1;
+    bool in_contact = 2;
+    float steering_angle = 3;
+    float angular_speed = 4;
+    float normal_load = 5;
+    float longitudinal_slip = 6;
+    float slip_angle = 7;
+    float longitudinal_force = 8;
+    float lateral_force = 9;
+    Vector3d contact_point_enu = 10;
+    Vector3d contact_normal_enu = 11;
+}
+
 // 단일 엔티티 상태 (CIGI Entity State Packet 기반)
 message EntityState {
     uint32 entity_id = 1;   // 엔티티 고유 ID
@@ -43,6 +63,10 @@ message EntityState {
     float yaw_rate       = 15; // rad/s, positive = right turn
     float steering_angle = 16; // road wheel angle (radians)
     VehicleGear gear     = 17;
+    Vector3d position_enu = 18;
+    Vector3d linear_velocity_body = 19;
+    Vector3d angular_velocity_body = 20;
+    repeated WheelState wheels = 21;
 }
 
 // 여러 엔티티를 한 패킷에 담을 때 사용

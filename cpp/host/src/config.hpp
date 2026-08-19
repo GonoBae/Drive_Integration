@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 namespace Config {
 
     // Protocol
@@ -15,6 +17,7 @@ namespace Config {
     // Physics loop
     inline constexpr double PHYSICS_HZ = 60.0;
     inline constexpr double PHYSICS_DT = 1.0 / PHYSICS_HZ;
+    inline constexpr std::uint64_t COMMAND_TIMEOUT_NS = 250'000'000;
 
     // Temporary Wall/Broad ENU anchor. The MapPackage loader will replace
     // altitude and the actual drivable-lane spawn when it is implemented.

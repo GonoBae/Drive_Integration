@@ -29,6 +29,35 @@ def _state_to_dict(state) -> dict:
         "yaw_rate":  state.yaw_rate,
         "steering_angle": state.steering_angle,
         "gear":      state.gear,
+        "position_enu": {
+            "x": state.position_enu.x,
+            "y": state.position_enu.y,
+            "z": state.position_enu.z,
+        },
+        "linear_velocity_body": {
+            "x": state.linear_velocity_body.x,
+            "y": state.linear_velocity_body.y,
+            "z": state.linear_velocity_body.z,
+        },
+        "angular_velocity_body": {
+            "x": state.angular_velocity_body.x,
+            "y": state.angular_velocity_body.y,
+            "z": state.angular_velocity_body.z,
+        },
+        "wheels": [
+            {
+                "wheel_index": wheel.wheel_index,
+                "in_contact": wheel.in_contact,
+                "steering_angle": wheel.steering_angle,
+                "angular_speed": wheel.angular_speed,
+                "normal_load": wheel.normal_load,
+                "longitudinal_slip": wheel.longitudinal_slip,
+                "slip_angle": wheel.slip_angle,
+                "longitudinal_force": wheel.longitudinal_force,
+                "lateral_force": wheel.lateral_force,
+            }
+            for wheel in state.wheels
+        ],
     }
 
 
