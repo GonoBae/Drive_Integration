@@ -5,9 +5,10 @@ Unreal Engine을 영상 생성·입력·센서 환경으로 사용하고, 외부
 ## 현재 상태
 
 - C++ 자체 차량 물리 기초 모델: 구현
-- WebSocket binary + Protobuf 제어·상태 통신: C++ host 구현
+- WebSocket binary + Protobuf 제어·상태 통신: C++ host와 Unreal client 구현
 - Python relay: ZMQ 상태 관찰 및 디버그 클라이언트 중계
-- Unreal client와 Wall/Broad MapPackage: 구현 전
+- Unreal 외부 차량 Pawn·수동 입력·상태 표시: 최소 통합 구현
+- Wall/Broad MapPackage: 구현 전
 - 자율주행 학습·추론: 8월 범위 제외
 
 상세 범위와 일정은 [프로젝트 문서](./docs/README.md)를 기준으로 한다.
@@ -20,7 +21,7 @@ Drive_Integration/
 ├── cpp/host/                 # 권한 물리 서버와 통신
 ├── python/relay_server/      # observer/debug relay
 ├── python/autonomy_server/   # 향후 자율주행 서버 위치
-├── unreal/DriveIntegration/  # 향후 Unreal 프로젝트 위치
+├── unreal/DriveIntegration/  # Unreal Engine 5.6 C++ 프로젝트
 ├── map_packages/             # 공통 지도·차선·충돌 패키지
 └── docs/                     # 일정, 기능표, 아키텍처, ADR, 작업일지
 ```
@@ -52,18 +53,29 @@ ctest --preset release
 
 ## Python observer
 
+Python relay 명령은 저장소 루트에서 실행한다. macOS와 Windows 모두 같은
+패키지 entrypoint를 사용하므로 실행 결과가 현재 작업 디렉터리에 의존하지 않는다.
+
 macOS/Linux:
 
 ```bash
-cd python/relay_server
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install -r requirements.txt
-bash scripts/generate_proto.sh
-uvicorn main:app --host 0.0.0.0 --port 8000
+python3 -m venv python/relay_server/.venv
+python/relay_server/.venv/bin/python -m pip install -r python/relay_server/requirements.txt
+python/relay_server/.venv/bin/python -m python.relay_server
 ```
 
-Windows PowerShell에서는 `.venv\Scripts\Activate.ps1`로 환경을 활성화하고 `scripts\generate_proto.ps1`을 실행한다.
+Windows PowerShell:
+
+```powershell
+py -3.10 -m venv python\relay_server\.venv
+python\relay_server\.venv\Scripts\python.exe -m pip install -r python\relay_server\requirements.txt
+python\relay_server\.venv\Scripts\python.exe -m python.relay_server
+```
+
+Proto를 변경한 경우에만 macOS/Linux에서
+`bash python/relay_server/scripts/generate_proto.sh`, Windows에서
+`python\relay_server\scripts\generate_proto.ps1`을 실행한다.
+`make test-python`은 relay 회귀 시험과 생성물 동기화를 함께 검증한다.
 
 Python relay는 수동운전 필수 경로가 아니다. Unreal은 C++ host의 `ws://<host>:9000`에 직접 연결하고, 현재 relay는 같은 장비에서 `tcp://127.0.0.1:5555` 상태를 관찰한다.
 

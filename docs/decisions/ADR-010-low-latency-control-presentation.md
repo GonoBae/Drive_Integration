@@ -32,8 +32,11 @@ WebSocket handshake 중 state frame이 HTTP 101보다 먼저 쓰이던 별도 �
 
 ### Unreal 입력
 
-- throttle, brake, steering, handbrake 값이 바뀌면 즉시 `ControlCommand`를 전송한다.
+- 동일 frame의 throttle, brake, steering callback을 최신 command 하나로 합친다.
+- gamepad noise는 deadzone 0.02와 변화 epsilon 0.005로 거르고, 변화 command는 최대 30Hz로 제한한다.
 - 값이 유지될 때는 20Hz heartbeat로 250ms command timeout lease를 유지한다.
+- 연결마다 고유 `session_id`를 만들고 sequence를 1부터 다시 시작한다.
+- 250ms timeout에서는 서버가 기존 session과 socket을 폐기하고, Unreal은 기본 0.5초 뒤 새 session으로 재연결한다.
 - Windows에서는 libWebSockets event-loop service를 사용해 새 입력이 socket thread를 즉시 깨우도록 한다.
 - event-loop 미지원 플랫폼의 polling fallback은 240Hz로 설정한다.
 - Editor PIE에서는 background CPU throttling을 꺼 game tick 저하로 heartbeat가 250ms를 넘지 않게 한다.
@@ -64,7 +67,7 @@ WebSocket handshake 중 state frame이 HTTP 101보다 먼저 쓰이던 별도 �
 ## 결과와 비용
 
 - 60Hz state 간격이 한 tick 근처로 안정되어 시각적 hitch가 줄어든다.
-- 입력 변화가 periodic send를 기다리지 않아 최악 약 16.7ms의 추가 대기를 제거한다.
+- 변화 입력은 latest-wins로 합쳐 최대 약 33ms 안에 전송하며, 축별 callback과 gamepad noise가 여러 FIFO 항목을 만들지 않는다.
 - 20Hz heartbeat와 event-loop service로 command FIFO가 시간에 따라 증가하지 않는다.
 - 제한된 예측으로 패킷 사이 render frame을 이어 주면서 무제한 외삽을 방지한다.
 - 1ms timer resolution은 서버 실행 중 전력 사용과 wake-up 빈도를 높일 수 있으므로 수동운전 runtime에서만 유지한다.
@@ -83,11 +86,13 @@ WebSocket handshake 중 state frame이 HTTP 101보다 먼저 쓰이던 별도 �
 ## 검증
 
 - C++ MSVC Release 빌드 통과
-- CTest 4/4 통과
+- C++ 회귀시험은 최초 Windows에서 5종, 2026-08-19 전체 리팩터링 후 macOS에서 6종 통과
 - handshake 전 broadcast 회귀 시험 통과
 - Unreal 5.6 Game target 빌드 통과
 - Unreal 5.6 Editor target 빌드·DLL 링크 통과
 - 실제 PIE 30초 이상 반복 조작에서 누적 입력 지연 해소 확인
+
+위 Windows·PIE 결과는 최초 저지연 수정 기준이다. 종료 재검토에서 추가한 session/queue-age와 최대 30Hz coalescing 변경은 macOS C++·Python 검증까지 통과했으며, 목표 Windows에서 Unreal Game/Editor target과 end-to-end 입력 지연을 다시 측정해야 한다.
 
 ## 참고 자료
 

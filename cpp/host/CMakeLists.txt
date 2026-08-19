@@ -44,11 +44,54 @@ target_link_libraries(simcore_protocol PUBLIC
     protobuf::libprotobuf
 )
 
+add_library(simcore_physics
+    src/physics/vehicle_physics.cpp
+)
+
+target_include_directories(simcore_physics PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+add_library(simcore_websocket
+    src/websocket/ws_server.cpp
+)
+
+target_include_directories(simcore_websocket PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(simcore_websocket PUBLIC
+    Boost::system
+)
+
+add_library(simcore_zmq_publisher
+    src/publisher/zmq_publisher.cpp
+)
+
+target_include_directories(simcore_zmq_publisher PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(simcore_zmq_publisher PUBLIC
+    cppzmq
+)
+
+add_library(simcore_host_core
+    src/simulation_host.cpp
+)
+
+target_include_directories(simcore_host_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(simcore_host_core PUBLIC
+    simcore_physics
+    simcore_protocol
+    Boost::system
+)
+
 add_executable(simcore_publisher
     src/main.cpp
-    src/physics/vehicle_physics.cpp
-    src/websocket/ws_server.cpp
-    src/publisher/zmq_publisher.cpp
 )
 
 target_include_directories(simcore_publisher PRIVATE
@@ -56,9 +99,9 @@ target_include_directories(simcore_publisher PRIVATE
 )
 
 target_link_libraries(simcore_publisher PRIVATE
-    simcore_protocol
-    Boost::system
-    cppzmq
+    simcore_host_core
+    simcore_websocket
+    simcore_zmq_publisher
 )
 
 if(WIN32)
@@ -70,11 +113,10 @@ include(CTest)
 if(BUILD_TESTING)
     add_executable(vehicle_physics_tests
         tests/vehicle_physics_test.cpp
-        src/physics/vehicle_physics.cpp
     )
 
-    target_include_directories(vehicle_physics_tests PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    target_link_libraries(vehicle_physics_tests PRIVATE
+        simcore_physics
     )
 
     add_test(NAME vehicle_physics_tests COMMAND vehicle_physics_tests)
@@ -99,17 +141,32 @@ if(BUILD_TESTING)
 
     add_test(NAME simulation_clock_tests COMMAND simulation_clock_tests)
 
-    add_executable(websocket_server_tests
-        tests/websocket_server_test.cpp
-        src/websocket/ws_server.cpp
+    add_executable(control_lease_tests
+        tests/control_lease_test.cpp
     )
 
-    target_include_directories(websocket_server_tests PRIVATE
+    target_include_directories(control_lease_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
 
+    add_test(NAME control_lease_tests COMMAND control_lease_tests)
+
+    add_executable(simulation_host_tests
+        tests/simulation_host_test.cpp
+    )
+
+    target_link_libraries(simulation_host_tests PRIVATE
+        simcore_host_core
+    )
+
+    add_test(NAME simulation_host_tests COMMAND simulation_host_tests)
+
+    add_executable(websocket_server_tests
+        tests/websocket_server_test.cpp
+    )
+
     target_link_libraries(websocket_server_tests PRIVATE
-        Boost::system
+        simcore_websocket
     )
 
     add_test(NAME websocket_server_tests COMMAND websocket_server_tests)

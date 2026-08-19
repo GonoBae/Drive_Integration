@@ -1,24 +1,50 @@
 import asyncpg
 from datetime import datetime, timezone
 
-from config import settings
+from ..config import settings
 
 _pool: asyncpg.Pool | None = None
 
 
 async def init_db() -> None:
     global _pool
-    _pool = await asyncpg.create_pool(settings.db_url, min_size=2, max_size=10)
-    await _create_tables()
+    if _pool is not None:
+        return
+
+    pool = await asyncpg.create_pool(
+        host=settings.db_host,
+        port=settings.db_port,
+        database=settings.db_name,
+        user=settings.db_user,
+        password=settings.db_password,
+        min_size=2,
+        max_size=10,
+    )
+    _pool = pool
+    try:
+        await _create_tables(pool)
+    except BaseException:
+        _pool = None
+        await pool.close()
+        raise
 
 
 async def close_db() -> None:
-    if _pool:
-        await _pool.close()
+    global _pool
+    pool = _pool
+    _pool = None
+    if pool is not None:
+        await pool.close()
 
 
-async def _create_tables() -> None:
-    async with _pool.acquire() as conn:
+def _require_pool() -> asyncpg.Pool:
+    if _pool is None:
+        raise RuntimeError("database pool is not initialized")
+    return _pool
+
+
+async def _create_tables(pool: asyncpg.Pool) -> None:
+    async with pool.acquire() as conn:
         # TimescaleDB 확장 활성화
         await conn.execute("CREATE EXTENSION IF NOT EXISTS timescaledb;")
 
@@ -57,7 +83,8 @@ async def _create_tables() -> None:
 
 async def insert_entity_state(state) -> None:
     """단일 EntityState 저장"""
-    async with _pool.acquire() as conn:
+    pool = _require_pool()
+    async with pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO entity_states
@@ -82,6 +109,9 @@ async def insert_entity_state(state) -> None:
 
 async def insert_entity_states_batch(states: list) -> None:
     """여러 EntityState 배치 저장 (멀티 엔티티 패킷용)"""
+    if not states:
+        return
+
     records = [
         (
             datetime.fromtimestamp(s.timestamp, tz=timezone.utc),
@@ -93,7 +123,8 @@ async def insert_entity_states_batch(states: list) -> None:
         )
         for s in states
     ]
-    async with _pool.acquire() as conn:
+    pool = _require_pool()
+    async with pool.acquire() as conn:
         await conn.executemany(
             """
             INSERT INTO entity_states

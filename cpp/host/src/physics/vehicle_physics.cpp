@@ -35,7 +35,7 @@ VehiclePhysics::VehiclePhysics(double lat, double lon, double alt, float heading
     : parameters_(parameters)
     , origin_lat_(lat)
     , origin_lon_(lon)
-    , heading_rad_(heading * DEG2RAD)
+    , heading_rad_(normalize_heading(heading * DEG2RAD))
 {
     if (parameters_.mass_kg <= 0.f || parameters_.wheelbase_m <= 0.f ||
         parameters_.tire_radius_m <= 0.f || parameters_.yaw_inertia_kg_m2 <= 0.f ||
@@ -47,11 +47,25 @@ VehiclePhysics::VehiclePhysics(double lat, double lon, double alt, float heading
         throw std::invalid_argument("Vehicle parameters must be positive");
     }
 
-    state_.lat     = lat;
-    state_.lon     = lon;
-    state_.alt     = alt;
-    state_.heading = heading;
-    state_.rpm     = parameters_.idle_rpm;
+    if (!std::isfinite(lat) || !std::isfinite(lon) || !std::isfinite(alt) ||
+        !std::isfinite(heading)) {
+        throw std::invalid_argument("Initial vehicle pose must be finite");
+    }
+
+    state_.lat = lat;
+    state_.lon = lon;
+    state_.alt = alt;
+    state_.heading = static_cast<float>(heading_rad_ * RAD2DEG);
+    state_.rpm = parameters_.idle_rpm;
+    state_.position_enu = {0.0, 0.0, parameters_.cg_height_m};
+    const float static_wheel_load = parameters_.mass_kg * GRAVITY * 0.25f;
+    for (std::size_t index = 0; index < state_.wheels.size(); ++index) {
+        auto& wheel = state_.wheels[index];
+        wheel.wheel_index = static_cast<std::uint32_t>(index);
+        wheel.in_contact = true;
+        wheel.normal_load = static_wheel_load;
+    }
+    update_wheel_contact_points();
 }
 
 void VehiclePhysics::set_input(const VehicleInput& input) {
@@ -95,7 +109,17 @@ VehicleState VehiclePhysics::update(double dt)
     const float available_drive_force = in.gear == VehicleGear::Reverse
         ? parameters_.max_reverse_force_n
         : parameters_.max_drive_force_n;
-    const float total_drive_force = gear_sign * in.throttle * available_drive_force;
+    const bool forward_limiter_active = gear_sign > 0.f
+        && body_longitudinal_speed_mps_ >= parameters_.max_forward_speed_mps;
+    const bool reverse_limiter_active = gear_sign < 0.f
+        && body_longitudinal_speed_mps_ <= -parameters_.max_reverse_speed_mps;
+    // Clamping chassis speed without cutting drive torque lets wheel angular
+    // speed wind up forever at the limiter. Remove only the torque that would
+    // accelerate farther beyond the configured speed; tire reaction then
+    // brings wheel surface speed back toward road speed.
+    const float total_drive_force = forward_limiter_active || reverse_limiter_active
+        ? 0.f
+        : gear_sign * in.throttle * available_drive_force;
     const float service_brake_force = in.brake * parameters_.max_service_brake_n;
     const float total_brake_force = in.handbrake
         ? std::max(service_brake_force, parameters_.max_handbrake_force_n)
@@ -115,9 +139,14 @@ VehicleState VehiclePhysics::update(double dt)
     const float longitudinal_transfer = parameters_.mass_kg * state_.accel
                                       * parameters_.cg_height_m / parameters_.wheelbase_m;
     const float lateral_accel_estimate = body_longitudinal_speed_mps_ * yaw_rate_rad_s_;
-    const float lateral_transfer_front = parameters_.mass_kg * lateral_accel_estimate
+    // A 50/50 static axle split is used until CG longitudinal position becomes
+    // a parameter. Each axle must use only its share of vehicle mass; using the
+    // full mass on both axles doubles the total lateral load transfer.
+    const float front_axle_mass = parameters_.mass_kg * 0.5f;
+    const float rear_axle_mass = parameters_.mass_kg * 0.5f;
+    const float lateral_transfer_front = front_axle_mass * lateral_accel_estimate
                                        * parameters_.cg_height_m / (2.f * parameters_.front_track_m);
-    const float lateral_transfer_rear = parameters_.mass_kg * lateral_accel_estimate
+    const float lateral_transfer_rear = rear_axle_mass * lateral_accel_estimate
                                       * parameters_.cg_height_m / (2.f * parameters_.rear_track_m);
     const float front_base_load = parameters_.mass_kg * GRAVITY * 0.25f - longitudinal_transfer * 0.5f;
     const float rear_base_load = parameters_.mass_kg * GRAVITY * 0.25f + longitudinal_transfer * 0.5f;
@@ -129,7 +158,9 @@ VehicleState VehiclePhysics::update(double dt)
         wheel.wheel_index = static_cast<uint32_t>(index);
         wheel.in_contact = true; // R1 flat-ground contact; MapPackage queries replace this.
         wheel.steering_angle = index < 2 ? state_.steering_angle : 0.f;
-        const float side_sign = index % 2 == 0 ? -1.f : 1.f;
+        // Solver Y is right-positive. Positive lateral acceleration therefore
+        // describes a right turn and loads the outer (left) wheels.
+        const float side_sign = index % 2 == 0 ? 1.f : -1.f;
         const float lateral_transfer = index < 2 ? lateral_transfer_front : lateral_transfer_rear;
         wheel.normal_load = std::max(0.f,
             (index < 2 ? front_base_load : rear_base_load) + side_sign * lateral_transfer);
@@ -141,7 +172,8 @@ VehicleState VehiclePhysics::update(double dt)
         const float longitudinal_velocity = cosine * wheel_velocity_x + sine * wheel_velocity_y;
         const float lateral_velocity = -sine * wheel_velocity_x + cosine * wheel_velocity_y;
 
-        wheel.slip_angle = std::atan2(lateral_velocity, speed_for_slip);
+        const float internal_slip_angle = std::atan2(lateral_velocity, speed_for_slip);
+        wheel.slip_angle = -internal_slip_angle; // public wheel frame is left-positive
         const float wheel_surface_speed = wheel_angular_speed_rad_s_[index] * parameters_.tire_radius_m;
         const float slip_denominator = std::max(std::abs(longitudinal_velocity), 1.f);
         wheel.longitudinal_slip = std::clamp(
@@ -149,7 +181,7 @@ VehicleState VehiclePhysics::update(double dt)
         float tire_force_x = parameters_.tire_longitudinal_stiffness_n * wheel.longitudinal_slip;
         float tire_force_y = std::abs(body_longitudinal_speed_mps_) < parameters_.low_speed_lateral_cutoff_mps
             ? 0.f
-            : -parameters_.tire_corner_stiffness_n_rad * wheel.slip_angle;
+            : -parameters_.tire_corner_stiffness_n_rad * internal_slip_angle;
 
         const float friction_limit = parameters_.tire_friction * wheel.normal_load;
         const float force_magnitude = std::hypot(tire_force_x, tire_force_y);
@@ -159,7 +191,7 @@ VehicleState VehiclePhysics::update(double dt)
             tire_force_y *= scale;
         }
         wheel.longitudinal_force = tire_force_x;
-        wheel.lateral_force = tire_force_y;
+        wheel.lateral_force = -tire_force_y; // canonical wheel-local left-positive
         const float drive_torque = index >= 2
             ? total_drive_force * parameters_.tire_radius_m * 0.5f : 0.f;
         float brake_direction = 0.f;
@@ -184,13 +216,6 @@ VehicleState VehiclePhysics::update(double dt)
         total_force_y += body_force_y;
         total_yaw_moment += wheel_x[index] * body_force_y - wheel_y[index] * body_force_x;
 
-        const double wheel_forward = wheel_x[index];
-        const double wheel_right = wheel_y[index];
-        wheel.contact_point_enu.x = east_m_ + wheel_forward * std::sin(heading_rad_)
-            + wheel_right * std::cos(heading_rad_);
-        wheel.contact_point_enu.y = north_m_ + wheel_forward * std::cos(heading_rad_)
-            - wheel_right * std::sin(heading_rad_);
-        wheel.contact_point_enu.z = 0.0;
     }
 
     // R1 uses one rotational degree of freedom per axle. Keep the left/right
@@ -227,6 +252,13 @@ VehicleState VehiclePhysics::update(double dt)
         const bool held_at_stop = std::abs(previous_speed) <= STOP_EPSILON;
         if (crossed_stop || held_at_stop) {
             body_longitudinal_speed_mps_ = 0.f;
+            // The reduced planar model has no static-contact constraint. Once
+            // the brakes hold the chassis at zero longitudinal speed, settle
+            // the remaining lateral/yaw modes explicitly instead of allowing
+            // an imperceptible but unbounded sideways drift.
+            body_lateral_speed_mps_ = 0.f;
+            yaw_rate_rad_s_ = 0.f;
+            wheel_angular_speed_rad_s_.fill(0.f);
         }
     }
     if (std::abs(body_longitudinal_speed_mps_) < STOP_EPSILON && in.throttle == 0.f) {
@@ -250,8 +282,9 @@ VehicleState VehiclePhysics::update(double dt)
     state_.east  = east_m_;
     state_.north = north_m_;
     state_.position_enu = {east_m_, north_m_, parameters_.cg_height_m};
-    state_.linear_velocity_body = {body_longitudinal_speed_mps_, body_lateral_speed_mps_, 0.0};
-    state_.angular_velocity_body = {roll_rate_rad_s_, pitch_rate_rad_s_, yaw_rate_rad_s_};
+    update_wheel_contact_points();
+    state_.linear_velocity_body = {body_longitudinal_speed_mps_, -body_lateral_speed_mps_, 0.0};
+    state_.angular_velocity_body = {-roll_rate_rad_s_, pitch_rate_rad_s_, -yaw_rate_rad_s_};
 
     // Published wheel rotation drives the Unreal presentation. A stopped
     // chassis must not show tire frames creeping because of sub-threshold
@@ -282,9 +315,9 @@ VehicleState VehiclePhysics::update(double dt)
     pitch_rad_ = std::clamp(pitch_rad_ + pitch_rate_rad_s_ * fdt,
                             static_cast<float>(-6.0 * DEG2RAD),
                             static_cast<float>(6.0 * DEG2RAD));
-    state_.roll = static_cast<float>(roll_rad_ * RAD2DEG);
+    state_.roll = static_cast<float>(-roll_rad_ * RAD2DEG);
     state_.pitch = static_cast<float>(pitch_rad_ * RAD2DEG);
-    state_.angular_velocity_body = {roll_rate_rad_s_, pitch_rate_rad_s_, yaw_rate_rad_s_};
+    state_.angular_velocity_body = {-roll_rate_rad_s_, pitch_rate_rad_s_, -yaw_rate_rad_s_};
 
     // --- RPM (single-ratio driveline for the first physics milestone) ---
     const float wheel_rpm = std::abs(state_.speed)
@@ -311,4 +344,25 @@ VehicleState VehiclePhysics::update(double dt)
 
 VehicleState VehiclePhysics::get_state() const {
     return state_;
+}
+
+void VehiclePhysics::update_wheel_contact_points()
+{
+    const double half_wheelbase = parameters_.wheelbase_m * 0.5;
+    const std::array<double, 4> wheel_x{
+        half_wheelbase, half_wheelbase, -half_wheelbase, -half_wheelbase};
+    const std::array<double, 4> wheel_y{
+        -parameters_.front_track_m * 0.5, parameters_.front_track_m * 0.5,
+        -parameters_.rear_track_m * 0.5, parameters_.rear_track_m * 0.5};
+
+    const double heading_sine = std::sin(heading_rad_);
+    const double heading_cosine = std::cos(heading_rad_);
+    for (std::size_t index = 0; index < state_.wheels.size(); ++index) {
+        auto& contact = state_.wheels[index].contact_point_enu;
+        contact.x = east_m_ + wheel_x[index] * heading_sine
+                  + wheel_y[index] * heading_cosine;
+        contact.y = north_m_ + wheel_x[index] * heading_cosine
+                  - wheel_y[index] * heading_sine;
+        contact.z = 0.0;
+    }
 }

@@ -43,7 +43,7 @@ ThreadMinimumSleepTimeInSeconds=0.0
 
 ### ControlCommand 전송 정책
 
-- 입력 변화: 즉시 전송
+- 입력 변화: 동일 frame의 축 입력을 latest-wins로 합치고 deadzone/epsilon 적용 후 최대 30Hz 전송
 - 입력 유지 heartbeat: 60Hz에서 20Hz로 변경
 - 20Hz heartbeat는 250ms lease를 충분히 갱신하면서 UE 기본 30Hz service에서도 FIFO가 증가하지 않는다.
 - 물리와 WorldState는 계속 60Hz를 유지한다. 20Hz는 상태 주기가 아니라 동일 입력을 반복하는 lease heartbeat 주기다.
@@ -60,7 +60,7 @@ bThrottleCPUWhenNotForeground=False
 ## 검증 결과
 
 - UE 5.6 Editor target 빌드 및 DLL 링크 통과
-- C++ Release 빌드와 CTest 4/4 통과
+- C++ Release 빌드와 CTest 5종 통과
 - 실제 PIE에서 30초 이상 반복 조작 후 사용자가 누적 지연 해결과 체감 개선을 확인
 - UDP나 별도 relay로 교체하지 않고 WebSocket binary + Protobuf 구조 유지
 
@@ -69,7 +69,7 @@ bThrottleCPUWhenNotForeground=False
 - periodic producer rate는 transport의 보장된 consumer rate보다 낮아야 한다.
 - 제어 명령은 가능하면 FIFO 무제한 적재가 아니라 latest-wins 또는 coalescing 정책을 사용한다.
 - 지연 측정은 `키 입력 생성 → Unreal 송신 큐 → 서버 수신 → 물리 적용 → Unreal 상태 수신 → render` 전 구간을 포함해야 한다.
-- 향후 protocol에 client 생성 시각 또는 command revision acknowledgement를 추가해 송신 큐 대기까지 자동 계측한다.
+- protocol의 client 생성 시각과 session ID로 큐 age를 추정하고, 100ms를 초과한 command를 폐기한다. timeout 시에는 기존 socket도 닫아 새 session만 제어를 재획득하게 한다.
 - `command timeout` 로그에는 실제 command age를 남겨 frame hitch와 안전 정지를 구분한다.
 
 ## 빠른 확인 순서

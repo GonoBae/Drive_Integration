@@ -135,6 +135,7 @@ std::optional<ParsedControlCommand> parse_control_command_envelope(
     ParsedControlCommand parsed;
     parsed.sequence = envelope.sequence();
     parsed.source_id = envelope.source_id();
+    parsed.session_id = envelope.session_id();
     parsed.map_package_checksum = envelope.map_package_checksum();
     parsed.client_time_ns = command.client_time_ns();
     parsed.estop = command.estop() || command.mode() == simcore::CONTROL_MODE_ESTOP;

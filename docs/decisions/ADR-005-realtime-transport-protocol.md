@@ -12,9 +12,9 @@
 
 ## 배경
 
-R1 수동운전은 Unreal에서 운전자 입력을 만들고 C++ SimCore가 차량 물리를 계산한 뒤, 그 결과를 다시 Unreal이 표시하는 닫힌 루프다. 물리와 상태는 60Hz를 목표로 하고, 입력 변화는 즉시 전송하며 동일 입력 lease는 20Hz heartbeat로 유지한다. 메시지는 작지만 지연, 순서, timestamp, replay 가능성이 중요하다.
+R1 수동운전은 Unreal에서 운전자 입력을 만들고 C++ SimCore가 차량 물리를 계산한 뒤, 그 결과를 다시 Unreal이 표시하는 닫힌 루프다. 물리와 상태는 60Hz를 목표로 하고, 입력 변화는 latest-wins로 합쳐 최대 30Hz, 동일 입력 lease는 20Hz heartbeat로 유지한다. 메시지는 작지만 지연, 순서, timestamp, replay 가능성이 중요하다.
 
-현재 저장소의 C++ host는 Unreal 입력을 JSON WebSocket으로 받고, 상태는 Protobuf/ZMQ로 Python relay에 발행한다. 이 구조는 초기 검증에는 편하지만 최종 수동운전 경로로 쓰기에는 두 가지 문제가 있다.
+결정 당시(2026-08-14) 저장소의 C++ host는 Unreal 입력을 JSON WebSocket으로 받고, 상태는 Protobuf/ZMQ로 Python relay에 발행했다. 이 구조는 초기 검증에는 편하지만 최종 수동운전 경로로 쓰기에는 두 가지 문제가 있었다.
 
 - 입력은 JSON이고 상태는 Protobuf라 통신 규약이 둘로 나뉜다.
 - 수동운전 상태가 Python relay를 거치면 지연과 장애 지점이 늘어난다.
@@ -27,7 +27,7 @@ R1 수동운전의 실시간 control/state 경로는 `WebSocket binary + Protobu
 
 - Unreal -> C++: `ControlCommand`를 Protobuf binary로 전송한다.
 - C++ -> Unreal: `WorldState`를 Protobuf binary로 전송한다.
-- 모든 runtime 메시지는 `Envelope`를 통해 schema version, sequence, simulation time, source id, map checksum을 가진다.
+- 모든 runtime 메시지는 `Envelope`를 통해 schema version, sequence, simulation time, source id, session id, map checksum을 가진다.
 - C++ host의 JSON 입력 파서는 제거했다.
 - Python relay는 수동운전 필수 경로에서 제외한다.
 - Python은 R2 이후 AI/FSD가 `ControlCommand`를 생성하거나 로그·분석·학습 데이터를 처리할 때 붙인다.
@@ -73,18 +73,18 @@ JSON은 필요할 경우 별도 debug export, 사람이 읽는 로그, 개발용
 3. 완료: 기존 JSON 입력 파서를 제거한다.
 4. 완료: C++가 Unreal 연결에도 state packet을 직접 broadcast한다.
 5. 완료: Python relay는 수동운전 필수 경로에서 빠지고 Protobuf/ZMQ observer로만 둔다.
-6. 완료: 250ms command timeout, SafeStop, source/sequence 소유권과 map checksum 필드 검증을 연결한다.
+6. 완료: 250ms command timeout, SafeStop, source/session/sequence/queue-age 소유권과 map checksum 필드 검증을 연결한다.
 7. 완료: Unreal 5.6 client가 입력과 WorldState·wheel state를 직접 송수신한다.
 8. 완료: loopback latency·jitter를 측정하고 Windows timer와 Unreal 표시 경로를 개선한다.
-9. 남음: 실제 MapPackage checksum, 명시적 reconnect handshake와 packaged render 시점 state age를 검증한다.
+9. 남음: 실제 MapPackage checksum·Hello handshake, packet age/sequence gap HUD와 packaged render 시점 state age를 검증한다.
 
 ## 구현 기록
 
 2026-08-14에 C++ host 쪽 구현을 시작했다. `protocol/vehicle.proto`에 `Envelope`, `ControlCommand`, `WorldState`를 추가했고, C++ WebSocket 서버는 binary frame으로 `ControlCommand`를 수신하고 매 tick `WorldState`를 연결된 client에 broadcast한다. 기존 C++ JSON 입력 파서는 제거했다.
 
-2026-08-19에는 Unreal client 직접 연결, 250ms SafeStop, source/sequence 검증과 4개 wheel state를 연결했다. WebSocket accept 전에 state frame이 전송되던 경쟁 상태를 수정하고 회귀 시험을 추가했다. Windows loopback state 간격은 개선 전 p95 30.05ms·최대 49.82ms에서 p95 17.08ms·최대 17.20ms로 안정됐다. 실제 PIE에서는 UE 5.6의 60Hz heartbeat 생산과 약 30Hz socket service 소비 불균형으로 command FIFO 지연이 누적됐으며, event-loop service와 20Hz lease heartbeat로 해결했다. 이 수치와 결과에서는 UDP 전환 근거가 없으므로 WebSocket binary를 유지한다. 저지연 표시 결정과 측정 조건은 [ADR-010](./ADR-010-low-latency-control-presentation.md)에 기록한다.
+2026-08-19에는 Unreal client 직접 연결, 250ms SafeStop, source/session/sequence 검증과 4개 wheel state를 연결했다. WebSocket accept 전에 state frame이 전송되던 경쟁 상태를 수정하고 회귀 시험을 추가했다. Windows loopback state 간격은 개선 전 p95 30.05ms·최대 49.82ms에서 p95 17.08ms·최대 17.20ms로 안정됐다. 실제 PIE에서는 UE 5.6의 60Hz heartbeat 생산과 약 30Hz socket service 소비 불균형으로 command FIFO 지연이 누적됐으며, event-loop service와 20Hz lease heartbeat로 해결했다. 종료 재검토에서는 입력을 deadzone/epsilon 처리 후 최대 30Hz latest-wins로 합치고, 100ms를 넘게 대기한 것으로 추정되는 패킷을 폐기한다. timeout session과 소켓을 함께 닫고 Unreal이 새 session으로 자동 재연결하게 하여 기존 큐가 SafeStop을 해제하지 못하게 했다. 이 수치와 결과에서는 UDP 전환 근거가 없으므로 WebSocket binary를 유지한다. 저지연 표시 결정과 측정 조건은 [ADR-010](./ADR-010-low-latency-control-presentation.md)에 기록한다.
 
-남은 작업은 실제 MapPackage checksum handshake, 자동 재연결, packet age/sequence gap HUD와 packaged Unreal end-to-end 측정이다.
+남은 작업은 실제 MapPackage checksum·Hello handshake, packet age/sequence gap HUD와 packaged Unreal end-to-end 측정이다. transport 자동 재연결과 stale socket generation 방어는 구현됐다.
 
 ## 결과
 

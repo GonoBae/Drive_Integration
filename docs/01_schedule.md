@@ -4,7 +4,7 @@
 
 | 항목 | 값 |
 |---|---|
-| 버전 | 0.5 |
+| 버전 | 0.7 |
 | 작성일 | 2026-08-19 |
 | 대상 릴리스 | R1 Manual Driving Vertical Slice |
 | 목표일 | 핵심 R1 2026-08-27, 확장 기능 포함 최종 릴리스 2026-08-31 |
@@ -74,12 +74,12 @@ AI는 코드 초안, 반복 수정, 자동 시험, 빌드 오류 분석, 문서 
 | 날짜 | 구분 | 작업 | 당일 산출물·확인점 |
 |---|---:|---|---|
 | 8/14~19 | 완료 실적 D1~D6 | WP-00/01과 WP-02/04 선행 | 자체 물리, 공통 Proto, 60Hz tick, 직접 WebSocket 왕복, 4륜 평면 타이어, SafeStop, 저지연 입력을 구현·검증 |
-| 8/20 목 | AI-D7 | WP-02 완료 | 차량 파라미터 파일, 지형 접촉·서스펜션, 평면·경사·저속·회전 회귀 시험; M2 |
+| 8/20 목 | AI-D7 | WP-01 좌표 계약 마감 + WP-02 완료 | 첫 2h: yaw/steering 부호·schema·C++ adapter·회귀 시험. 이후 6h: 차량 파라미터, 지형 접촉·서스펜션, 평면·경사·저속·회전 시험; M2 |
 | 8/21 금 | AI-D8 | WP-03 충돌 패키지 | MapPackage schema·checksum, 정적 cooking/loading, 동적 OBB/capsule, 관통 회귀 시험 |
 | 8/22~23 | 주말 | 작업 없음 | 일정·완료일 산정에서 제외 |
-| 8/24 월 | AI-D9 | WP-03/04 통합 | Unreal 충돌 표시, handshake 불일치 차단, reconnect·packet gap·SafeStop HUD; M3 |
+| 8/24 월 | AI-D9 | WP-03/04 통합 | Unreal `GeoTransformAdapter`, FLU↔FRU 시각 검증, 충돌 표시, handshake 불일치 차단, reconnect·packet gap·SafeStop HUD; M3 |
 | 8/25 화 | AI-D10 | WP-05 지도·LaneGraph | Wall/Broad crop, importer, 방향성 LaneGraph, spline 주행면·보도·커브, 핵심 교차로 정렬; M4 |
-| 8/26 수 | AI-D11 | WP-06/07 도시 동작·기록 | 신호, TrafficDirector, NPC 3~4대, 보행자 6~8명, SensorRig, 기록·결정적 재생 골격; M5 |
+| 8/26 수 | AI-D11 | WP-06/07 도시 동작·기록 | 신호, TrafficDirector, NPC 3~4대, 보행자 6~8명, SensorRig frame tree·좌표 규약 version, 기록·결정적 재생 골격; M5 |
 | 8/27 목 | AI-D12 | WP-08/09 Core RC | 1080p 성능, 30분 안정성, 전체 Must 회귀, 패키지 후보와 알려진 문제; **핵심 R1 기능 동결** |
 | 8/28 금 | EXP-D1 | EXP-01/02 | 통합 운전 HUD, 4종 카메라, reset·reconnect·scenario restart, 충돌·차선·휠·힘 오버레이 |
 | 8/29~30 | 주말 | 작업 없음 | 일정·완료일 산정에서 제외 |
@@ -92,8 +92,8 @@ AI는 코드 초안, 반복 수정, 자동 시험, 빌드 오류 분석, 문서 
 |---|---|---|---|
 | M0 물리 구현 전략 결정 | 8/14 | 자체 구현 범위와 후보 비교 기록, 개발기 기본 모델 빌드·시험 통과 | 자동 시험과 단계별 종료 조건 없이 다음 물리 단계 진행 금지 |
 | M1 최소 왕복 수직 절단 | 8/17 | Unreal 입력이 C++ tick에 반영되고 상태가 Unreal에 직접 표시 | 지도·NPC보다 통신과 시간 동기화를 우선 복구 |
-| M2 C++ 차량 기반 완료 | 8/20 | 조향·가감속·경사·서스펜션·저속 안정성 시험 통과 | 차량 파라미터와 접촉 문제 해결 전 지도 작업 확대 금지 |
-| M3 충돌 일치 수동운전 | 8/24 | 동일 충돌 소스와 체크섬, 지속 관통 없음, Unreal 임의 보정 없음, 재연결·SafeStop 표시 | NPC 범위를 보류하고 정적 충돌부터 수정 |
+| M2 C++ 차량 기반 완료 | 8/20 | ADR-011의 C++/Proto 부호·schema 이행과 좌표 회귀, 조향·가감속·경사·서스펜션·저속 안정성 시험 통과 | 좌표 계약·차량 파라미터·접촉 문제 해결 전 지도 작업 확대 금지 |
+| M3 충돌 일치 수동운전 | 8/24 | 동일 충돌 소스와 체크섬, 지속 관통 없음, Unreal 임의 보정 없음, FLU↔FRU 자세·회전 시각 검증, 재연결·SafeStop 표시 | NPC 범위를 보류하고 정적 충돌·좌표 adapter부터 수정 |
 | M4 Wall/Broad 주행 루프 | 8/25 | 로컬 주행면과 차선 그래프가 정렬되고 보행 구역 진입 제한 | Cesium 배경보다 로컬 주행면 정확도를 우선 |
 | M5 도시 동작·기록 골격 | 8/26 | 신호 1개, NPC 3~4대, 보행자 6~8명 반복 동작, 기록·재생 데이터 생성 | 개체 수만 낮출 수 있으며 신호 준수와 기록은 유지 |
 | M6 핵심 R1 Core RC | 8/27 | 기능표의 모든 R1 Must와 1080p 성능·30분 안정성·패키지 후보 통과 | 추가 기능을 시작하지 않고 Must 게이트 복구에 전력 사용 |
@@ -144,18 +144,18 @@ AI는 코드 초안, 반복 수정, 자동 시험, 빌드 오류 분석, 문서 
 
 | 항목 | 결과 |
 |---|---|
-| 완료 기능 | 절대 deadline SimulationClock, 250ms SafeStop, command 순번·source 검사, 4륜 평면 접촉과 종횡 타이어 힘, Unreal wheel state 표시, WebSocket handshake 순서 보장, 입력 즉시 전송과 제한된 dead reckoning |
+| 완료 기능 | 절대 deadline SimulationClock, session·순번·queue-age 기반 250ms SafeStop, 4륜 평면 접촉과 종횡 타이어 힘, 공개 body vector Y-left 1차 계약, Unreal wheel state·entity 선택 표시, WebSocket handshake 순서 보장, 입력 coalescing과 제한된 dead reckoning |
 | Windows 검증 | MSVC Release 빌드와 CTest 4종 통과, 저지연 변경을 포함한 UE 5.6 Game·Editor target 통과 |
 | 통합 검증 | binary Protobuf 왕복, wheel 4개와 종방향 slip 수신, 입력 중단 후 0.6683m/s에서 0m/s SafeStop, HTTP 101 선행 응답 확인 |
 | 지연 개선 | state 간격 p95 30.05ms·최대 49.82ms에서 p95 17.08ms·최대 17.20ms, probe command 전송→첫 물리 반응 약 36ms에서 약 27ms |
 | 일정 영향 | D11의 입력 반응·상태 지연 처리 일부를 D6에 선행 구현했으며, reconnect·packet gap HUD는 D11에 유지 |
-| 남은 한계 | 평면 접촉을 MapPackage 지형 raycast로 교체하고 실제 suspension stroke·경사 시험은 D7에서 진행 |
+| 남은 한계 | legacy `yaw_rate`·steering 우회전 양수 규약을 ADR-011 FLU 계약으로 이행해야 함; 평면 접촉을 MapPackage 지형 raycast로 교체하고 실제 suspension stroke·경사 시험은 D7에서 진행; 이번 Unreal 변경은 목표 Windows에서 Game/Editor target 재빌드 필요 |
 | 상세 기록 | [D6 작업 로그](./worklogs/2026-08-19.md) |
 
 ## 7. 일정 보호 규칙
 
 - D1 이후 자체 물리 범위 또는 외부 SDK 사용 방침을 변경하려면 비용과 마일스톤 영향을 먼저 기록한다.
-- 8월 25일 이후 공통 좌표계와 핵심 프로토콜의 호환성을 깨는 변경을 금지한다.
+- D7/M2에서 ADR-011 좌표·부호 계약을 동결한다. 이후에는 schema version·handshake와 대체 ADR 없이 의미를 바꾸지 않는다.
 - 8월 27일 M6를 통과하기 전에는 EXP 기능을 시작하지 않는다.
 - 확장 기능은 독립 commit과 설정 가능한 기능 단위로 구현하며, 성능·안정성 회귀 시 해당 확장만 제외한다.
 - 8월 31일 정오 이후에는 기능을 추가하지 않고 성능, 안정성, 패키징, 영상, 문서만 수정한다.
@@ -178,6 +178,8 @@ AI는 코드 초안, 반복 수정, 자동 시험, 빌드 오류 분석, 문서 
 
 | 버전 | 날짜 | 변경 내용 |
 |---|---|---|
+| 0.7 | 2026-08-19 | ADR-011 FLU 좌표 계약의 legacy yaw/steering·schema·adapter·시험 작업을 D7/D9/D11 게이트에 배치하고 D6 부분 완료 상태를 명시 |
+| 0.6 | 2026-08-19 | D6 종료 재검토의 SafeStop session/queue-age, body 좌표계, 횡하중 이동, Unreal 입력·entity 선택 보완과 Windows 재검증 항목 반영 |
 | 0.5 | 2026-08-19 | 향후 주말 작업 제외, AI 협업 2배 기준으로 핵심 R1을 8월 27일에 배치하고 운전 UX·카메라·디버그·replay·데모 확장을 포함한 8월 31일 최종 일정으로 개편 |
 | 0.4 | 2026-08-19 | D6 휠·타이어·안전 경로와 로컬 60Hz jitter·표시 지연 개선 결과 반영 |
 | 0.3 | 2026-08-14 | 자체 C++ 물리엔진 결정, D1 기본 모델·공통 Proto 구현과 시험 결과 반영 |

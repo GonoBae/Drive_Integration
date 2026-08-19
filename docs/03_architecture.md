@@ -4,7 +4,7 @@
 
 | 항목 | 값 |
 |---|---|
-| 버전 | 0.7 |
+| 버전 | 1.0 |
 | 작성일 | 2026-08-19 |
 | 대상 | R1 수동운전 및 R2/R3 자율주행 확장 기반 |
 | 관련 문서 | [일정표](./01_schedule.md), [기능표](./02_feature_matrix.md) |
@@ -25,7 +25,7 @@
 
 ```mermaid
 flowchart LR
-    INPUT["Unreal W/S/A/D·Space\n변화 즉시 + 60Hz 유지 명령"] --> UE["UE 5.6 ExternalVehiclePawn\n최대 50ms dead reckoning"]
+    INPUT["Unreal W/S/A/D·Space·Gamepad\n변화 최대 30Hz + 20Hz heartbeat"] --> UE["UE 5.6 ExternalVehiclePawn\n최대 50ms dead reckoning"]
     UE <-->|"WebSocket binary Protobuf :9000"| CPP["C++ Host 60Hz\n4륜 평면 접촉 + SafeStop"]
     CPP -->|"Protobuf / ZMQ :5555\nobserver"| PY["Python Relay"]
     PY -->|"JSON WebSocket :8000/ws\nobserver"| DBG["Debug clients"]
@@ -35,11 +35,12 @@ flowchart LR
 
 - C++ 물리는 4륜의 longitudinal slip·slip angle·friction circle과 차체 yaw/roll/pitch 응답을 계산하지만 접촉면은 아직 z=0 평면이다.
 - Proto는 루트 `protocol/vehicle.proto`로 통합됐고 C++·Python 생성물과 Unreal 경량 wire adapter가 같은 필드 계약을 사용한다.
-- C++ host는 절대 deadline 60Hz clock, command source/sequence 검사, 250ms SafeStop과 E-stop latch를 적용한다.
+- C++ host는 절대 deadline 60Hz clock, command source/session/sequence/queue-age 검사, 250ms SafeStop과 E-stop latch를 적용한다.
 - WebSocket 세션은 HTTP 101 accept 완료 전 state frame을 쓰지 않으며, 전송 중 state queue는 latest-wins로 제한한다.
-- Unreal client는 입력 변화를 즉시 보내고 WorldState의 pose·body velocity·4개 wheel state를 표시한다.
+- Unreal client는 입력 변화를 deadzone 처리 후 최신값 우선으로 합쳐 최대 30Hz로 보내고 WorldState의 pose·body velocity·4개 wheel state를 표시한다.
 - map checksum은 필드만 있고 현재 기본값은 `unset`이다.
-- 재연결 handshake, packet gap HUD, MapPackage 지형·충돌, 실제 suspension stroke는 아직 없다.
+- 자동 재연결은 구현됐지만 Hello/schema/map capability handshake, packet gap HUD,
+  MapPackage 지형·충돌, 실제 suspension stroke는 아직 없다.
 
 ### 3.2 목표 구조
 
@@ -65,6 +66,11 @@ flowchart LR
 
 ### 4.1 C++ SimCore
 
+아래 표는 R1 이후까지 유지할 목표 논리 경계다. 현재 코드는 `SimulationHost`가
+`SimulationClock`, `ControlLease`, `VehiclePhysics`를 조정하고, `WsServer`와
+`ZmqPublisher`는 callback으로 주입하는 단계까지 분리됐다. `CollisionWorld`,
+`EntityWorld`, `MapLoader`, `Recorder`는 아직 구현 전이다.
+
 | 모듈 | 책임 | 소유 데이터 |
 |---|---|---|
 | `SimulationClock` | 고정 tick, substep, pause/reset, overrun 계측 | sim time, tick index |
@@ -80,6 +86,10 @@ flowchart LR
 C++는 렌더링, 영상 센서 생성, 자율주행 의사결정을 담당하지 않는다.
 
 ### 4.2 Unreal
+
+현재 구현은 `SimCoreClientComponent`, `SimCoreProtocol`, `ExternalVehiclePawn`,
+`SimCoreCoordinateFrames`, `SimCorePresentation`이다. 아래 표의 나머지 항목은
+향후 분리·구현할 목표 모듈이다.
 
 | 모듈 | 책임 | 금지되는 책임 |
 |---|---|---|
@@ -131,25 +141,43 @@ EmergencyStop > Active control lease(Manual 또는 Autonomous) > SafeStop
 - Manual과 Autonomous가 동시에 차량을 제어하지 않는다.
 - 모드 전환은 명시적인 요청·승인 handshake를 거친다.
 - 유효 command가 250ms 동안 없으면 기본적으로 throttle을 해제하고 안전 제동한다.
+- controller는 연결마다 고유 `session_id`를 만들며 sequence는 해당 session 안에서 단조 증가한다.
+- active session에서도 client 생성 시각과 server 수신 간격으로 추정한 큐 체류 시간이 100ms를 넘는 명령은 적용하지 않는다.
+- timeout 시 기존 session을 폐기하고 WebSocket을 닫는다. Unreal은 0.5초 뒤 새 session ID로 재연결하므로 이전 소켓의 큐 데이터가 새 lease로 넘어오지 않는다.
 - reset, spawn, map 변경은 일반 ControlCommand와 분리한다.
 
 ## 6. 좌표·단위·시간 규약
 
 ### 6.1 좌표계
 
-| 계층 | 좌표계 | 사용처 |
-|---|---|---|
-| 지리 원본 | WGS84 longitude/latitude/ellipsoidal height | Cesium 위치, GNSS 출력, 지도 import |
-| 물리 기준 | Local ENU, X=East, Y=North, Z=Up | C++ 위치·속도·충돌 계산 |
-| Unreal 표시 | Unreal local world + Cesium transform | 렌더링, 카메라, 센서 |
-| 차량 body frame | X=forward, Y=left, Z=up을 canonical로 정의 | 휠·센서 장착·차량 상태 |
+공통 공개 좌표는 ROS REP-103과 호환되는 right-handed 규약을 사용한다. Unreal과 현재 solver의 좌표는 각 runtime 내부 구현이며 경계 adapter 밖으로 노출하지 않는다.
 
-- `MapOrigin`은 WGS84 원점과 ENU frame을 정의한다.
-- Unreal의 축·handedness 차이는 `GeoTransformAdapter` 한 곳에서만 변환한다.
+| frame | 좌표계 | 사용처 |
+|---|---|---|
+| WGS84 | longitude/latitude/ellipsoidal height | Cesium 위치, GNSS 출력, 지도 import |
+| `map_enu` | right-handed, X=East, Y=North, Z=Up | C++ 위치·속도·충돌, MapPackage |
+| `base_link` | right-handed, X=forward, Y=left, Z=up(FLU) | 공통 body 상태, 휠·센서 장착, Python |
+| `unreal_actor` | left-handed, X=forward, Y=right, Z=up(FRU) | Unreal 표시 전용 |
+| `<sensor>_optical` | right-handed, X=right, Y=down, Z=forward | 향후 카메라 센서 출력 |
+
+| 물리량 | canonical 양의 방향 |
+|---|---|
+| body yaw rate | 좌회전 |
+| road-wheel steering angle·normalized steering command | 좌조향 |
+| wheel slip angle·lateral force | wheel-local left |
+| navigation heading | North=0°, 시계 방향; body 회전 vector와 별도 scalar |
+
+- `MapOrigin`은 WGS84 원점과 `map_enu` frame을 정의한다.
+- 항법 heading과 body yaw rate의 관계는 `heading_rate_clockwise = -body_yaw_rate_left_positive`다.
+- Unreal body polar vector는 `(x, y, z)m → (100x, -100y, 100z)cm`로 변환한다. 자세와 angular velocity는 handedness를 고려한 basis 변환을 사용한다.
+- 현재 `SimCoreCoordinateFrames`가 평면 ENU 위치, FLU 속도와 schema-v1 자세의
+  Unreal 표시 변환을 모은다. 완전한 `GeoTransformAdapter`/`BodyFrameAdapter`,
+  Cesium·quaternion 변환과 왕복 시험은 ADR-011 후속 작업이다.
 - 위치는 meter, 속도는 m/s, 가속도는 m/s², 질량은 kg, 시간은 second를 사용한다.
-- 물리 내부 각도와 각속도는 radian 기반으로 통일하고 UI에서만 degree로 표현한다.
+- 물리 내부 각도와 각속도는 radian 기반으로 통일하고 기존 표시용 pose 필드만 degree를 사용한다.
 - 위·경도는 물리 적분에 사용하지 않고 ENU 상태에서 필요할 때 변환한다.
-- 원점, 축, quaternion 회전은 왕복 자동 시험을 작성한다.
+
+현재 공개 `linear_velocity_body`, `angular_velocity_body`와 wheel lateral 값은 FLU/Y-left로 1차 전환됐다. 다만 scalar `yaw_rate`, `steering_angle`, `ControlCommand.steering`은 아직 우회전 양수인 legacy 계약이고, 변환도 전용 adapter로 완전히 모이지 않았다. 이 항목을 완료로 오인하지 않도록 [ADR-011의 COORD-002~008](./decisions/ADR-011-canonical-coordinate-frames.md#현재-구현과-남은-이행-작업)을 R1 선행 작업으로 추적한다.
 
 ### 6.2 시간 모델
 
@@ -304,6 +332,10 @@ R1에서 “정확한 C++ 물리”는 다음을 의미한다.
 
 R1 수동운전의 runtime control/state 통신은 `WebSocket binary + Protobuf`로 확정한다. C++ host의 현행 JSON 입력 파서는 제거됐으며, UDP는 초기값이 아니라 측정 결과가 나쁠 때 재검토하는 대안이다. Python relay의 JSON WebSocket은 수동운전 runtime protocol이 아니라 observer/debug 경로로만 취급한다.
 
+현재 R1 구현은 하나의 WebSocket 연결에서 `ControlCommand`와 `WorldState`를
+교환한다. 아래 신뢰성/실시간 채널 분리는 센서·생명주기 메시지가 추가될 때의
+논리 목표이며, 별도 transport로 아직 구현된 것은 아니다.
+
 - 신뢰성 채널에서 handshake·reset·설정·생명주기 메시지를 교환
 - 실시간 채널에서 Unreal→C++ command와 C++→Unreal state를 교환
 - runtime control/state 메시지는 Protobuf `Envelope`를 사용
@@ -314,6 +346,10 @@ R1 수동운전의 runtime control/state 통신은 `WebSocket binary + Protobuf`
 
 ### 10.2 메시지 계층
 
+현재 runtime에서 처리하는 payload는 `ControlCommand`와 `WorldState`다.
+`Hello`와 `Health`는 Proto 정의만 존재하며, `AgentIntent`, `SignalState`,
+`LifecycleCommand`, `SensorMetadata`는 목표 메시지다.
+
 ```text
 Envelope
   schema_version
@@ -321,6 +357,7 @@ Envelope
   simulation_time_ns
   source_id
   map_package_checksum
+  session_id
   payload
 ```
 
@@ -349,8 +386,10 @@ Envelope
 
 60Hz 물리와 네트워크 I/O는 같은 단일 `io_context`에서 순서대로 처리한다. 로컬 수동운전 경로는 다음 규칙을 사용한다.
 
-- 입력 값이 바뀌면 다음 periodic send를 기다리지 않고 즉시 `ControlCommand`를 보낸다.
+- 동일 render tick의 axis callback은 하나의 최신 command로 합치고, deadzone·변화 epsilon을 적용한 뒤 최대 30Hz로 보낸다.
 - 입력 유지 중에는 20Hz heartbeat로 250ms timeout lease를 갱신한다. 물리와 WorldState는 60Hz를 유지한다.
+- 각 연결은 고유 `session_id`와 독립 sequence를 사용한다. 서버는 100ms를 초과해 송신 큐에 머문 것으로 추정되는 command를 폐기하여 SafeStop을 해제하지 못하게 한다.
+- 250ms timeout이 발생하면 서버는 해당 session을 영구 폐기하고 연결을 닫으며, Unreal은 기본 0.5초 후 새 session으로 자동 재연결한다.
 - Windows UE 5.6 client는 libWebSockets event-loop service를 사용한다. polling fallback은 240Hz이며, producer가 consumer보다 빨라지는 무제한 command FIFO를 허용하지 않는다.
 - Editor PIE에서는 background CPU throttling을 꺼 frame hitch가 command timeout을 반복시키지 않게 한다.
 - Windows host 실행 중 1ms timer resolution을 요청하고 종료 시 반드시 반환한다.
@@ -505,7 +544,7 @@ release/
   RUNBOOK.md
 ```
 
-권장 실행 순서는 다음과 같다.
+목표 배포 실행 순서는 다음과 같다.
 
 1. SimCore가 config와 MapPackage를 검증하고 대기한다.
 2. Unreal 패키지가 연결해 schema·map handshake를 수행한다.
@@ -513,6 +552,10 @@ release/
 4. C++가 tick을 시작하고 WorldState를 발행한다.
 5. Unreal이 IG, traffic intent, sensor, recording을 시작한다.
 6. 종료 시 replay와 성능·오류 로그를 flush한다.
+
+현재 프로토타입은 `WsServer`를 시작한 직후 물리 tick을 시작하며, 연결 시
+초기 `WorldState`를 전송한다. 위 순서의 map/schema handshake와 명시적 lease
+획득 게이트는 아직 구현 전이다.
 
 ## 17. 아키텍처 결정 기록
 
@@ -527,7 +570,8 @@ release/
 | ADR-007 | 확정 | R1은 수동운전, 학습은 연기 | 8월 품질과 기반 구조에 집중 |
 | ADR-008 | 확정 | 핵심부 보행 중심, 주변 도로 주행 | Wall/Broad의 실제 공간 특성과 사용자 요구 반영 |
 | ADR-009 | 확정 | 센서 payload를 제어 채널과 분리 | 이미지 readback이 physics/control 지연을 만들지 않도록 함 |
-| ADR-010 | 확정 | Windows 60Hz timer 안정화 + 입력 즉시 전송 + 최대 50ms dead reckoning | loopback jitter와 추종 보간 지연을 줄이면서 C++ 물리 권한 유지 |
+| ADR-010 | 확정 | Windows 60Hz timer 안정화 + 입력 latest-wins/coalescing + 최대 50ms dead reckoning | loopback jitter와 송신 FIFO·추종 보간 지연을 줄이면서 C++ 물리 권한 유지 |
+| ADR-011 | 확정·이행 중 | 공통 공개 좌표는 ROS 호환 FLU, Unreal FRU와 solver 내부 좌표는 adapter에서 변환 | Python·센서·향후 ROS 확장에 하나의 right-handed 계약 제공 |
 
 ## 18. 결정 대기 사항
 
@@ -551,11 +595,16 @@ release/
 - [Unreal Engine Set Actor Transform](https://dev.epicgames.com/documentation/unreal-engine/BlueprintAPI/Transformation/SetActorTransform)
 - [Google Map Tiles API 정책](https://developers.google.com/maps/documentation/tile/policies)
 - [Microsoft timeBeginPeriod 문서](https://learn.microsoft.com/windows/win32/api/timeapi/nf-timeapi-timebeginperiod)
+- [ROS REP-103 좌표·단위 규약](https://reps.openrobotics.org/rep-0103/)
+- [Unreal Engine 좌표계와 공간](https://dev.epicgames.com/documentation/en-us/unreal-engine/coordinate-system-and-spaces-in-unreal-engine)
 
 ## 20. 변경 이력
 
 | 버전 | 날짜 | 변경 내용 |
 |---|---|---|
+| 1.0 | 2026-08-19 | C++ `SimulationHost`와 WebSocket 수명주기, Unreal 연결 generation·game-thread 적용 및 좌표·표시 helper, Python package entrypoint·lifespan·오류 격리 리팩터링과 재검증 상태 반영 |
+| 0.9 | 2026-08-19 | ADR-011의 ROS 호환 FLU canonical frame, Unreal 경계 변환, legacy yaw/steering 부호와 adapter·시험 이행 작업 반영 |
+| 0.8 | 2026-08-19 | control session·queue-age SafeStop, body Y-left publish 계약, 횡하중 이동 수정, 입력 coalescing과 entity ID 선택 반영 |
 | 0.7 | 2026-08-19 | UE 5.6 WebSocket command FIFO의 60Hz 생산/30Hz 소비 불균형과 event-loop·20Hz heartbeat 해결 반영 |
 | 0.6 | 2026-08-19 | 현재 UE/C++ 수직 절단과 4륜 상태를 반영하고 handshake 순서, Windows 60Hz jitter, 입력 즉시 전송, 최대 50ms dead reckoning 및 측정값 기록 |
 | 0.5 | 2026-08-14 | C++ host의 binary Protobuf ControlCommand 수신과 WorldState broadcast 구현 상태 반영 |

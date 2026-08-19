@@ -61,6 +61,7 @@ struct Vector3State {
 };
 
 struct WheelState {
+    // 0=front-left, 1=front-right, 2=rear-left, 3=rear-right.
     uint32_t wheel_index = 0;
     bool in_contact = true;
     float steering_angle = 0.f;
@@ -69,7 +70,7 @@ struct WheelState {
     float longitudinal_slip = 0.f;
     float slip_angle = 0.f;
     float longitudinal_force = 0.f;
-    float lateral_force = 0.f;
+    float lateral_force = 0.f; // wheel-local left-positive force
     Vector3State contact_point_enu;
     Vector3State contact_normal_enu{0.0, 0.0, 1.0};
 };
@@ -81,18 +82,20 @@ struct VehicleState {
     double   lon       = 0.0;
     double   alt       = 0.0;
     float    heading   = 0.f;  // degrees 0~360
-    float    pitch     = 0.f;
-    float    roll      = 0.f;
+    float    pitch     = 0.f;  // canonical body-frame pitch (degrees)
+    float    roll      = 0.f;  // canonical body-frame roll (degrees)
     float    speed     = 0.f;  // m/s
     float    accel     = 0.f;  // m/s²
     float    fuel      = 100.f; // %
     float    rpm       = 800.f;
     double   east      = 0.0;   // local ENU X (meters)
     double   north     = 0.0;   // local ENU Y (meters)
-    float    yaw_rate  = 0.f;   // rad/s, positive = right turn
+    float    yaw_rate  = 0.f;   // navigation heading rate, positive = right turn
     float    steering_angle = 0.f; // road wheel angle (radians)
     VehicleGear gear   = VehicleGear::Drive;
     Vector3State position_enu;
+    // Published body vectors use the right-handed canonical frame:
+    // X=forward, Y=left, Z=up. Internal solver lateral values are right-positive.
     Vector3State linear_velocity_body;
     Vector3State angular_velocity_body;
     std::array<WheelState, 4> wheels;
@@ -108,6 +111,8 @@ public:
     VehicleState get_state() const;
 
 private:
+    void update_wheel_contact_points();
+
     VehicleState       state_;
     VehicleInput       input_;
     VehicleParameters  parameters_;

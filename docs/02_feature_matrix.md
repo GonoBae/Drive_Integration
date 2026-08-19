@@ -4,7 +4,7 @@
 
 | 항목 | 값 |
 |---|---|
-| 버전 | 0.8 |
+| 버전 | 1.0 |
 | 작성일 | 2026-08-19 |
 | R1 | 2026-08-31 수동운전 버티컬 슬라이스 |
 | R2 | 자율주행 환경·경로계획 기반, 일정 추후 확정 |
@@ -25,6 +25,8 @@
 | 실험 | 정해진 스파이크 결과로 상세 구현을 확정 |
 | 제안 | 사용자 확인이 필요한 항목 |
 | 연기 | R1에서 구현하지 않음 |
+
+> 2026-08-19 검증 주석: `NET-001/002/003/006`, `UE-001/002`의 기능 경로는 이전 Windows UE 통합 검증을 통과했다. 이후 적용한 Unreal 연결 수명주기·좌표·표시 리팩터링은 이 Mac에서 정적 검토까지 완료했으며, 최신 revision의 Windows UE 5.6 Game/Editor 재빌드는 R1 최종 게이트로 남아 있다.
 
 ## 3. R1 범위 요약
 
@@ -86,12 +88,12 @@ R1은 다음 장면을 완성하는 릴리스다.
 | PHY-001 | Must | 결정 | C++ 최종 물리 권한 | Ego 및 충돌 참여 엔티티의 최종 pose를 C++가 확정 | 수동·자율 모드 동일 |
 | PHY-002 | Must | 구현 중 | 자체 C++ 차량 동역학 코어 | 외부 차량 SDK 없이 단계별 모델과 회귀 시험이 macOS·Windows에서 동작 | 수식·파라미터·상태를 직접 확장 가능 |
 | PHY-003 | Must | 구현 | 로컬 ENU 물리 좌표 | 위·경도를 직접 적분하지 않고 meter 단위 ENU에서 계산 | GNSS 변환과 대규모 월드 대응 |
-| PHY-004 | Must | 구현 | 고정 시뮬레이션 tick | 렌더 FPS 변화와 무관하게 기본 60Hz로 진행; substep 설정 가능 | headless·재생·학습에 재사용 |
+| PHY-004 | Must | 구현 중 | 고정 시뮬레이션 tick | 렌더 FPS와 무관한 기본 60Hz와 overrun skip은 구현; configurable substep은 후속 | headless·재생·학습에 재사용 |
 | PHY-005 | Must | 구현 중 | 기본 차량 동역학 | 4륜 평면 접촉·종횡 타이어 힘·차체 roll/pitch 응답에서 지형 raycast와 서스펜션으로 확장 | 차량 설정 교체로 다른 차종 지원 |
 | PHY-006 | Must | 결정 | 정적 충돌 | 지면, 커브, 벽과 지속 관통하지 않고 C++에서 접촉 해결 | 시나리오 지도 공통 |
 | PHY-007 | Must | 결정 | 동적 충돌 프록시 | NPC OBB와 보행자 capsule이 같은 tick 기준으로 충돌 월드에 존재 | 향후 다중 에이전트 |
 | PHY-008 | Must | 결정 | 노면 재질·마찰 | MapPackage의 표면 ID로 마찰 파라미터를 선택 | 젖은 노면 등 시나리오 확장 |
-| PHY-009 | Must | 구현 | 입력 안전장치 | 입력 범위 clamp, 250ms 기본 timeout, 연결 중단 시 감속·정지 | 자율주행 fail-safe |
+| PHY-009 | Must | 구현 | 입력 안전장치 | 입력 범위 clamp, 250ms timeout, 세션·순번·큐 age 검증을 통과한 최신 명령만 SafeStop 해제 | 자율주행 fail-safe |
 | PHY-010 | Must | 결정 | 물리 파라미터 파일화 | 차량 수치가 코드가 아닌 버전 관리 설정 파일에 존재 | 차량 교체·튜닝·시험 |
 | PHY-011 | Must | 구현 중 | 물리 회귀 시험 | 직진, 정지, 회전, 경사, 충돌, replay 시험 자동 실행 | 수식·파라미터 변경 검증 |
 | PHY-012 | Future | 연기 | 실차 파라미터 동정 | 대상 차량 계측 데이터와 기준 주행에 맞춰 오차 검증 | 차량별 현실성 향상 |
@@ -102,21 +104,22 @@ R1은 다음 장면을 완성하는 릴리스다.
 |---|---|---|---|---|---|
 | NET-001 | Must | 구현 | Unreal↔C++ 직접 연결 | Python relay 없이 명령과 상태가 양방향 전달됨 | 지연과 장애 지점 감소 |
 | NET-002 | Must | 구현 | 단일 공통 Protobuf 스키마 | C++·Python 생성물과 Unreal wire adapter가 루트 `protocol/`의 하나의 필드 계약을 사용 | 스키마 중복 제거 |
-| NET-003 | Must | 구현 | 메시지 Envelope | schema version, sequence, simulation time, source, map checksum 포함 | 기록·재생·오류 진단 |
-| NET-004 | Must | 결정 | 재연결·중복·순서 처리 | 오래되거나 중복된 command를 버리고 재연결 후 handshake 수행 | 네트워크 견고성 |
+| NET-003 | Must | 구현 | 메시지 Envelope | schema version, sequence, simulation time, source, map checksum, session ID 포함 | 기록·재생·오류 진단 |
+| NET-004 | Must | 구현 중 | 재연결·중복·순서 처리 | session별 sequence·큐 age, timeout socket 폐기와 Unreal 자동 재연결은 구현; Hello handshake까지 통과 | 네트워크 견고성 |
 | NET-005 | Must | 결정 | MapPackage handshake | Unreal과 C++ 체크섬이 다르면 주행 시작을 거부하고 이유 표시 | 충돌 불일치 방지 |
 | NET-006 | Must | 구현 | WebSocket binary + Protobuf transport | JSON 없이 ControlCommand와 WorldState가 C++↔Unreal 사이에서 전이중 전달되고 HTTP 101보다 payload가 선행하지 않음 | 이후 측정 결과에 따라 UDP/IPC로 교체 가능 |
 | NET-007 | Future | 연기 | 고대역 센서 transport | 이미지·LiDAR는 control/state와 분리된 shared memory/전용 채널 사용 | FSD 처리량 확보 |
-| NET-008 | Must | 구현 중 | 저지연 60Hz 전달 | Windows 로컬 state 간격 p95 18.5ms 이하, 입력 변화 즉시 전송; packaged build에서 command/state age를 재측정 | LAN·다중 엔티티 확장 시 transport 판단 기준 |
+| NET-008 | Must | 구현 중 | 저지연 60Hz 전달 | Windows 로컬 state 간격 p95 18.5ms 이하, 변화 입력 coalescing 후 33ms 이내 전송; packaged build에서 command/state age를 재측정 | LAN·다중 엔티티 확장 시 transport 판단 기준 |
+| NET-009 | Must | 구현 중 | 좌표·부호 schema 계약 | 공개 body는 FLU, yaw·steering은 좌회전/좌조향 양수, heading은 별도 시계 방향 scalar로 정의하고 구 계약 client를 handshake에서 거부 | Python·센서·ROS 확장 시 동일 계약 사용 |
 
 ### 4.4 Unreal IG와 수동운전
 
 | ID | 우선순위 | 상태 | 기능 | R1 완료 기준 | 향후 재사용 |
 |---|---|---|---|---|---|
-| UE-001 | Must | 구현 | 수동 입력 경로(현재 Pawn 내장) | W/S/A/D·Space 입력을 정규화하고 변화 시 즉시, 유지 중 20Hz lease heartbeat로 전송하며 장시간 FIFO 지연이 증가하지 않음 | 향후 ManualInputComponent로 분리해 AI 명령과 같은 포맷 사용 |
+| UE-001 | Must | 구현 | 수동 입력 경로(현재 Pawn 내장) | W/S/A/D·Space와 게임패드 입력에 deadzone을 적용하고 최신 변화값을 최대 30Hz, 유지 명령을 20Hz heartbeat로 전송하며 FIFO 지연이 증가하지 않음 | 향후 ManualInputComponent로 분리해 AI 명령과 같은 포맷 사용 |
 | UE-002 | Must | 구현 | ExternalVehiclePawn | C++ pose와 4개 wheel state를 표시하고 Ego Chaos 동역학은 비활성 | 외부 물리 엔티티 공통 기반 |
-| UE-003 | Must | 구현 중 | 상태 표시·제한 외삽 | 최신 body velocity로 최대 50ms만 dead reckoning하고 이후 transform을 고정; packet gap 경고·재연결은 후속 | 네트워크 지연 완화 |
-| UE-004 | Must | 결정 | 좌표 변환 어댑터 | ENU pose를 Cesium/Unreal transform으로 일관되게 변환 | 지도 원점 변경 대응 |
+| UE-003 | Must | 구현 중 | 상태 표시·제한 외삽 | 최대 50ms dead reckoning, stale wheel 정지와 자동 재연결은 구현; packet-gap HUD와 재연결 full snapshot은 후속 | 네트워크 지연 완화 |
+| UE-004 | Must | 구현 중 | 좌표 변환 어댑터 | `map_enu`↔Cesium/Unreal과 FLU `base_link`↔FRU Actor의 축·단위·quaternion·angular velocity 변환을 전용 adapter와 왕복 시험으로 검증 | 지도 원점 변경과 ROS 호환 센서에 재사용 |
 | UE-005 | Must | 결정 | 운전자 카메라와 외부 카메라 | 운전용 카메라와 영상·검증용 외부 고정 camera rig 제공 | 센서와 촬영 분리 |
 | UE-006 | Must | 결정 | 핵심 디버그 HUD | 연결, sim tick, packet age, 속도, map checksum, collision, SafeStop 상태 표시 | 통합 문제 진단 |
 | UE-007 | Should | 결정 | 충돌·차선·휠 디버그 오버레이 | C++ 충돌 proxy, LaneGraph, 휠 접촉, 타이어 힘을 Unreal 화면에서 개별로 켜고 끌 수 있음 | 지도·차량 물리 보정과 FSD 디버깅 |
@@ -141,8 +144,8 @@ R1은 다음 장면을 완성하는 릴리스다.
 
 | ID | 우선순위 | 상태 | 기능 | R1 완료 기준 | 향후 재사용 |
 |---|---|---|---|---|---|
-| SEN-001 | Must | 결정 | SensorRig와 장착 좌표 | 센서 이름, 차체 기준 transform, 주기, 활성 상태를 설정 파일로 정의 | 카메라·LiDAR·Radar 공통 |
-| SEN-002 | Must | 결정 | 센서 시간·좌표 메타데이터 | 모든 센서 메시지가 sim time, frame ID, pose, sequence를 가짐 | 다중 센서 동기화 |
+| SEN-001 | Must | 결정 | SensorRig와 장착 좌표 | 센서 이름, FLU `base_link` 기준 transform, 주기, 활성 상태를 설정 파일로 정의 | 카메라·LiDAR·Radar 공통 |
+| SEN-002 | Must | 결정 | 센서 시간·좌표 메타데이터 | 모든 센서 메시지가 sim time, frame ID, parent frame, pose, sequence, 좌표 규약 version을 가짐 | 다중 센서 동기화 |
 | SEN-003 | Should | 제안 | 전방 RGB 카메라 smoke test | 낮은 주기로 프레임과 메타데이터 1개를 기록 | 향후 인지 입력 |
 | SEN-004 | Future | 연기 | GNSS·IMU 모델 | noise/bias가 구성 가능한 GNSS·IMU 생성 | localization 학습·평가 |
 | SEN-005 | Future | 연기 | LiDAR·Radar·분할 카메라 | 개별 주기와 좌표계로 데이터 생성 | perception 입력 |
@@ -172,7 +175,7 @@ R1은 다음 장면을 완성하는 릴리스다.
 | NFR-001 | Must | 성능 | 목표 PC의 패키지 빌드, 1920×1080, uncapped 평균 60fps 이상; p95 frame time 18.5ms 이하를 함께 충족 |
 | NFR-002 | Must | 안정성 | 30분 연속 수동 주행 중 crash, deadlock, 무한 재연결 없음 |
 | NFR-003 | Must | 안전 정지 | command age가 기본 250ms를 넘으면 throttle 해제 후 제동 |
-| NFR-004 | Must | 좌표 일치 | 기준점 왕복 변환 오차 5cm 이하; 단위·축 변환 자동 시험 |
+| NFR-004 | Must | 좌표 일치 | ENU·FLU·Unreal·camera optical 기준축, polar/axial vector, heading/yaw, quaternion 왕복 자동 시험 통과; 기준점 왕복 오차 5cm 이하 |
 | NFR-005 | Must | 표시 일치 | 정상 연결 상태에서 Unreal 표시 pose와 최신 C++ 기준 pose 차이 5cm/0.5도 이하 |
 | NFR-006 | Must | 충돌 일치 | 동일 collision source checksum을 사용하며 지속 관통이 없음 |
 | NFR-007 | Must | 재현성 | 같은 빌드·설정·입력 replay의 최종 위치 1cm, yaw 0.1도 이내 |
@@ -195,6 +198,7 @@ R1은 다음 장면을 완성하는 릴리스다.
 | AT-07 | 기록·재생 | 같은 기록을 재생해 NFR-007 오차 이내 도착 | REC-001~002 |
 | AT-08 | 장시간·성능 | 목표 PC에서 30분 안정성과 NFR-001 측정값 기록 | NFR-001~002 |
 | AT-09 | 촬영 | replay를 카메라 변경 후 재생하고 영상 출력 가능 | UE-005, REC-003 |
+| AT-10 | 좌표·부호 계약 | 좌회전에서 body yaw·steering·wheel lateral 부호가 FLU 계약과 일치하고, heading 관계식 및 FLU↔Unreal 자세 왕복 시험 통과 | NET-009, UE-004, NFR-004 |
 
 ## 7. 결정 입력 및 상태
 
@@ -208,11 +212,14 @@ R1은 다음 장면을 완성하는 릴리스다.
 | DEC-F06 | 사용할 건물·차량·보행자 에셋과 라이선스 | D8 이전 | 영상 품질 또는 배포 가능성 저하 |
 | DEC-F07 | **완료: 8월 20일 이후 주말을 제외하고 AI 협업 2배 기준 적용** | 2026-08-19 결정 | 핵심 R1은 8월 27일, 확장 포함 최종 릴리스는 8월 31일로 관리 |
 | DEC-F08 | **완료: Core RC 통과 후 운전 UX·카메라·디버그·replay·데모 기능 추가** | 2026-08-19 결정 | Must 회귀 시 해당 Should 확장만 제외하고 핵심 릴리스를 보호 |
+| DEC-F09 | **완료: 공통 공개 좌표는 ROS 호환 FLU, Unreal FRU는 경계 adapter에서 변환** ([ADR-011](./decisions/ADR-011-canonical-coordinate-frames.md)) | 2026-08-19 결정 | legacy yaw/steering 부호와 schema 이행을 D7 전에 끝내지 않으면 이후 센서·자율주행 코드에서 혼용 위험 |
 
 ## 8. 변경 이력
 
 | 버전 | 날짜 | 변경 내용 |
 |---|---|---|
+| 1.0 | 2026-08-19 | ADR-011 FLU canonical 결정, 좌표·부호 schema와 Unreal adapter, 센서 frame metadata, AT-10 이행 기준 추가 |
+| 0.9 | 2026-08-19 | SafeStop session/sequence/queue-age 검증, body Y-left 계약 정합화, 횡하중 이동 회귀 수정, Unreal 입력 coalescing·entity 선택 반영 |
 | 0.8 | 2026-08-19 | 8월 27일 Core RC 이후 운전 HUD·4종 카메라·복구 퀵 액션·디버그 오버레이·replay 조작·데모 프리셋 확장 범위 확정 |
 | 0.7 | 2026-08-19 | UE 5.6 command FIFO 누적 해결, event-loop service와 20Hz lease heartbeat 완료 기준 반영 |
 | 0.6 | 2026-08-19 | Unreal 직접 연결·Envelope·binary transport 완료 상태와 저지연 60Hz 전달·제한 외삽·NFR-012 반영 |

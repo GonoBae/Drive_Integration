@@ -83,6 +83,7 @@ void test_control_command_envelope_maps_to_input()
     envelope.set_sequence(100);
     envelope.set_simulation_time_ns(33'333'334);
     envelope.set_source_id("unreal");
+    envelope.set_session_id("unreal-session-1");
     envelope.set_map_package_checksum("map-checksum");
 
     auto* command = envelope.mutable_control_command();
@@ -92,13 +93,15 @@ void test_control_command_envelope_maps_to_input()
     command->set_steering(-0.25f);
     command->set_handbrake(true);
     command->set_gear(simcore::VEHICLE_GEAR_REVERSE);
+    command->set_client_time_ns(5'000'000'000);
 
     std::string error;
     const auto input = simcore_host::parse_control_command_envelope(
         envelope.SerializeAsString(), &error);
 
     require(input.has_value(), "ControlCommand must parse: " + error);
-    require(input->sequence == 100 && input->source_id == "unreal",
+    require(input->sequence == 100 && input->source_id == "unreal" &&
+            input->session_id == "unreal-session-1",
             "control envelope metadata must be exposed for ordering checks");
     require(std::abs(input->input.throttle - 0.75f) < 1e-5f,
             "throttle must map");

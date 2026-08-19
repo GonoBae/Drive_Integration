@@ -37,6 +37,8 @@ namespace SimCoreProtocol
 			float SlipAngleRad = 0.0f;
 			float LongitudinalForceN = 0.0f;
 			float LateralForceN = 0.0f;
+			FVector3d ContactPointEnu = FVector3d::ZeroVector;
+			FVector3d ContactNormalEnu = FVector3d::ZeroVector;
 		};
 
 		uint32 EntityId = 0;
@@ -49,6 +51,8 @@ namespace SimCoreProtocol
 		float RollDegrees = 0.0f;
 		float SpeedMps = 0.0f;
 		float AccelMps2 = 0.0f;
+		float FuelPercent = 0.0f;
+		float EngineRpm = 0.0f;
 		double EastMeters = 0.0;
 		double NorthMeters = 0.0;
 		float YawRateRad = 0.0f;
@@ -66,10 +70,12 @@ namespace SimCoreProtocol
 		const FControlCommand& Command,
 		uint64 Sequence,
 		const FString& SourceId,
+		const FString& SessionId,
 		const FString& MapChecksum);
 
 	DRIVEINTEGRATION_API bool ParseWorldStateEnvelope(
 		TArrayView<const uint8> Data,
+		uint32 TargetEntityId,
 		FVehicleState& OutState,
 		FString& OutError);
 }

@@ -11,9 +11,11 @@
 | [03_architecture.md](./03_architecture.md) | 시스템 설계 관리 | C++·Unreal·Python 책임, 지도·충돌·통신·센서 구조 |
 | [ADR-005](./decisions/ADR-005-realtime-transport-protocol.md) | 실시간 통신 결정 | WebSocket binary + Protobuf, JSON runtime 제거, UDP 재검토 조건 |
 | [ADR-006](./decisions/ADR-006-custom-vehicle-physics.md) | 자체 차량 물리 결정 | C++ 직접 구현 근거, 단계별 범위, 비교 시험과 재검토 조건 |
+| [ADR-011](./decisions/ADR-011-canonical-coordinate-frames.md) | 공통 좌표계 결정 | ROS 호환 FLU canonical frame, Unreal FRU 경계 변환, 남은 이행 작업 |
 | [ADR 목록](./decisions/README.md) | 기술 결정 색인 | 현재 ADR과 후속 번호 관리 |
+| [학습 센터](./study/README.md) | 교육 문서의 단일 입구 | 일정, 학습자료, 질문 및 답변의 세 문서로 안내 |
 | [2026-08-14 작업일지](./worklogs/2026-08-14.md) | 일별 실행 기록 | D1 구현, 검증 결과, 남은 위험과 다음 작업 |
-| [2026-08-19 작업일지](./worklogs/2026-08-19.md) | 일별 실행 기록 | D6 4륜 물리, Unreal 통합, 지연 계측과 송신 FIFO 해결 |
+| [2026-08-19 작업일지](./worklogs/2026-08-19.md) | 일별 실행 기록 | D6 4륜 물리·Unreal 통합, 지연 계측, 좌표계 결정, 전체 코드 리팩터링과 재검증 결과 |
 | [UE 5.6 WebSocket 입력 지연 해결 사례](./troubleshooting/ue56-websocket-growing-input-delay.md) | 문제 해결 기록 | 60Hz producer/30Hz consumer FIFO 누적, event-loop·20Hz heartbeat 수정과 진단 기준 |
 
 ## 현재 합의된 방향
@@ -27,6 +29,7 @@
 - 물리 권한: C++ SimCore
 - 차량 물리: 현재 C++ 서버에서 직접 개발; Chrono·PhysX·Chaos는 비교 기준으로만 사용
 - 실시간 통신: R1은 WebSocket binary + Protobuf, JSON runtime protocol은 제거
+- 공통 좌표: ROS 호환 right-handed FLU; Unreal의 left-handed FRU는 경계 adapter에서만 변환
 - Unreal 역할: 입력, IG(영상 생성), UI, 센서, 에이전트 표현
 - Python 역할: 향후 자율주행 판단; 수동운전 필수 경로에서는 제외
 - 차량 사고 파손 및 변형: 제외
@@ -53,10 +56,11 @@
 4. 완료는 “코드가 존재함”이 아니라 기능표의 검증 기준을 통과한 상태를 의미한다.
 5. 지도 원본, 차량 파라미터, 프로토콜에는 버전과 체크섬을 부여한다.
 6. 문서에서 확정되지 않은 수치나 선택지를 확정된 요구사항처럼 사용하지 않는다.
+7. 검토 중 발견한 후속 작업은 대화에만 남기지 않는다. 기능/ADR 작업 ID, 현재 상태, 완료 기준, 목표 일정 게이트를 문서에 함께 기록한다.
 
 ## 문서 기준 정보
 
 - 최초 작성일: 2026-08-14
-- 문서 버전: 0.7
-- 프로젝트 상태: D6 4륜 평면 물리·Unreal 직접 연결·저지연 수동입력과 UE 5.6 송신 FIFO 누적 해결 완료
+- 문서 버전: 1.0
+- 프로젝트 상태: D6 4륜 평면 물리·Unreal 직접 연결·저지연 수동입력 완료, C++·Python·Unreal 소스 구조 리팩터링 완료, ADR-011 좌표계 이행과 Windows UE 재검증은 D7/D9/D11에 추적
 - 기준 저장소: `Drive_Integration`

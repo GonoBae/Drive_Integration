@@ -18,6 +18,9 @@ namespace Config {
     inline constexpr double PHYSICS_HZ = 60.0;
     inline constexpr double PHYSICS_DT = 1.0 / PHYSICS_HZ;
     inline constexpr std::uint64_t COMMAND_TIMEOUT_NS = 250'000'000;
+    // A control packet whose generation clock trails receive time by more than
+    // this amount is considered queued/stale and cannot re-arm SafeStop.
+    inline constexpr std::uint64_t MAX_COMMAND_QUEUE_AGE_NS = 100'000'000;
 
     // Temporary Wall/Broad ENU anchor. The MapPackage loader will replace
     // altitude and the actual drivable-lane spawn when it is implemented.

@@ -23,6 +23,7 @@ struct ParsedControlCommand {
     std::uint64_t sequence = 0;
     std::uint64_t client_time_ns = 0;
     std::string source_id;
+    std::string session_id;
     std::string map_package_checksum;
     bool estop = false;
 };

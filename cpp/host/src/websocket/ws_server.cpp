@@ -23,9 +23,12 @@ void WsSession::start() {
         std::cerr << "[WS] TCP_NODELAY failed: " << socket_ec.message() << "\n";
     }
 
+    ws_.read_message_max(kMaxIncomingMessageBytes);
     ws_.async_accept([self = shared_from_this()](beast::error_code ec) {
         if (ec) {
-            std::cerr << "[WS] accept error: " << ec.message() << "\n";
+            if (!self->close_requested_ && ec != net::error::operation_aborted) {
+                std::cerr << "[WS] handshake error: " << ec.message() << "\n";
+            }
             self->closed_ = true;
             self->write_queue_.clear();
             return;
@@ -34,6 +37,11 @@ void WsSession::start() {
 
         self->handshake_complete_ = true;
         self->ws_.binary(true);
+        if (self->close_requested_) {
+            self->write_queue_.clear();
+            self->do_close();
+            return;
+        }
         self->do_read();
 
         // 접속 직전 쌓인 상태보다 accept 완료 시점의 authoritative state가
@@ -48,7 +56,7 @@ void WsSession::start() {
 }
 
 void WsSession::send_binary(std::shared_ptr<const std::string> message) {
-    if (closed_) {
+    if (closed_ || close_requested_) {
         return;
     }
 
@@ -76,6 +84,37 @@ void WsSession::send_binary(std::shared_ptr<const std::string> message) {
     }
 }
 
+void WsSession::close(const std::string& reason) {
+    if (closed_ || close_requested_) {
+        return;
+    }
+    close_requested_ = true;
+    close_reason_ = reason;
+    if (!handshake_complete_) {
+        // A WebSocket close frame is illegal before the HTTP upgrade has
+        // completed. Retire the underlying TCP connection instead; the
+        // pending async_accept handler owns this session until cancellation is
+        // delivered.
+        beast::error_code ignored;
+        ws_.next_layer().cancel(ignored);
+        ws_.next_layer().shutdown(tcp::socket::shutdown_both, ignored);
+        ws_.next_layer().close(ignored);
+        closed_ = true;
+        write_queue_.clear();
+        return;
+    }
+    if (write_in_progress_) {
+        // The front message owns the buffer used by async_write and must stay
+        // alive until its completion handler runs. Only discard pending state.
+        while (write_queue_.size() > 1) {
+            write_queue_.pop_back();
+        }
+    } else {
+        write_queue_.clear();
+        do_close();
+    }
+}
+
 // 수신 대기
 void WsSession::do_read() {
     ws_.async_read(buf_,
@@ -95,6 +134,9 @@ void WsSession::do_read() {
 
             auto msg = beast::buffers_to_string(self->buf_.data());
             self->buf_.consume(self->buf_.size());
+            if (self->close_requested_) {
+                return;
+            }
             self->on_message_(msg);
             self->do_read();
         });
@@ -121,60 +163,161 @@ void WsSession::do_write() {
             }
 
             self->write_queue_.pop_front();
+            if (self->close_requested_) {
+                self->write_queue_.clear();
+                self->do_close();
+                return;
+            }
             if (!self->write_queue_.empty()) {
                 self->do_write();
             }
         });
 }
 
+void WsSession::do_close() {
+    if (closed_ || !handshake_complete_ || write_in_progress_) {
+        return;
+    }
+
+    beast::websocket::close_reason reason;
+    reason.code = beast::websocket::close_code::policy_error;
+    reason.reason = close_reason_;
+    ws_.async_close(reason, [self = shared_from_this()](beast::error_code ec) {
+        if (ec && ec != net::error::operation_aborted) {
+            std::cerr << "[WS] close error: " << ec.message() << "\n";
+        }
+        self->closed_ = true;
+        self->write_queue_.clear();
+    });
+}
+
 // --- WsServer ---
+
+struct WsServer::State : public std::enable_shared_from_this<WsServer::State> {
+    State(net::io_context& ioc, unsigned short port,
+          BinaryMessageCallback on_msg, ConnectMessageFactory on_connect)
+        : acceptor(ioc, tcp::endpoint(tcp::v4(), port))
+        , on_message(std::move(on_msg))
+        , connect_message(std::move(on_connect))
+    {}
+
+    void start()
+    {
+        if (started || stopping) {
+            return;
+        }
+        started = true;
+        do_accept();
+    }
+
+    void stop(const std::string& reason)
+    {
+        if (stopping) {
+            return;
+        }
+        stopping = true;
+
+        beast::error_code ignored;
+        acceptor.cancel(ignored);
+        acceptor.close(ignored);
+        close_all(reason);
+    }
+
+    void broadcast_binary(const std::string& message)
+    {
+        prune_sessions();
+        auto shared_message = std::make_shared<const std::string>(message);
+        for (auto& weak_session : sessions) {
+            if (auto session = weak_session.lock()) {
+                session->send_binary(shared_message);
+            }
+        }
+    }
+
+    void close_all(const std::string& reason)
+    {
+        prune_sessions();
+        for (auto& weak_session : sessions) {
+            if (auto session = weak_session.lock()) {
+                session->close(reason);
+            }
+        }
+    }
+
+    void do_accept()
+    {
+        acceptor.async_accept(
+            [self = shared_from_this()](beast::error_code ec, tcp::socket socket) {
+                if (ec) {
+                    if (!self->stopping && ec != net::error::operation_aborted) {
+                        std::cerr << "[WS] socket accept error: " << ec.message() << "\n";
+                    }
+                    return;
+                }
+                if (self->stopping) {
+                    beast::error_code ignored;
+                    socket.close(ignored);
+                    return;
+                }
+
+                auto session = std::make_shared<WsSession>(
+                    std::move(socket), self->on_message, self->connect_message);
+                self->sessions.push_back(session);
+                session->start();
+                self->do_accept();
+            });
+    }
+
+    void prune_sessions()
+    {
+        sessions.erase(
+            std::remove_if(sessions.begin(), sessions.end(),
+                [](const std::weak_ptr<WsSession>& session) {
+                    return session.expired();
+                }),
+            sessions.end());
+    }
+
+    tcp::acceptor acceptor;
+    BinaryMessageCallback on_message;
+    ConnectMessageFactory connect_message;
+    std::vector<std::weak_ptr<WsSession>> sessions;
+    bool started = false;
+    bool stopping = false;
+};
 
 WsServer::WsServer(net::io_context& ioc, unsigned short port,
                    BinaryMessageCallback on_msg, ConnectMessageFactory on_connect)
-    : ioc_(ioc)
-    , acceptor_(ioc, tcp::endpoint(tcp::v4(), port))
-    , on_message_(std::move(on_msg))
-    , on_connect_(std::move(on_connect))
+    : state_(std::make_shared<State>(
+          ioc, port, std::move(on_msg), std::move(on_connect)))
 {}
 
-void WsServer::start() {
-    do_accept();
+WsServer::~WsServer()
+{
+    stop();
 }
 
-void WsServer::broadcast_binary(const std::string& message) {
-    prune_sessions();
-    auto shared_message = std::make_shared<const std::string>(message);
-    for (auto& weak_session : sessions_) {
-        if (auto session = weak_session.lock()) {
-            session->send_binary(shared_message);
-        }
-    }
+void WsServer::start()
+{
+    state_->start();
 }
 
-unsigned short WsServer::port() const {
-    return acceptor_.local_endpoint().port();
+void WsServer::stop(const std::string& reason)
+{
+    state_->stop(reason);
 }
 
-// 연결 대기
-void WsServer::do_accept() {
-    acceptor_.async_accept(
-        [this](beast::error_code ec, tcp::socket socket) {
-            if (!ec) {
-                auto session = std::make_shared<WsSession>(
-                    std::move(socket), on_message_, on_connect_
-                );
-                sessions_.push_back(session);
-                session->start();
-            }
-            do_accept(); // 다음 연결 대기
-        });
+void WsServer::broadcast_binary(const std::string& message)
+{
+    state_->broadcast_binary(message);
 }
 
-void WsServer::prune_sessions() {
-    sessions_.erase(
-        std::remove_if(sessions_.begin(), sessions_.end(),
-            [](const std::weak_ptr<WsSession>& session) {
-                return session.expired();
-            }),
-        sessions_.end());
+void WsServer::close_all(const std::string& reason)
+{
+    state_->close_all(reason);
+}
+
+unsigned short WsServer::port() const
+{
+    return state_->acceptor.local_endpoint().port();
 }

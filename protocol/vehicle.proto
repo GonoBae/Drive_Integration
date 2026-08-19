@@ -21,15 +21,15 @@ message Vector3d {
 }
 
 message WheelState {
-    uint32 wheel_index = 1;
+    uint32 wheel_index = 1; // 0=front-left, 1=front-right, 2=rear-left, 3=rear-right
     bool in_contact = 2;
     float steering_angle = 3;
     float angular_speed = 4;
     float normal_load = 5;
     float longitudinal_slip = 6;
-    float slip_angle = 7;
+    float slip_angle = 7; // wheel-local, positive = left
     float longitudinal_force = 8;
-    float lateral_force = 9;
+    float lateral_force = 9; // wheel-local, positive = left
     Vector3d contact_point_enu = 10;
     Vector3d contact_normal_enu = 11;
 }
@@ -46,8 +46,8 @@ message EntityState {
 
     // 자세
     float heading   = 6;    // 방향각 (degrees, 0~360)
-    float pitch     = 7;    // 피치각 (degrees)
-    float roll      = 8;    // 롤각 (degrees)
+    float pitch     = 7;    // body-frame pitch (degrees)
+    float roll      = 8;    // body-frame roll (degrees)
 
     // 동역학
     float speed     = 9;    // 속도 (m/s)
@@ -60,12 +60,12 @@ message EntityState {
     // 로컬 물리 좌표와 조향 상태
     double east          = 13; // Local ENU X (meters)
     double north         = 14; // Local ENU Y (meters)
-    float yaw_rate       = 15; // rad/s, positive = right turn
-    float steering_angle = 16; // road wheel angle (radians)
+    float yaw_rate       = 15; // navigation heading rate (rad/s), positive = right turn
+    float steering_angle = 16; // road wheel angle (radians), positive = right
     VehicleGear gear     = 17;
     Vector3d position_enu = 18;
-    Vector3d linear_velocity_body = 19;
-    Vector3d angular_velocity_body = 20;
+    Vector3d linear_velocity_body = 19;  // body frame: X forward, Y left, Z up
+    Vector3d angular_velocity_body = 20; // right-handed body frame: X forward, Y left, Z up
     repeated WheelState wheels = 21;
 }
 
@@ -108,6 +108,7 @@ message Envelope {
     uint64 simulation_time_ns = 3;
     string source_id = 4;
     string map_package_checksum = 5;
+    string session_id = 6; // unique for each controller connection/process lifetime
 
     oneof payload {
         Hello hello = 10;

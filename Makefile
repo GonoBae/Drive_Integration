@@ -1,9 +1,15 @@
 SHELL := /bin/sh
 
-.PHONY: run-python run-cpp build-cpp setup-cpp test-cpp generate-proto
+ifeq ($(OS),Windows_NT)
+RELAY_PYTHON ?= python/relay_server/.venv/Scripts/python.exe
+else
+RELAY_PYTHON ?= python/relay_server/.venv/bin/python
+endif
+
+.PHONY: run-python run-cpp build-cpp setup-cpp test-cpp test-python test check-python check-proto check generate-proto
 
 run-python:
-	cd python/relay_server && . .venv/bin/activate && uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+	$(RELAY_PYTHON) -m python.relay_server
 
 run-cpp:
 	./cpp/host/build/simcore_publisher
@@ -16,6 +22,18 @@ setup-cpp:
 
 test-cpp:
 	cd cpp/host && ctest --preset release
+
+test-python:
+	$(RELAY_PYTHON) -m unittest discover -s python/relay_server/tests -t . -v
+
+test: test-python test-cpp
+
+check-python: test-python
+
+check-proto:
+	$(RELAY_PYTHON) -m unittest -v python.relay_server.tests.test_generated_proto
+
+check: check-python
 
 generate-proto:
 	cd python/relay_server && bash scripts/generate_proto.sh
