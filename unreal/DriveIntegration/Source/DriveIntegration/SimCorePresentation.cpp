@@ -89,7 +89,8 @@ FRotator BuildWheelRelativeRotation(
 {
 	return FRotator(
 		-AxleSpinDegrees,
-		FMath::RadiansToDegrees(WheelState.SteeringAngleRad),
+		SimCoreCoordinateFrames::CanonicalSteeringToUnrealYawDegrees(
+			WheelState.SteeringAngleRad),
 		0.0f);
 }
 }

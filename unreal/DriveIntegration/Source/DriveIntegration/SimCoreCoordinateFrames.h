@@ -15,13 +15,19 @@ namespace SimCoreCoordinateFrames
 		const FVector3d& LinearVelocityBody,
 		double HeadingDegrees);
 
-	// This preserves the current schema-v1 attitude semantics. Steering and yaw
-	// sign migration from ADR-011 must be performed as a separate schema change.
+	// Unreal/device X input and local yaw are right-positive. Schema v2 road
+	// steering is left-positive, so each boundary applies exactly one negation.
+	DRIVEINTEGRATION_API float InputAxisToCanonicalSteering(float RightPositiveInput);
+	DRIVEINTEGRATION_API float CanonicalSteeringToUnrealYawDegrees(
+		float LeftPositiveSteeringRadians);
+
+	// Navigation heading is clockwise-positive while schema-v2 body yaw is
+	// left/counter-clockwise-positive, so prediction subtracts body yaw.
 	DRIVEINTEGRATION_API FRotator BuildUnrealActorRotation(
 		float HeadingDegrees,
 		float PitchDegrees,
 		float RollDegrees,
-		float NavigationYawRateRadPerSecond,
+		float BodyYawRateRadPerSecond,
 		const FVector3d& AngularVelocityBody,
 		double PredictionSeconds);
 }

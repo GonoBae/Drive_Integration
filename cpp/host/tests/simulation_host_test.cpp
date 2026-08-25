@@ -44,6 +44,7 @@ int main()
     int observer_messages = 0;
     int close_requests = 0;
     std::string last_world_message;
+    std::string last_observer_message;
 
     SimulationHost host(
         ioc,
@@ -56,7 +57,10 @@ int main()
                 ++world_messages;
                 last_world_message = message;
             },
-            [&](const std::string&) { ++observer_messages; },
+            [&](const std::string& message) {
+                ++observer_messages;
+                last_observer_message = message;
+            },
             [&](const std::string&) { ++close_requests; },
         });
 
@@ -84,6 +88,11 @@ int main()
     simcore::Envelope world;
     require(world.ParseFromString(last_world_message) && world.has_world_state(),
             "published world message must be a protobuf WorldState envelope");
+
+    simcore::EntityStatePacket observer;
+    require(observer.ParseFromString(last_observer_message)
+                && observer.entities_size() == 1,
+            "optional observer must preserve the frozen EntityStatePacket format");
     std::cout << "simulation_host_tests: all tests passed\n";
     return 0;
 }

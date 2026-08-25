@@ -5,9 +5,9 @@ Unreal Engine 5.6.1 C++ 프로젝트다. C++ SimCore가 차량 물리의 권한�
 ## 현재 최소 통합
 
 - `SimCoreClientComponent`: binary WebSocket 연결 상태·socket generation·자동 재연결 관리
-- `SimCoreProtocol`: 루트 `protocol/vehicle.proto`의 ControlCommand/WorldState 호환 wire adapter
+- `SimCoreProtocol`: 루트 `protocol/vehicle.proto`의 schema-v2 ControlCommand/WorldState 호환 wire adapter
 - `ExternalVehiclePawn`: W/S/A/D·Space 입력 전송과 ENU 상태 표시
-- `SimCoreCoordinateFrames`: ENU/FLU에서 Unreal 표시 좌표로의 변환
+- `SimCoreCoordinateFrames`: ENU/FLU에서 Unreal 표시 좌표로 변환하고 left-positive steering/body yaw를 Unreal 경계에서 한 번 반전
 - `SimCorePresentation`: 최대 50ms 제한 외삽과 stale wheel 정지 정책
 - `DriveIntegrationGameModeBase`: 외부 차량 Pawn을 기본 Pawn으로 사용
 
@@ -22,7 +22,11 @@ Unreal Engine 5.6.1 C++ 프로젝트다. C++ SimCore가 차량 물리의 권한�
 - 수신한 body velocity로 최대 50ms만 pose를 예측하고 그 이후에는 위치를 고정한다.
 - C++ host는 Windows에서 1ms timer resolution을 요청해 60Hz state 간격의 jitter를 줄인다.
 - `ControlledEntityId`로 Ego state를 선택하므로 WorldState에 NPC가 먼저 포함돼도 다른 엔티티를 표시하지 않는다.
+- schema v1 WorldState를 받으면 incompatible 상태로 전환하고 자동 재연결을 멈춘다. `Hello` application handshake는 아직 구현 전이다.
 - 2026-08-19 Python loopback probe에서 state 간격은 p95 17.08ms, 최대 17.20ms였고 command 전송 후 첫 speed 변화는 약 27ms였다.
+
+schema-v2 좌표 경계 변경은 Mac에서 정적 검토만 완료했다. Windows UE 5.6
+Game/Editor 빌드와 PIE에서 A/D, wheel yaw, heading 예측을 다시 확인해야 한다.
 
 측정과 설계 근거는 [ADR-010](../../docs/decisions/ADR-010-low-latency-control-presentation.md), [D6 작업 로그](../../docs/worklogs/2026-08-19.md), [UE 5.6 WebSocket 입력 지연 누적 해결 사례](../../docs/troubleshooting/ue56-websocket-growing-input-delay.md)에 기록한다.
 

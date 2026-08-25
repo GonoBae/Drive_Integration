@@ -26,18 +26,28 @@ FVector2d BodyFluVelocityToEnu(
 	return FVector2d(EastVelocity, NorthVelocity);
 }
 
+float InputAxisToCanonicalSteering(float RightPositiveInput)
+{
+	return -RightPositiveInput;
+}
+
+float CanonicalSteeringToUnrealYawDegrees(float LeftPositiveSteeringRadians)
+{
+	return -FMath::RadiansToDegrees(LeftPositiveSteeringRadians);
+}
+
 FRotator BuildUnrealActorRotation(
 	float HeadingDegrees,
 	float PitchDegrees,
 	float RollDegrees,
-	float NavigationYawRateRadPerSecond,
+	float BodyYawRateRadPerSecond,
 	const FVector3d& AngularVelocityBody,
 	double PredictionSeconds)
 {
 	return FRotator(
 		PitchDegrees + FMath::RadiansToDegrees(AngularVelocityBody.Y * PredictionSeconds),
-		HeadingDegrees + FMath::RadiansToDegrees(
-			NavigationYawRateRadPerSecond * PredictionSeconds),
+		HeadingDegrees - FMath::RadiansToDegrees(
+			BodyYawRateRadPerSecond * PredictionSeconds),
 		-RollDegrees - FMath::RadiansToDegrees(AngularVelocityBody.X * PredictionSeconds));
 }
 }

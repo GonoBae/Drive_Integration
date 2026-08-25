@@ -9,6 +9,7 @@ python/relay_server/.env
 # C++
 # ============================================================
 cpp/host/build/
+cpp/host/build-zmq-observer/
 cpp/host/vcpkg/
 cpp/host/vcpkg_installed/
 cpp/host/compile_commands.json

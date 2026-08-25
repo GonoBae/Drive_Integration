@@ -9,7 +9,7 @@
 
 namespace simcore_host {
 
-inline constexpr std::uint32_t kProtocolSchemaVersion = 1;
+inline constexpr std::uint32_t kProtocolSchemaVersion = 2;
 
 struct EnvelopeMetadata {
     std::uint64_t sequence = 0;

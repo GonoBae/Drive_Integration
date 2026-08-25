@@ -4,10 +4,11 @@
 
 | 항목 | 값 |
 |---|---|
-| 버전 | 0.7 |
+| 버전 | 0.9 |
 | 작성일 | 2026-08-19 |
+| 최종 수정 | 2026-08-21 |
 | 대상 릴리스 | R1 Manual Driving Vertical Slice |
-| 목표일 | 핵심 R1 2026-08-27, 확장 기능 포함 최종 릴리스 2026-08-31 |
+| 기존 목표일 | 핵심 R1 2026-08-27, 확장 포함 2026-08-31; 8/20 미작업 반영 후 재산정 대기 |
 | 개발 인원 | 1명 |
 | 기준 작업량 | 1일 8시간 |
 | 관련 문서 | [기능표](./02_feature_matrix.md), [아키텍처](./03_architecture.md) |
@@ -18,7 +19,8 @@
 
 - 8월 14~19일 D1~D6는 실제 완료한 이력으로 보존한다. 이 구간에는 주말 작업 실적이 포함되어 있다.
 - 8월 20일부터는 **주말 8월 22~23일, 8월 29~30일을 작업일에서 제외**한다.
-- 8월에 남은 작업일은 8월 20일, 21일, 24~28일, 31일의 **8일·64시간**이다.
+- 8월 20일은 개발하지 못했으며, 해당 작업은 8월 21일로 이월됐다.
+- 8월 21일 기준 남은 평일은 당일, 24~28일, 31일의 **최대 7일·56시간**이다.
 - D6 현재 기존 R1의 남은 기준 공수는 D7~D18의 12일·96시간이다. 일반 속도로 재배치하면 9월 4일 완료가 예상된다.
 
 ### 2.2 AI 협업 일정 전제
@@ -31,6 +33,16 @@
 | **AI 수정 계획 합계** |  | **8일·64시간** | **주말 작업 없이 8월 31일 최종 완료** |
 
 AI는 코드 초안, 반복 수정, 자동 시험, 빌드 오류 분석, 문서 동기화를 가속한다. Unreal 시각 확인, 조작감 판단, 에셋·라이선스 선택, 목표 PC 성능 측정과 최종 인수는 사람이 직접 확인한다. 2배는 일정 산정 가정이며, 완료 기준을 줄인다는 의미가 아니다.
+
+위 64시간 표는 8월 19일에 세운 원래 기준선이며 이미 AI 협업 생산성을 반영했다.
+8월 20일 AI-D7 8시간과 8월 21일의 원래 AI-D8 8시간을 다시 하루 8시간으로
+압축하지 않는다. 8월 21일에는 좌표·부호 계약에 이어 사용자가 승인한 Python/ZMQ
+범위 교정과 `GroundQuery` 기반을 진행했다. Python/ZMQ 교정 1~1.5시간은 추가분이고,
+`GroundQuery`는 AI-D7 지형 접촉·서스펜션 8시간에 포함하므로 중복 합산하지 않는다.
+따라서 어제 이월 8시간 + 오늘 원래 작업 8시간 + 범위 교정 1~1.5시간의 총량은
+**17~17.5시간**이며, 1인 하루 8시간 안에 전부 완료할 수 있는 분량이 아니다.
+승인 작업 이후에도 AI-D7 3~4시간과 AI-D8 7.5~8시간, 합계 **최소 11~12시간**을
+이월한다. 8월 24일 이후 일정과 8월 31일 목표는 이 잔량을 반영해 별도로 재산정한다.
 
 ### 2.3 외부 전제
 
@@ -59,7 +71,7 @@ AI는 코드 초안, 반복 수정, 자동 시험, 빌드 오류 분석, 문서 
 | WP-09 | 기술·릴리스 버퍼 | 8h | 차단 문제 수정, 최종 패키지, 영상용 주행 기록, 문서 | R1 인수 기준 통과 및 결과 보관 |
 |  | **합계** | **144h** |  |  |
 
-### 3.1 승인된 확장 패키지
+### 3.1 승인된 확장 패키지(기존 기준선)
 
 | ID | 작업 패키지 | AI 협업 배정 | 산출물 | 종료 조건 |
 |---|---|---:|---|---|
@@ -71,11 +83,15 @@ AI는 코드 초안, 반복 수정, 자동 시험, 빌드 오류 분석, 문서 
 
 ## 4. 일별 실행 계획
 
+8월 24일 이후 행은 8월 19일에 만든 기존 기준선이며 아직 새 목표일로 승인된
+일정이 아니다. 8월 21일의 현재 작업이 끝난 뒤 우선순위와 완료일을 다시 합의한다.
+
 | 날짜 | 구분 | 작업 | 당일 산출물·확인점 |
 |---|---:|---|---|
 | 8/14~19 | 완료 실적 D1~D6 | WP-00/01과 WP-02/04 선행 | 자체 물리, 공통 Proto, 60Hz tick, 직접 WebSocket 왕복, 4륜 평면 타이어, SafeStop, 저지연 입력을 구현·검증 |
-| 8/20 목 | AI-D7 | WP-01 좌표 계약 마감 + WP-02 완료 | 첫 2h: yaw/steering 부호·schema·C++ adapter·회귀 시험. 이후 6h: 차량 파라미터, 지형 접촉·서스펜션, 평면·경사·저속·회전 시험; M2 |
-| 8/21 금 | AI-D8 | WP-03 충돌 패키지 | MapPackage schema·checksum, 정적 cooking/loading, 동적 OBB/capsule, 관통 회귀 시험 |
+| 8/20 목 | 미실행(원래 AI-D7 8h) | WP-01 좌표 계약 마감 + WP-02 완료 | 전체 8시간 이월: 차량 파라미터, 지형 접촉·서스펜션, 평면·경사·저속·회전 시험과 M2 |
+| 8/21 금 | 원래 AI-D8 8h, 미착수 | WP-03 충돌 패키지 | MapPackage schema·checksum, 정적 cooking/loading, 동적 OBB/capsule, 관통 회귀 7.5~8시간 이월 |
+| 8/21 금 | 실제 실행 | 좌표 계약 + 범위 교정 + WP-02 기반 | schema v2 C++/Unreal 경계, ZMQ 기본 OFF·Python 동결, `GroundQuery`/`FlatGroundQuery`와 바퀴별 1D spring/damper 기반; Windows Unreal 검증은 후속 |
 | 8/22~23 | 주말 | 작업 없음 | 일정·완료일 산정에서 제외 |
 | 8/24 월 | AI-D9 | WP-03/04 통합 | Unreal `GeoTransformAdapter`, FLU↔FRU 시각 검증, 충돌 표시, handshake 불일치 차단, reconnect·packet gap·SafeStop HUD; M3 |
 | 8/25 화 | AI-D10 | WP-05 지도·LaneGraph | Wall/Broad crop, importer, 방향성 LaneGraph, spline 주행면·보도·커브, 핵심 교차로 정렬; M4 |
@@ -92,7 +108,7 @@ AI는 코드 초안, 반복 수정, 자동 시험, 빌드 오류 분석, 문서 
 |---|---|---|---|
 | M0 물리 구현 전략 결정 | 8/14 | 자체 구현 범위와 후보 비교 기록, 개발기 기본 모델 빌드·시험 통과 | 자동 시험과 단계별 종료 조건 없이 다음 물리 단계 진행 금지 |
 | M1 최소 왕복 수직 절단 | 8/17 | Unreal 입력이 C++ tick에 반영되고 상태가 Unreal에 직접 표시 | 지도·NPC보다 통신과 시간 동기화를 우선 복구 |
-| M2 C++ 차량 기반 완료 | 8/20 | ADR-011의 C++/Proto 부호·schema 이행과 좌표 회귀, 조향·가감속·경사·서스펜션·저속 안정성 시험 통과 | 좌표 계약·차량 파라미터·접촉 문제 해결 전 지도 작업 확대 금지 |
+| M2 C++ 차량 기반 완료 | 기존 8/20, 재산정 필요 | ADR-011의 C++/Proto 부호·schema 이행과 좌표 회귀, 조향·가감속·경사·서스펜션·저속 안정성 시험 통과 | schema-v2 scalar와 `GroundQuery`·1D spring/damper 기반만 완료; MapPackage ground provider, 차량 파라미터 파일, 실제 차체 6DoF·경사 주행 검증 전에는 완료 아님 |
 | M3 충돌 일치 수동운전 | 8/24 | 동일 충돌 소스와 체크섬, 지속 관통 없음, Unreal 임의 보정 없음, FLU↔FRU 자세·회전 시각 검증, 재연결·SafeStop 표시 | NPC 범위를 보류하고 정적 충돌·좌표 adapter부터 수정 |
 | M4 Wall/Broad 주행 루프 | 8/25 | 로컬 주행면과 차선 그래프가 정렬되고 보행 구역 진입 제한 | Cesium 배경보다 로컬 주행면 정확도를 우선 |
 | M5 도시 동작·기록 골격 | 8/26 | 신호 1개, NPC 3~4대, 보행자 6~8명 반복 동작, 기록·재생 데이터 생성 | 개체 수만 낮출 수 있으며 신호 준수와 기록은 유지 |
@@ -149,8 +165,32 @@ AI는 코드 초안, 반복 수정, 자동 시험, 빌드 오류 분석, 문서 
 | 통합 검증 | binary Protobuf 왕복, wheel 4개와 종방향 slip 수신, 입력 중단 후 0.6683m/s에서 0m/s SafeStop, HTTP 101 선행 응답 확인 |
 | 지연 개선 | state 간격 p95 30.05ms·최대 49.82ms에서 p95 17.08ms·최대 17.20ms, probe command 전송→첫 물리 반응 약 36ms에서 약 27ms |
 | 일정 영향 | D11의 입력 반응·상태 지연 처리 일부를 D6에 선행 구현했으며, reconnect·packet gap HUD는 D11에 유지 |
-| 남은 한계 | legacy `yaw_rate`·steering 우회전 양수 규약을 ADR-011 FLU 계약으로 이행해야 함; 평면 접촉을 MapPackage 지형 raycast로 교체하고 실제 suspension stroke·경사 시험은 D7에서 진행; 이번 Unreal 변경은 목표 Windows에서 Game/Editor target 재빌드 필요 |
+| 남은 한계(당시) | legacy `yaw_rate`·steering 우회전 양수 규약을 ADR-011 FLU 계약으로 이행해야 함; 평면 접촉을 MapPackage 지형 raycast로 교체하고 실제 suspension stroke·경사 시험은 D7에서 진행; 이번 Unreal 변경은 목표 Windows에서 Game/Editor target 재빌드 필요 |
+| 8/21 후속 상태 | legacy scalar 부호는 schema v2로 이행하고 `GroundQuery`·`FlatGroundQuery`·바퀴별 1D spring/damper 기반을 추가; 실제 MapPackage 지형, 차체 heave/6DoF와 최신 Windows Unreal 검증은 미완료 |
 | 상세 기록 | [D6 작업 로그](./worklogs/2026-08-19.md) |
+
+### 6.3 D7-1 좌표·부호 계약 실행 기록
+
+| 항목 | 결과 |
+|---|---|
+| 완료 범위 | 공개 FLU에서 `yaw_rate` 좌회전 양수, steering 좌조향 양수, 항법 heading 시계 방향 양수 계약 고정 |
+| 경계 구현 | C++ solver 부호를 `BodyFrameAdapter`에 격리하고 Unreal 입력·wheel yaw·heading 예측 경계 소스를 schema v2에 맞춤 |
+| 전송 계약 | R1 WebSocket은 v2 `Envelope{WorldState}`를 사용하고 C++·Unreal에서 exact version을 검사; Python relay와 ZMQ는 R1 범위에서 동결 |
+| Mac 검증 | C++ Release 빌드와 좌표·protocol 회귀 통과; Python 회귀는 현재 R1 완료 근거에서 제외 |
+| 완료 아님 | Protobuf `Hello` handshake, 전체 GeoTransform·quaternion, SensorRig frame, Windows UE 5.6 빌드·PIE |
+| 일정 영향 | 좌표·부호 작업이 원래 8/21 AI-D8 충돌 작업을 대체했으므로 충돌 패키지는 이월 |
+
+### 6.4 D7-2 Python/ZMQ 범위 교정과 지면 접촉 기반
+
+| 항목 | 결과 |
+|---|---|
+| R1 실행 경로 | `Unreal ↔ WebSocket binary + Protobuf ↔ C++`로 한정; 기본 CMake에서 ZMQ dependency·5555 bind를 비활성화 |
+| 보존 범위 | Python relay와 구 `EntityStatePacket` observer는 삭제하지 않고 opt-in `release-zmq-observer` preset에 동결; R1 시험·완료 조건에서 제외 |
+| 물리 기반 | `GroundQuery`와 기본 `FlatGroundQuery`, 바퀴별 hit point·normal·no-hit 처리, 제한된 1D spring/damper stroke·force 계산 추가 |
+| 자동 시험 범위 | 평지 초기 접촉, 기울어진 테스트 plane의 hit·normal, 전체/부분 no-hit, stroke·force clamp와 결정성 검증 |
+| 완료 아님 | MapPackage ground/raycast provider, 노면 normal을 이용한 3D tire force, 차체 높이·heave·6DoF constraint, 차량 파라미터 외부 파일, Windows Unreal 검증 |
+| 공수 관계 | Python/ZMQ 교정 1~1.5h는 추가분; GroundQuery 기반은 미실행 AI-D7 8h의 일부이며 별도 가산하지 않음 |
+| 이월 | AI-D7 잔여 3~4h + 원래 AI-D8 잔여 7.5~8h = 최소 11~12h; Windows 검증은 Mac에서 수행하지 않고 별도 대기 |
 
 ## 7. 일정 보호 규칙
 
@@ -178,6 +218,8 @@ AI는 코드 초안, 반복 수정, 자동 시험, 빌드 오류 분석, 문서 
 
 | 버전 | 날짜 | 변경 내용 |
 |---|---|---|
+| 0.9 | 2026-08-21 | Python/ZMQ를 R1 기본 경로에서 동결하고 GroundQuery·1D suspension 기반과 11~12시간 최소 이월량을 반영 |
+| 0.8 | 2026-08-21 | 8/20 미작업을 반영하고 8/21 실행 범위를 좌표·부호 schema v2 이행으로 제한; 이후 일정 재산정 필요 상태 기록 |
 | 0.7 | 2026-08-19 | ADR-011 FLU 좌표 계약의 legacy yaw/steering·schema·adapter·시험 작업을 D7/D9/D11 게이트에 배치하고 D6 부분 완료 상태를 명시 |
 | 0.6 | 2026-08-19 | D6 종료 재검토의 SafeStop session/queue-age, body 좌표계, 횡하중 이동, Unreal 입력·entity 선택 보완과 Windows 재검증 항목 반영 |
 | 0.5 | 2026-08-19 | 향후 주말 작업 제외, AI 협업 2배 기준으로 핵심 R1을 8월 27일에 배치하고 운전 UX·카메라·디버그·replay·데모 확장을 포함한 8월 31일 최종 일정으로 개편 |

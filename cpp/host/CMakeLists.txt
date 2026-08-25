@@ -5,6 +5,12 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+option(
+    SIMCORE_ENABLE_ZMQ_OBSERVER
+    "Build the optional C++ to Python ZMQ observer transport"
+    OFF
+)
+
 if(MSVC)
     add_compile_options(/utf-8)
     add_compile_definitions(_WIN32_WINNT=0x0A00)
@@ -19,9 +25,10 @@ find_package(protobuf CONFIG REQUIRED)
 # Boost (Beast WebSocket)
 find_package(Boost CONFIG REQUIRED COMPONENTS system)
 
-# ZMQ
-find_package(ZeroMQ CONFIG REQUIRED)
-find_package(cppzmq CONFIG REQUIRED)
+if(SIMCORE_ENABLE_ZMQ_OBSERVER)
+    find_package(ZeroMQ CONFIG REQUIRED)
+    find_package(cppzmq CONFIG REQUIRED)
+endif()
 
 add_library(simcore_protocol
     src/protocol/vehicle_messages.cpp
@@ -64,17 +71,19 @@ target_link_libraries(simcore_websocket PUBLIC
     Boost::system
 )
 
-add_library(simcore_zmq_publisher
-    src/publisher/zmq_publisher.cpp
-)
+if(SIMCORE_ENABLE_ZMQ_OBSERVER)
+    add_library(simcore_zmq_publisher
+        src/publisher/zmq_publisher.cpp
+    )
 
-target_include_directories(simcore_zmq_publisher PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-)
+    target_include_directories(simcore_zmq_publisher PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
 
-target_link_libraries(simcore_zmq_publisher PUBLIC
-    cppzmq
-)
+    target_link_libraries(simcore_zmq_publisher PUBLIC
+        cppzmq
+    )
+endif()
 
 add_library(simcore_host_core
     src/simulation_host.cpp
@@ -101,8 +110,16 @@ target_include_directories(simcore_publisher PRIVATE
 target_link_libraries(simcore_publisher PRIVATE
     simcore_host_core
     simcore_websocket
-    simcore_zmq_publisher
 )
+
+if(SIMCORE_ENABLE_ZMQ_OBSERVER)
+    target_compile_definitions(simcore_publisher PRIVATE
+        SIMCORE_ENABLE_ZMQ_OBSERVER=1
+    )
+    target_link_libraries(simcore_publisher PRIVATE
+        simcore_zmq_publisher
+    )
+endif()
 
 if(WIN32)
     target_link_libraries(simcore_publisher PRIVATE winmm)
@@ -150,6 +167,16 @@ if(BUILD_TESTING)
     )
 
     add_test(NAME control_lease_tests COMMAND control_lease_tests)
+
+    add_executable(body_frame_adapter_tests
+        tests/body_frame_adapter_test.cpp
+    )
+
+    target_include_directories(body_frame_adapter_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
+    add_test(NAME body_frame_adapter_tests COMMAND body_frame_adapter_tests)
 
     add_executable(simulation_host_tests
         tests/simulation_host_test.cpp

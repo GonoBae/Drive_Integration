@@ -495,6 +495,14 @@ void USimCoreClientComponent::ApplyRawMessage(
 		Error))
 	{
 		UE_LOG(LogSimCoreClient, Warning, TEXT("Ignored SimCore packet: %s"), *Error);
+		if (Error.StartsWith(TEXT("Schema version")))
+		{
+			bAutoReconnectEnabled = false;
+			SetConnectionState(ESimCoreConnectionState::Incompatible);
+			++SocketGeneration;
+			ReleaseSocket(true, TEXT("Incompatible SimCore schema version"));
+			ResetReceivedState();
+		}
 		return;
 	}
 

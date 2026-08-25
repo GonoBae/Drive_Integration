@@ -27,9 +27,24 @@ void test_close_before_handshake_closes_tcp_connection()
     tcp::socket client(client_ioc);
     client.connect({net::ip::make_address("127.0.0.1"), server.port()});
 
-    // Run only the TCP accept completion. WsSession is now waiting for the
-    // HTTP upgrade, so close_all exercises the pre-handshake path.
-    server_ioc.poll_one();
+    // Wait until the TCP accept handler has actually run. A single poll_one()
+    // can return zero on macOS even after connect() succeeds; that also leaves
+    // io_context in the stopped state and turns this test into a timing race.
+    // Once this sole initial handler runs, WsSession is waiting for the HTTP
+    // upgrade and close_all exercises the intended pre-handshake path.
+    bool accept_completed = false;
+    const auto accept_timeout =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!accept_completed && std::chrono::steady_clock::now() < accept_timeout) {
+        server_ioc.restart();
+        accept_completed = server_ioc.poll_one() == 1;
+        if (!accept_completed) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    if (!accept_completed) {
+        throw std::runtime_error("server did not accept pre-handshake test connection");
+    }
     server.close_all("server stopping before handshake");
     client.non_blocking(true);
 

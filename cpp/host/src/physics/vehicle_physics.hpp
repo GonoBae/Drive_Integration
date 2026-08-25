@@ -1,7 +1,11 @@
 #pragma once
 
+#include "physics/suspension_model.hpp"
+#include "terrain/ground_query.hpp"
+
 #include <cstdint>
 #include <array>
+#include <memory>
 #include <mutex>
 
 enum class VehicleGear : uint8_t {
@@ -13,7 +17,7 @@ enum class VehicleGear : uint8_t {
 struct VehicleInput {
     float throttle  = 0.f;   // 0 ~ 1
     float brake     = 0.f;   // 0 ~ 1
-    float steering  = 0.f;   // -1 (left) ~ 1 (right)
+    float steering  = 0.f;   // -1 (right) ~ 1 (left), canonical FLU contract
     bool  handbrake = false;
     VehicleGear gear = VehicleGear::Drive;
 };
@@ -52,6 +56,7 @@ struct VehicleParameters {
     float tire_friction           = 1.0f;
     float wheel_inertia_kg_m2     = 1.8f;
     float low_speed_lateral_cutoff_mps = 0.5f;
+    simcore_host::SuspensionParameters suspension;
 };
 
 struct Vector3State {
@@ -63,8 +68,8 @@ struct Vector3State {
 struct WheelState {
     // 0=front-left, 1=front-right, 2=rear-left, 3=rear-right.
     uint32_t wheel_index = 0;
-    bool in_contact = true;
-    float steering_angle = 0.f;
+    bool in_contact = false;
+    float steering_angle = 0.f; // radians, positive = left
     float angular_speed = 0.f;
     float normal_load = 0.f;
     float longitudinal_slip = 0.f;
@@ -90,8 +95,8 @@ struct VehicleState {
     float    rpm       = 800.f;
     double   east      = 0.0;   // local ENU X (meters)
     double   north     = 0.0;   // local ENU Y (meters)
-    float    yaw_rate  = 0.f;   // navigation heading rate, positive = right turn
-    float    steering_angle = 0.f; // road wheel angle (radians)
+    float    yaw_rate  = 0.f;   // body yaw rate (rad/s), positive = left turn
+    float    steering_angle = 0.f; // road wheel angle (radians), positive = left
     VehicleGear gear   = VehicleGear::Drive;
     Vector3State position_enu;
     // Published body vectors use the right-handed canonical frame:
@@ -104,18 +109,20 @@ struct VehicleState {
 class VehiclePhysics {
 public:
     VehiclePhysics(double lat, double lon, double alt, float heading,
-                   VehicleParameters parameters = {});
+                   VehicleParameters parameters = {},
+                   std::shared_ptr<const simcore_host::GroundQuery> ground_query = {});
 
     void         set_input(const VehicleInput& input);
     VehicleState update(double dt);
     VehicleState get_state() const;
 
 private:
-    void update_wheel_contact_points();
+    void update_wheel_contacts(float dt_seconds, bool update_suspension);
 
     VehicleState       state_;
     VehicleInput       input_;
     VehicleParameters  parameters_;
+    std::shared_ptr<const simcore_host::GroundQuery> ground_query_;
     mutable std::mutex input_mutex_;
 
     double origin_lat_  = 0.0;
@@ -124,15 +131,17 @@ private:
     double north_m_     = 0.0;
     double heading_rad_ = 0.0;
     float body_longitudinal_speed_mps_ = 0.f;
-    float body_lateral_speed_mps_ = 0.f;
-    float yaw_rate_rad_s_ = 0.f;
+    float solver_lateral_speed_mps_ = 0.f; // private solver Y, positive = right
+    float solver_yaw_rate_rad_s_ = 0.f; // private heading rate, positive = clockwise
     float pitch_rad_ = 0.f;
     float roll_rad_ = 0.f;
     float pitch_rate_rad_s_ = 0.f;
     float roll_rate_rad_s_ = 0.f;
     std::array<float, 4> wheel_angular_speed_rad_s_{};
+    std::array<float, 4> suspension_compression_m_{};
+    std::array<float, 4> suspension_base_force_n_{};
+    std::array<bool, 4> suspension_had_contact_{};
 
-    static constexpr float  GRAVITY          = 9.80665f;
     static constexpr float  STOP_EPSILON     = 0.01f;
     static constexpr double EARTH_R          = 6371000.0; // meters
 };

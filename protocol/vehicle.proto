@@ -23,7 +23,7 @@ message Vector3d {
 message WheelState {
     uint32 wheel_index = 1; // 0=front-left, 1=front-right, 2=rear-left, 3=rear-right
     bool in_contact = 2;
-    float steering_angle = 3;
+    float steering_angle = 3; // wheel-local radians, positive = left
     float angular_speed = 4;
     float normal_load = 5;
     float longitudinal_slip = 6;
@@ -45,7 +45,7 @@ message EntityState {
     double alt      = 5;    // 고도 (meters)
 
     // 자세
-    float heading   = 6;    // 방향각 (degrees, 0~360)
+    float heading   = 6;    // navigation heading (degrees, North=0, clockwise-positive)
     float pitch     = 7;    // body-frame pitch (degrees)
     float roll      = 8;    // body-frame roll (degrees)
 
@@ -60,8 +60,8 @@ message EntityState {
     // 로컬 물리 좌표와 조향 상태
     double east          = 13; // Local ENU X (meters)
     double north         = 14; // Local ENU Y (meters)
-    float yaw_rate       = 15; // navigation heading rate (rad/s), positive = right turn
-    float steering_angle = 16; // road wheel angle (radians), positive = right
+    float yaw_rate       = 15; // FLU body yaw rate (rad/s), positive = left turn
+    float steering_angle = 16; // road wheel angle (radians), positive = left
     VehicleGear gear     = 17;
     Vector3d position_enu = 18;
     Vector3d linear_velocity_body = 19;  // body frame: X forward, Y left, Z up
@@ -82,7 +82,7 @@ message ControlCommand {
     ControlMode mode = 1;
     float throttle = 2;      // 0 ~ 1
     float brake = 3;         // 0 ~ 1
-    float steering = 4;      // -1(left) ~ 1(right)
+    float steering = 4;      // -1(right) ~ 1(left), canonical FLU contract
     bool handbrake = 5;
     optional VehicleGear gear = 6;
     bool estop = 7;
@@ -103,7 +103,7 @@ message Health {
 }
 
 message Envelope {
-    uint32 schema_version = 1;
+    uint32 schema_version = 1; // must be 2 for the left-positive FLU scalar contract
     uint64 sequence = 2;
     uint64 simulation_time_ns = 3;
     string source_id = 4;

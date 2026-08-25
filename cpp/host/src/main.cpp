@@ -2,6 +2,7 @@
 #include <exception>
 #include <iostream>
 #include <memory>
+#include <utility>
 
 #include <boost/asio.hpp>
 
@@ -17,7 +18,9 @@
 #endif
 
 #include "config.hpp"
+#if defined(SIMCORE_ENABLE_ZMQ_OBSERVER)
 #include "publisher/zmq_publisher.hpp"
+#endif
 #include "simulation_host.hpp"
 #include "websocket/ws_server.hpp"
 
@@ -65,13 +68,27 @@ int run_simcore()
     std::cerr << std::unitbuf;
     std::cout << "[SimCore] Starting...\n";
 
-    // ZMQ Publisher (→ Python Relay)
-    ZmqPublisher publisher(Config::ZMQ_BIND_ADDR);
-
     // Asio io_context (single-threaded)
     net::io_context ioc;
 
     std::unique_ptr<WsServer> ws_server;
+#if defined(SIMCORE_ENABLE_ZMQ_OBSERVER)
+    ZmqPublisher publisher(Config::ZMQ_BIND_ADDR);
+#endif
+
+    SimulationHostCallbacks callbacks;
+    callbacks.broadcast_world_state = [&ws_server](const std::string& message) {
+        ws_server->broadcast_binary(message);
+    };
+#if defined(SIMCORE_ENABLE_ZMQ_OBSERVER)
+    callbacks.publish_observer_state = [&publisher](const std::string& message) {
+        publisher.publish(message);
+    };
+#endif
+    callbacks.close_control_connections = [&ws_server](const std::string& reason) {
+        ws_server->close_all(reason);
+    };
+
     SimulationHost host(
         ioc,
         {
@@ -85,17 +102,7 @@ int run_simcore()
             Config::SOURCE_ID,
             Config::MAP_PACKAGE_CHECKSUM,
         },
-        {
-            [&ws_server](const std::string& message) {
-                ws_server->broadcast_binary(message);
-            },
-            [&publisher](const std::string& message) {
-                publisher.publish(message);
-            },
-            [&ws_server](const std::string& reason) {
-                ws_server->close_all(reason);
-            },
-        });
+        std::move(callbacks));
 
     ws_server = std::make_unique<WsServer>(
         ioc,
@@ -110,8 +117,11 @@ int run_simcore()
     ws_server->start();
     host.start();
 
-    std::cout << "[SimCore] WS binary :" << Config::WS_PORT
-              << "  ZMQ " << Config::ZMQ_BIND_ADDR << "\n";
+    std::cout << "[SimCore] WS binary :" << Config::WS_PORT;
+#if defined(SIMCORE_ENABLE_ZMQ_OBSERVER)
+    std::cout << "  ZMQ " << Config::ZMQ_BIND_ADDR;
+#endif
+    std::cout << "\n";
 
     ioc.run();
     host.stop();

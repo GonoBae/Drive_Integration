@@ -4,9 +4,9 @@ Unreal Engine을 영상 생성·입력·센서 환경으로 사용하고, 외부
 
 ## 현재 상태
 
-- C++ 자체 차량 물리 기초 모델: 구현
+- C++ 자체 차량 물리 기초 모델: `GroundQuery`·평지 구현과 바퀴별 1D 서스펜션 기반까지 구현
 - WebSocket binary + Protobuf 제어·상태 통신: C++ host와 Unreal client 구현
-- Python relay: ZMQ 상태 관찰 및 디버그 클라이언트 중계
+- Python relay: R1에서 동결한 선택 기능; ZMQ 기본 OFF, 구 `EntityStatePacket` observer만 보존
 - Unreal 외부 차량 Pawn·수동 입력·상태 표시: 최소 통합 구현
 - Wall/Broad MapPackage: 구현 전
 - 자율주행 학습·추론: 8월 범위 제외
@@ -51,10 +51,16 @@ ctest --preset release
 
 실행 파일은 macOS/Linux에서 `cpp/host/build/simcore_publisher`, Visual Studio 기반 Windows 빌드에서 `cpp/host/build/Release/simcore_publisher.exe`에 생성된다.
 
-## Python observer
+## 선택적 Python observer(동결)
 
-Python relay 명령은 저장소 루트에서 실행한다. macOS와 Windows 모두 같은
-패키지 entrypoint를 사용하므로 실행 결과가 현재 작업 디렉터리에 의존하지 않는다.
+Python relay는 R1 수동운전의 개발·실행·시험 대상이 아니다. 기본 C++ 빌드는 ZeroMQ를
+컴파일하거나 5555 포트를 열지 않는다. 과거 디버그 observer를 명시적으로 확인할 때만
+`release-zmq-observer` preset으로 C++ host를 별도 빌드한 뒤 아래 명령을 사용한다.
+
+```bash
+cmake --preset release-zmq-observer -S cpp/host
+cmake --build cpp/host/build-zmq-observer --config Release --parallel
+```
 
 macOS/Linux:
 
@@ -77,7 +83,10 @@ Proto를 변경한 경우에만 macOS/Linux에서
 `python\relay_server\scripts\generate_proto.ps1`을 실행한다.
 `make test-python`은 relay 회귀 시험과 생성물 동기화를 함께 검증한다.
 
-Python relay는 수동운전 필수 경로가 아니다. Unreal은 C++ host의 `ws://<host>:9000`에 직접 연결하고, 현재 relay는 같은 장비에서 `tcp://127.0.0.1:5555` 상태를 관찰한다.
+Unreal은 C++ host의 `ws://<host>:9000`에 직접 연결한다. 선택적 relay는
+`tcp://127.0.0.1:5555`의 버전 없는 구 `EntityStatePacket`을 읽는 보존 코드이며,
+schema-v2 `Envelope{WorldState}` 계약이나 R1 완료 게이트로 간주하지 않는다. Python
+자율주행은 R2에서 별도 통신 계약을 결정한 뒤 다시 시작한다.
 
 ## 개발 원칙
 

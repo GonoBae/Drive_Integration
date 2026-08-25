@@ -121,7 +121,11 @@ std::optional<ParsedControlCommand> parse_control_command_envelope(
     }
 
     if (envelope.schema_version() != kProtocolSchemaVersion) {
-        set_error(error, "unsupported protobuf schema version");
+        const std::string message =
+            "unsupported protobuf schema version: expected "
+            + std::to_string(kProtocolSchemaVersion)
+            + ", got " + std::to_string(envelope.schema_version());
+        set_error(error, message);
         return std::nullopt;
     }
 

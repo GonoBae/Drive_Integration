@@ -4,6 +4,7 @@
 #include "Components/InputComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "SimCoreClientComponent.h"
+#include "SimCoreCoordinateFrames.h"
 #include "SimCorePresentation.h"
 #include "UObject/ConstructorHelpers.h"
 
@@ -114,7 +115,9 @@ void AExternalVehiclePawn::SetBrake(float Value)
 
 void AExternalVehiclePawn::SetSteering(float Value)
 {
-	SteeringInput = Value;
+	// Unreal input axes and the device X axis are right-positive. Convert once
+	// at the public protocol boundary; ControlCommand schema v2 is left-positive.
+	SteeringInput = SimCoreCoordinateFrames::InputAxisToCanonicalSteering(Value);
 	PushControl();
 }
 

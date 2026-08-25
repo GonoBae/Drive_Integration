@@ -22,7 +22,7 @@
 
 - 개발 인원: 1명
 - 작업 시간: 하루 8시간
-- 목표일: 2026년 8월 31일
+- 기존 목표일: 2026년 8월 31일, 8월 20일 미작업 반영 후 재산정 대기
 - 배경 범위: Manhattan Downtown의 Wall Street·Broad Street 중심 구역
 - Wall Street·Broad Street 핵심부: 실제 특성을 반영해 보행 중심으로 유지
 - 주행: 주변 차량 통행 도로에 제한된 주행 루프 구성
@@ -31,7 +31,7 @@
 - 실시간 통신: R1은 WebSocket binary + Protobuf, JSON runtime protocol은 제거
 - 공통 좌표: ROS 호환 right-handed FLU; Unreal의 left-handed FRU는 경계 adapter에서만 변환
 - Unreal 역할: 입력, IG(영상 생성), UI, 센서, 에이전트 표현
-- Python 역할: 향후 자율주행 판단; 수동운전 필수 경로에서는 제외
+- Python 역할: 향후 자율주행 판단; 기존 relay/ZMQ observer는 default-OFF로 동결하고 수동운전 필수 경로와 R1 검증에서 제외
 - 차량 사고 파손 및 변형: 제외
 - 보행자 군중 시뮬레이션: 제외; 단순 보행과 신호 준수만 구현
 - 8월 자율주행 학습: 제외
@@ -61,6 +61,6 @@
 ## 문서 기준 정보
 
 - 최초 작성일: 2026-08-14
-- 문서 버전: 1.0
-- 프로젝트 상태: D6 4륜 평면 물리·Unreal 직접 연결·저지연 수동입력 완료, C++·Python·Unreal 소스 구조 리팩터링 완료, ADR-011 좌표계 이행과 Windows UE 재검증은 D7/D9/D11에 추적
+- 문서 버전: 1.1
+- 프로젝트 상태: Unreal↔C++ 직접 수동입력과 schema-v2 좌회전·좌조향 C++/Unreal 경계, `GroundQuery`·기본 평지·1D suspension 기반까지 구현; MapPackage terrain provider·차체 6DoF·전체 GeoTransform·센서 frame·Windows UE 재검증은 후속 추적
 - 기준 저장소: `Drive_Integration`

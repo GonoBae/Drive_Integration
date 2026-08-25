@@ -90,7 +90,7 @@ Unreal 입력
 → Unreal 표시
 ```
 
-`VehiclePhysics`가 Protobuf를 직접 처리하는 것은 아니다. protocol adapter가 `ControlCommand↔VehicleInput`, `VehicleState↔WorldState`를 변환한다. Python relay는 수동운전 필수 왕복에 포함되지 않는다.
+`VehiclePhysics`가 Protobuf를 직접 처리하는 것은 아니다. protocol adapter가 `ControlCommand↔VehicleInput`, `VehicleState↔WorldState`를 변환한다. Python relay는 수동운전 왕복에 포함되지 않으며, default-OFF ZMQ를 명시적으로 켠 경우에만 버전 없는 구 `EntityStatePacket`을 별도로 읽는다.
 
 ### Envelope payload
 

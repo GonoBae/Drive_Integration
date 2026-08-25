@@ -11,6 +11,7 @@ enum class ESimCoreConnectionState : uint8
 	Disconnected,
 	Connecting,
 	Connected,
+	Incompatible,
 	WaitingToReconnect,
 	Stopping,
 };
@@ -61,6 +62,8 @@ public:
 	UFUNCTION(BlueprintPure, Category="SimCore")
 	bool IsConnected() const;
 
+	// Steering is already canonical: -1=right, +1=left. Callers convert device
+	// or Unreal right-positive axes before entering this protocol boundary.
 	void SetControl(float Throttle, float Brake, float Steering, bool bHandbrake);
 	bool GetLatestState(SimCoreProtocol::FVehicleState& OutState, float& OutStateAgeSeconds) const;
 

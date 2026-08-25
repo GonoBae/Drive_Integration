@@ -5,13 +5,13 @@
 | 항목 | 값 |
 |---|---|
 | 최초 작성 | 2026-08-19 |
-| 기준 코드 | branch `main`, 2026-08-19 전체 리팩터링 기준 |
+| 기준 코드 | schema v2, 2026-08-21 좌표·부호 계약 기준 |
 | 기준 symbol | `VehicleGear`, `ControlMode`, `Vector3d`, `WheelState`, `EntityState`, `ControlCommand`, `Envelope` |
 | 재검토 조건 | 위 symbol, field number, schema version 또는 좌표·부호 의미 변경 |
 
 ## 1. 이 파일을 먼저 읽는 이유
 
-[vehicle.proto](../../../protocol/vehicle.proto)는 C++·Unreal·Python이 합의한 데이터 계약의 원본이다. 각 언어의 구현을 먼저 읽으면 같은 데이터가 서로 다른 struct와 naming으로 보여 전체 흐름을 놓치기 쉽다. 공통 계약을 먼저 이해하면 이후 코드에서 “무슨 데이터를 왜 변환하는가”를 기준으로 읽을 수 있다.
+[vehicle.proto](../../../protocol/vehicle.proto)는 R1의 C++·Unreal과 향후 Python 자율주행이 공유할 데이터 계약의 원본이다. 현재 Python relay는 동결된 선택 기능이므로 R1 흐름을 공부할 때는 C++↔Unreal 계약을 기준으로 읽는다. 각 언어의 구현을 먼저 읽으면 같은 데이터가 서로 다른 struct와 naming으로 보여 전체 흐름을 놓치기 쉽다. 공통 계약을 먼저 이해하면 이후 코드에서 “무슨 데이터를 왜 변환하는가”를 기준으로 읽을 수 있다.
 
 transport와 protocol은 구분한다.
 
@@ -33,16 +33,20 @@ P1~P3를 이해한 뒤 C++ [vehicle_protocol_test.cpp](../../../cpp/host/tests/v
 | message | 한 줄 역할 | 현재 사용 상태 |
 |---|---|---|
 | `Vector3d` | X/Y/Z 세 값을 묶는 공통 3차원 vector | 위치·속도·접촉점 등에 사용 |
-| `WheelState` | 바퀴 하나의 접촉·조향·회전·slip·힘 상태 | C++가 4개 생성, Unreal/Python이 수신 |
+| `WheelState` | 바퀴 하나의 접촉·조향·회전·slip·힘 상태 | C++가 4개 생성, Unreal이 수신 |
 | `EntityState` | 차량/NPC 등 엔티티 하나의 pose·동역학·wheel 상태 | 현재 주로 Ego 차량 상태 |
-| `EntityStatePacket` | EntityState 목록을 직접 담는 observer용 packet | C++→ZMQ→Python 경로에서 사용 |
-| `WorldState` | 한 tick의 EntityState 목록 | Envelope 안에서 C++→Unreal 전송 |
+| `EntityStatePacket` | EntityState 목록을 직접 담는 버전 없는 과거 observer packet | default-OFF ZMQ·동결 Python relay에서만 보존 |
+| `WorldState` | 한 tick의 EntityState 목록 | Envelope 안에서 C++→Unreal WebSocket으로 전송 |
 | `ControlCommand` | throttle·brake·steering·gear·E-stop 제어 명령 | Unreal→C++ 수동운전 입력 |
 | `Hello` | build·schema·capability 호환성 협상 | schema에 정의됐지만 handshake는 미완성 |
 | `Health` | tick overrun·command age·상태 메시지 진단 | schema에 정의됐지만 runtime 발행은 미완성 |
-| `Envelope` | version·sequence·time·source·session과 payload를 감싸는 공통 외피 | ControlCommand와 WorldState WebSocket 경로에서 사용 |
+| `Envelope` | version·sequence·time·source·session과 payload를 감싸는 공통 외피 | R1 ControlCommand·WorldState WebSocket에서 사용 |
 
-`EntityStatePacket`과 `WorldState`는 모두 EntityState 목록이지만 현재 경로가 다르다. 전자는 ZMQ Python observer의 직접 payload이고, 후자는 metadata를 가진 Envelope 안에서 Unreal에 전달되는 authoritative world payload다.
+`EntityStatePacket`과 `WorldState`는 모두 EntityState 목록을 담지만 경로와 안전성이
+다르다. R1 기본 runtime은 metadata와 version이 있는 `Envelope{WorldState}`만 Unreal에
+보낸다. `SIMCORE_ENABLE_ZMQ_OBSERVER`를 명시적으로 켠 별도 빌드만 버전 없는
+`EntityStatePacket`을 발행한다. 동결된 Python relay는 이 구 packet을 읽지만 schema
+version을 검사할 수 없으므로 R1 계약이나 자율주행 기반으로 간주하지 않는다.
 
 ### 수동운전 왕복에서의 message 흐름
 
@@ -62,6 +66,10 @@ Unreal key input
 ```
 
 `Envelope`의 `oneof payload`에는 한 번에 ControlCommand 또는 WorldState 중 하나만 들어간다. `VehiclePhysics`는 Protobuf를 직접 알지 않으며, protocol adapter가 `ControlCommand↔VehicleInput`, `VehicleState↔WorldState`를 변환한다.
+
+선택적 legacy observer는 위 수동운전 왕복에서 갈라지는 필수 단계가 아니다. 켜면 C++가
+별도로 `EntityStatePacket`을 만들어 ZMQ로 발행하며, 기본 빌드에서는 해당 코드와 포트가
+비활성화된다.
 
 ## 3. P1 학습 목표
 
@@ -154,7 +162,8 @@ const WheelState& first = entity.wheels(0);
 
 message 타입의 repeated field는 각 원소가 같은 field number 21로 반복해서 나타난다. 원소 순서는 유지되지만 중복을 금지하지 않으며, 이 프로젝트는 순서만 믿지 않고 각 원소의 `wheel_index`로 바퀴 위치를 명시한다.
 
-프로젝트의 다른 예는 `WorldState.entities`, `EntityStatePacket.entities`, `Hello.capabilities`다.
+프로젝트의 다른 예는 `WorldState.entities`, legacy
+`EntityStatePacket.entities`, `Hello.capabilities`다.
 
 ## 6. P3 시작: `Hello`, `Health`, `oneof`
 
@@ -174,11 +183,17 @@ Envelope{ health }
 | payload | schema 정의 | 현재 송수신 구현 |
 |---|---|---|
 | `ControlCommand` | 완료 | Unreal→C++ 구현 |
-| `WorldState` | 완료 | C++→Unreal 구현 |
+| `WorldState` | 완료 | C++→Unreal WebSocket 구현 |
 | `Hello` | 완료 | application handshake 미구현 |
 | `Health` | 완료 | runtime 발행·표시 미구현 |
 
 현재 WebSocket의 HTTP 101 handshake는 transport 연결을 여는 절차일 뿐 Protobuf `Hello` handshake가 아니다. 연결 직후 C++는 현재 WorldState를 보내며, `Hello`와 `Health`를 생성하거나 파싱하는 runtime 코드는 아직 없다.
+
+현재 schema v2 runtime은 R1 WebSocket의 `Envelope.schema_version`을 정확히 검사한다.
+C++는 v1 ControlCommand를 적용하지 않고 Unreal 소스는 v1 WorldState를 incompatible
+상태로 처리하도록 맞춰져 있다. 동결된 Python relay는 version field가 없는 legacy
+`EntityStatePacket`을 읽으므로 이 exact gate에 포함되지 않는다. 이는 R1 packet
+호환성 차단선이지 build·capability·map을 협상하는 `Hello` 구현은 아니다.
 
 현재 학습에서는 다음까지만 이해한다.
 

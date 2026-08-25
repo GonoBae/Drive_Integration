@@ -4,8 +4,9 @@
 
 | 항목 | 값 |
 |---|---|
-| 버전 | 1.0 |
+| 버전 | 1.2 |
 | 작성일 | 2026-08-19 |
+| 최종 수정 | 2026-08-21 |
 | 대상 | R1 수동운전 및 R2/R3 자율주행 확장 기반 |
 | 관련 문서 | [일정표](./01_schedule.md), [기능표](./02_feature_matrix.md) |
 
@@ -26,21 +27,22 @@
 ```mermaid
 flowchart LR
     INPUT["Unreal W/S/A/D·Space·Gamepad\n변화 최대 30Hz + 20Hz heartbeat"] --> UE["UE 5.6 ExternalVehiclePawn\n최대 50ms dead reckoning"]
-    UE <-->|"WebSocket binary Protobuf :9000"| CPP["C++ Host 60Hz\n4륜 평면 접촉 + SafeStop"]
-    CPP -->|"Protobuf / ZMQ :5555\nobserver"| PY["Python Relay"]
-    PY -->|"JSON WebSocket :8000/ws\nobserver"| DBG["Debug clients"]
+    UE <-->|"WebSocket binary Protobuf :9000"| CPP["C++ Host 60Hz\nGroundQuery 기반 + SafeStop"]
+    CPP -.->|"opt-in ZMQ :5555\nlegacy EntityStatePacket"| PY["Frozen Python Relay\nR1 default OFF"]
+    PY -.->|"JSON WebSocket :8000/ws\nlegacy debug"| DBG["Debug clients"]
 ```
 
 현재 구조의 한계는 다음과 같다.
 
-- C++ 물리는 4륜의 longitudinal slip·slip angle·friction circle과 차체 yaw/roll/pitch 응답을 계산하지만 접촉면은 아직 z=0 평면이다.
-- Proto는 루트 `protocol/vehicle.proto`로 통합됐고 C++·Python 생성물과 Unreal 경량 wire adapter가 같은 필드 계약을 사용한다.
+- C++ 물리는 4륜 tire force와 차체 yaw/roll/pitch 응답에 더해 `GroundQuery` 경계와 바퀴별 제한된 1D spring/damper를 계산한다. 기본 구현은 z=0 `FlatGroundQuery`이며 MapPackage provider와 차체 heave/6DoF는 아직 없다.
+- Proto는 루트 `protocol/vehicle.proto`로 통합됐고 R1의 C++·Unreal이 같은 schema-v2 필드 계약을 사용한다. Python 생성물은 같은 원본에서 만들지만 relay 자체는 동결된 선택 기능이다.
 - C++ host는 절대 deadline 60Hz clock, command source/session/sequence/queue-age 검사, 250ms SafeStop과 E-stop latch를 적용한다.
 - WebSocket 세션은 HTTP 101 accept 완료 전 state frame을 쓰지 않으며, 전송 중 state queue는 latest-wins로 제한한다.
 - Unreal client는 입력 변화를 deadzone 처리 후 최신값 우선으로 합쳐 최대 30Hz로 보내고 WorldState의 pose·body velocity·4개 wheel state를 표시한다.
 - map checksum은 필드만 있고 현재 기본값은 `unset`이다.
-- 자동 재연결은 구현됐지만 Hello/schema/map capability handshake, packet gap HUD,
-  MapPackage 지형·충돌, 실제 suspension stroke는 아직 없다.
+- 자동 재연결과 schema v2 packet gate는 구현됐지만 Hello/map capability handshake, packet gap HUD,
+  MapPackage 지형·충돌, 노면을 따르는 차체 6DoF는 아직 없다.
+- 기본 CMake 구성은 ZeroMQ를 빌드하거나 5555 포트를 열지 않는다. opt-in observer만 버전 없는 구 `EntityStatePacket`을 발행하며 R1 완료 경로에 포함하지 않는다.
 
 ### 3.2 목표 구조
 
@@ -68,7 +70,7 @@ flowchart LR
 
 아래 표는 R1 이후까지 유지할 목표 논리 경계다. 현재 코드는 `SimulationHost`가
 `SimulationClock`, `ControlLease`, `VehiclePhysics`를 조정하고, `WsServer`와
-`ZmqPublisher`는 callback으로 주입하는 단계까지 분리됐다. `CollisionWorld`,
+opt-in `ZmqPublisher`는 callback으로 주입하는 단계까지 분리됐다. `CollisionWorld`,
 `EntityWorld`, `MapLoader`, `Recorder`는 아직 구현 전이다.
 
 | 모듈 | 책임 | 소유 데이터 |
@@ -170,14 +172,19 @@ EmergencyStop > Active control lease(Manual 또는 Autonomous) > SafeStop
 - `MapOrigin`은 WGS84 원점과 `map_enu` frame을 정의한다.
 - 항법 heading과 body yaw rate의 관계는 `heading_rate_clockwise = -body_yaw_rate_left_positive`다.
 - Unreal body polar vector는 `(x, y, z)m → (100x, -100y, 100z)cm`로 변환한다. 자세와 angular velocity는 handedness를 고려한 basis 변환을 사용한다.
-- 현재 `SimCoreCoordinateFrames`가 평면 ENU 위치, FLU 속도와 schema-v1 자세의
-  Unreal 표시 변환을 모은다. 완전한 `GeoTransformAdapter`/`BodyFrameAdapter`,
-  Cesium·quaternion 변환과 왕복 시험은 ADR-011 후속 작업이다.
+- C++ `BodyFrameAdapter`가 공개 FLU와 solver 내부 right-positive steering·lateral·yaw의
+  부호 경계를 전담한다. `SimCoreCoordinateFrames`는 평면 ENU 위치, FLU 속도,
+  schema-v2 yaw·steering의 Unreal 표시 경계를 모은다.
+- 완전한 `GeoTransformAdapter`, Cesium·quaternion 변환과 Unreal automation 시험은
+  ADR-011 후속 작업이며 최신 Unreal 소스는 Windows UE 5.6 재검증이 필요하다.
 - 위치는 meter, 속도는 m/s, 가속도는 m/s², 질량은 kg, 시간은 second를 사용한다.
 - 물리 내부 각도와 각속도는 radian 기반으로 통일하고 기존 표시용 pose 필드만 degree를 사용한다.
 - 위·경도는 물리 적분에 사용하지 않고 ENU 상태에서 필요할 때 변환한다.
 
-현재 공개 `linear_velocity_body`, `angular_velocity_body`와 wheel lateral 값은 FLU/Y-left로 1차 전환됐다. 다만 scalar `yaw_rate`, `steering_angle`, `ControlCommand.steering`은 아직 우회전 양수인 legacy 계약이고, 변환도 전용 adapter로 완전히 모이지 않았다. 이 항목을 완료로 오인하지 않도록 [ADR-011의 COORD-002~008](./decisions/ADR-011-canonical-coordinate-frames.md#현재-구현과-남은-이행-작업)을 R1 선행 작업으로 추적한다.
+schema v2의 공개 `linear_velocity_body`, `angular_velocity_body`, scalar `yaw_rate`,
+`steering_angle`, `ControlCommand.steering`과 wheel lateral 값은 모두 FLU/Y-left 계약을
+사용한다. 항법 heading만 North=0·시계 방향 양수이므로 body yaw와 부호가 반대다.
+남은 자세·센서·Windows 검증은 [ADR-011의 COORD-004~008](./decisions/ADR-011-canonical-coordinate-frames.md#현재-구현과-남은-이행-작업)에서 추적한다.
 
 ### 6.2 시간 모델
 
@@ -301,19 +308,26 @@ public:
 
 D1에 외부 차량 SDK를 런타임으로 채택하지 않고 현재 C++ 서버에 차량 물리를 직접 구현하기로 결정했다. Chrono::Vehicle 10.0.0의 차량 1대·4대, 정적 벽 충돌, 반복성 결과는 비교 기준으로 보존하며 제품 의존성에는 포함하지 않는다. 상세 근거는 [ADR-006](./decisions/ADR-006-custom-vehicle-physics.md)에 기록한다.
 
-현재 2단계 모델은 다음을 계산한다.
+현재 2단계 모델과 이번 지면 접촉 기반은 다음을 계산한다.
 
 - 질량과 구동력·제동력으로 종방향 가속도 계산
 - 공기저항과 구름저항
 - Drive, Neutral, Reverse와 단일 기어비 RPM 근사
-- 4개 바퀴의 평면 접촉점, normal load, steering, angular speed
+- `GroundQuery`를 통한 4개 바퀴의 하향 hit point·normal·no-hit 상태
+- 기본 z=0 `FlatGroundQuery`와 바퀴별 제한된 1D spring/damper stroke·normal force
 - wheel inertia와 longitudinal slip 기반 종력, slip angle 기반 횡력, friction circle 제한
 - 가감속·선회에 따른 종·횡 normal-load transfer, 후륜 구동과 4륜 제동
 - yaw 관성 및 suspension-equivalent spring/damper 기반 roll/pitch 응답
 - Local ENU east/north 위치와 WGS84 출력
 - 입력 clamp, 비정상 `dt` 방어, 정지·가속·제동·후진·회전 회귀 시험
 
-다음 단계에서 MapPackage 지형 raycast, 실제 suspension stroke, 경사·노면 마찰과 충돌을 같은 인터페이스 안에 추가한다. 현재 바퀴 접촉은 z=0 평면을 전제로 한다. Unreal은 자체 물리 결과를 표시하며 Chaos로 Ego pose를 다시 해결하지 않는다.
+현재 자동 시험은 평지, 기울어진 test plane의 hit·normal, 전체/부분 no-hit,
+spring/damper stroke·force clamp를 검증한다. 이는 접촉 query와 1D 하중 계산의
+기반이지 완전한 지형 차량 모델은 아니다. `VehicleState.position_enu.z`는 아직 고정된
+CG 높이를 사용하고, tire force도 ground normal을 따라 3차원으로 풀지 않는다. 다음
+단계에서 MapPackage ground/raycast provider, 노면 재질·마찰, 차체 heave와 6DoF
+constraint 및 실제 경사 주행을 같은 경계 뒤에 추가한다. Unreal은 C++ 결과를 표시하며
+Chaos로 Ego pose를 다시 해결하지 않는다.
 
 ### 9.3 정확도의 정의
 
@@ -330,7 +344,7 @@ R1에서 “정확한 C++ 물리”는 다음을 의미한다.
 
 ### 10.1 R1 transport 결정
 
-R1 수동운전의 runtime control/state 통신은 `WebSocket binary + Protobuf`로 확정한다. C++ host의 현행 JSON 입력 파서는 제거됐으며, UDP는 초기값이 아니라 측정 결과가 나쁠 때 재검토하는 대안이다. Python relay의 JSON WebSocket은 수동운전 runtime protocol이 아니라 observer/debug 경로로만 취급한다.
+R1 수동운전의 runtime control/state 통신은 `WebSocket binary + Protobuf`로 확정한다. C++ host의 현행 JSON 입력 파서는 제거됐으며, UDP는 초기값이 아니라 측정 결과가 나쁠 때 재검토하는 대안이다. Python relay와 그 JSON WebSocket은 동결된 과거 observer/debug 도구이며 기본 빌드와 R1 검증에서 제외한다.
 
 현재 R1 구현은 하나의 WebSocket 연결에서 `ControlCommand`와 `WorldState`를
 교환한다. 아래 신뢰성/실시간 채널 분리는 센서·생명주기 메시지가 추가될 때의
@@ -340,15 +354,26 @@ R1 수동운전의 runtime control/state 통신은 `WebSocket binary + Protobuf`
 - 실시간 채널에서 Unreal→C++ command와 C++→Unreal state를 교환
 - runtime control/state 메시지는 Protobuf `Envelope`를 사용
 - JSON은 runtime driving protocol에 사용하지 않음
-- Python relay는 수동운전 경로에서 제거
+- Python relay와 ZMQ dependency·5555 bind는 기본 빌드에서 비활성화
 - transport와 serialization은 각각 인터페이스 뒤에 두어 측정 결과에 따라 교체 가능
 - 센서 영상은 같은 socket에 싣지 않음
 
 ### 10.2 메시지 계층
 
-현재 runtime에서 처리하는 payload는 `ControlCommand`와 `WorldState`다.
+R1 기본 runtime에서 처리하는 payload는 `ControlCommand`와 `WorldState`다.
 `Hello`와 `Health`는 Proto 정의만 존재하며, `AgentIntent`, `SignalState`,
 `LifecycleCommand`, `SensorMetadata`는 목표 메시지다.
+
+C++는 tick마다 schema v2 `Envelope{WorldState}`를 직렬화해 Unreal WebSocket에
+전달한다. C++와 Unreal의 exact version gate는 구 부호 계약의 오해를 막지만
+Protobuf `Hello` application handshake를 대체하지 않는다.
+
+`SIMCORE_ENABLE_ZMQ_OBSERVER=OFF`가 기본값이다. 명시적으로
+`release-zmq-observer` preset을 선택한 경우에만 C++가 별도의 버전 없는
+`EntityStatePacket`을 ZMQ에 발행하고 동결된 Python relay가 이를 읽는다. 이 경로는
+schema v2 Envelope와 동일한 계약이 아니며 R1 기능·성능·호환성 게이트에 사용하지
+않는다. R2 Python AutonomyServer를 시작할 때 control/state/sensor transport와
+version handshake를 별도로 결정한다.
 
 ```text
 Envelope
@@ -602,6 +627,8 @@ release/
 
 | 버전 | 날짜 | 변경 내용 |
 |---|---|---|
+| 1.2 | 2026-08-21 | Python/ZMQ observer를 default-OFF legacy 경로로 동결하고 GroundQuery·FlatGroundQuery·1D suspension 기반과 미완료 6DoF 경계를 반영 |
+| 1.1 | 2026-08-21 | FLU 좌회전·좌조향 양수 schema v2, C++ `BodyFrameAdapter`와 Unreal scalar 경계, Windows Unreal 검증 대기 상태 반영 |
 | 1.0 | 2026-08-19 | C++ `SimulationHost`와 WebSocket 수명주기, Unreal 연결 generation·game-thread 적용 및 좌표·표시 helper, Python package entrypoint·lifespan·오류 격리 리팩터링과 재검증 상태 반영 |
 | 0.9 | 2026-08-19 | ADR-011의 ROS 호환 FLU canonical frame, Unreal 경계 변환, legacy yaw/steering 부호와 adapter·시험 이행 작업 반영 |
 | 0.8 | 2026-08-19 | control session·queue-age SafeStop, body Y-left publish 계약, 횡하중 이동 수정, 입력 coalescing과 entity ID 선택 반영 |

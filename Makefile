@@ -26,14 +26,14 @@ test-cpp:
 test-python:
 	$(RELAY_PYTHON) -m unittest discover -s python/relay_server/tests -t . -v
 
-test: test-python test-cpp
+test: test-cpp
 
 check-python: test-python
 
 check-proto:
 	$(RELAY_PYTHON) -m unittest -v python.relay_server.tests.test_generated_proto
 
-check: check-python
+check: test-cpp
 
 generate-proto:
 	cd python/relay_server && bash scripts/generate_proto.sh

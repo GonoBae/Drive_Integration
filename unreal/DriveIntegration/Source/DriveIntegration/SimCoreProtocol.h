@@ -4,7 +4,7 @@
 
 namespace SimCoreProtocol
 {
-	inline constexpr uint32 SchemaVersion = 1;
+	inline constexpr uint32 SchemaVersion = 2;
 
 	enum class EVehicleGear : uint8
 	{
@@ -17,7 +17,7 @@ namespace SimCoreProtocol
 	{
 		float Throttle = 0.0f;
 		float Brake = 0.0f;
-		float Steering = 0.0f;
+		float Steering = 0.0f; // -1=right, +1=left
 		bool bHandbrake = false;
 		EVehicleGear Gear = EVehicleGear::Drive;
 		bool bEstop = false;
@@ -30,7 +30,7 @@ namespace SimCoreProtocol
 		{
 			uint32 WheelIndex = 0;
 			bool bInContact = false;
-			float SteeringAngleRad = 0.0f;
+			float SteeringAngleRad = 0.0f; // positive=left
 			float AngularSpeedRad = 0.0f;
 			float NormalLoadN = 0.0f;
 			float LongitudinalSlip = 0.0f;
@@ -55,8 +55,8 @@ namespace SimCoreProtocol
 		float EngineRpm = 0.0f;
 		double EastMeters = 0.0;
 		double NorthMeters = 0.0;
-		float YawRateRad = 0.0f;
-		float SteeringAngleRad = 0.0f;
+		float YawRateRad = 0.0f; // FLU body yaw, positive=left
+		float SteeringAngleRad = 0.0f; // positive=left
 		EVehicleGear Gear = EVehicleGear::Drive;
 		uint64 Sequence = 0;
 		uint64 SimulationTimeNs = 0;

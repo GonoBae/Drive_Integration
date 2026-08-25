@@ -268,6 +268,7 @@ bool ParseWorldStateEnvelope(TArrayView<const uint8> Data, uint32 TargetEntityId
 	uint64 Sequence = 0;
 	uint64 SimulationTimeNs = 0;
 	FVehicleState ParsedState;
+	TArrayView<const uint8> WorldStatePayload;
 	bool bFoundWorldState = false;
 	while (!Reader.AtEnd())
 	{
@@ -289,20 +290,22 @@ bool ParseWorldStateEnvelope(TArrayView<const uint8> Data, uint32 TargetEntityId
 		}
 		else if (Field == 12 && Wire == 2)
 		{
-			TArrayView<const uint8> World;
-			FVehicleState CandidateState;
-			if (!Reader.ReadMessage(World) || !ParseWorldState(World, TargetEntityId, CandidateState))
+			if (!Reader.ReadMessage(WorldStatePayload))
 			{
-				OutError = FString::Printf(TEXT("WorldState does not contain entity %u"), TargetEntityId);
+				OutError = TEXT("Invalid WorldState payload");
 				return false;
 			}
-			ParsedState = MoveTemp(CandidateState);
 			bFoundWorldState = true;
 		}
 		else if (!Reader.Skip(Wire)) { OutError = TEXT("Unsupported protobuf wire value"); return false; }
 	}
-	if (Version != SchemaVersion) { OutError = FString::Printf(TEXT("Schema version %u is unsupported"), Version); return false; }
+	if (Version != SchemaVersion) { OutError = FString::Printf(TEXT("Schema version mismatch: expected %u, got %u"), SchemaVersion, Version); return false; }
 	if (!bFoundWorldState) { OutError = TEXT("Envelope does not contain WorldState"); return false; }
+	if (!ParseWorldState(WorldStatePayload, TargetEntityId, ParsedState))
+	{
+		OutError = FString::Printf(TEXT("WorldState does not contain entity %u"), TargetEntityId);
+		return false;
+	}
 	ParsedState.Sequence = Sequence;
 	ParsedState.SimulationTimeNs = SimulationTimeNs;
 	OutState = MoveTemp(ParsedState);

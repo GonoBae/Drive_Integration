@@ -5,8 +5,15 @@
   "dependencies": [
     "boost-asio",
     "boost-beast",
-    "zeromq",
-    "cppzmq",
     "protobuf"
-  ]
+  ],
+  "features": {
+    "zmq-observer": {
+      "description": "Optional C++ publisher for the frozen Python observer",
+      "dependencies": [
+        "zeromq",
+        "cppzmq"
+      ]
+    }
+  }
 }

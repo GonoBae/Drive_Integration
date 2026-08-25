@@ -5,7 +5,7 @@
 | 항목 | 값 |
 |---|---|
 | 최초 작성 | 2026-08-19 |
-| 기준 코드 | branch `main`, 2026-08-19 전체 리팩터링 기준 |
+| 기준 코드 | 2026-08-21 R1 기본 경로·선택형 observer 분리 기준 |
 | 재검토 조건 | 실행 프로세스, 포트, 물리 권한 또는 필수 데이터 경로 변경 |
 
 ## 목표
@@ -34,7 +34,9 @@ W/S/A/D 또는 gamepad
 → Unreal parse / ExternalVehiclePawn 표시
 ```
 
-관찰 경로인 `C++ → ZMQ :5555 → Python relay → JSON debug client`는 수동운전 필수 경로가 아니다.
+과거 관찰 경로인 `C++ → ZMQ :5555 → Python relay → JSON debug client`는
+기본 빌드에서 꺼져 있으며 R1에서 동결했다. `release-zmq-observer`를 명시적으로
+선택했을 때만 열리는 보존 경로이고 수동운전 필수 경로가 아니다.
 
 ## 직접 작성할 표
 
@@ -54,6 +56,6 @@ W/S/A/D 또는 gamepad
 
 - 프로세스·포트·입력·출력 표 완성
 - 필수 수동운전 폐루프와 관찰 경로 분리
-- Python relay가 종료돼도 수동운전이 유지되는 이유 설명
+- 기본 실행이 Python relay와 ZMQ 없이 수동운전을 유지하는 이유 설명
 - `main.cpp`와 `SimulationHost`를 지금 정독하지 않는 이유 설명
 - 일정표에 완료 여부와 필요한 복습 항목 반영
