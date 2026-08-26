@@ -14,6 +14,7 @@ cpp/host/vcpkg/
 cpp/host/vcpkg_installed/
 cpp/host/compile_commands.json
 cpp/host/CMakeUserPresets.json
+runtime_logs/
 
 # ============================================================
 # Unreal Engine

@@ -13,6 +13,14 @@ namespace SimCoreProtocol
 		Reverse = 2,
 	};
 
+	enum class EEntityKind : uint8
+	{
+		Unspecified = 0,
+		EgoVehicle = 1,
+		NpcVehicle = 2,
+		Pedestrian = 3,
+	};
+
 	struct FControlCommand
 	{
 		float Throttle = 0.0f;
@@ -58,11 +66,19 @@ namespace SimCoreProtocol
 		float YawRateRad = 0.0f; // FLU body yaw, positive=left
 		float SteeringAngleRad = 0.0f; // positive=left
 		EVehicleGear Gear = EVehicleGear::Drive;
+		EEntityKind EntityKind = EEntityKind::Unspecified;
 		uint64 Sequence = 0;
 		uint64 SimulationTimeNs = 0;
+		FString MapPackageChecksum;
+		FString PlaySessionId;
 		FVector3d PositionEnu = FVector3d::ZeroVector;
 		FVector3d LinearVelocityBody = FVector3d::ZeroVector;
 		FVector3d AngularVelocityBody = FVector3d::ZeroVector;
+		FVector3d LinearVelocityEnu = FVector3d::ZeroVector;
+		float CollisionHalfLengthMeters = 0.0f;
+		float CollisionHalfWidthMeters = 0.0f;
+		float CollisionHalfHeightMeters = 0.0f;
+		float CollisionRadiusMeters = 0.0f;
 		TArray<FWheelState> Wheels;
 	};
 
@@ -73,9 +89,24 @@ namespace SimCoreProtocol
 		const FString& SessionId,
 		const FString& MapChecksum);
 
+	DRIVEINTEGRATION_API TArray<uint8> SerializeSimulationResetEnvelope(
+		const FString& PlaySessionId,
+		uint64 ClientTimeNs,
+		uint64 Sequence,
+		const FString& SourceId,
+		const FString& ConnectionSessionId,
+		const FString& MapChecksum);
+
 	DRIVEINTEGRATION_API bool ParseWorldStateEnvelope(
 		TArrayView<const uint8> Data,
 		uint32 TargetEntityId,
 		FVehicleState& OutState,
+		FString& OutError);
+
+	DRIVEINTEGRATION_API bool ParseWorldStateEnvelope(
+		TArrayView<const uint8> Data,
+		uint32 TargetEntityId,
+		FVehicleState& OutState,
+		TArray<FVehicleState>& OutEntities,
 		FString& OutError);
 }

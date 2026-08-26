@@ -36,7 +36,9 @@ WebSocket handshake 중 state frame이 HTTP 101보다 먼저 쓰이던 별도 �
 - gamepad noise는 deadzone 0.02와 변화 epsilon 0.005로 거르고, 변화 command는 최대 30Hz로 제한한다.
 - 값이 유지될 때는 20Hz heartbeat로 250ms command timeout lease를 유지한다.
 - 연결마다 고유 `session_id`를 만들고 sequence를 1부터 다시 시작한다.
-- 250ms timeout에서는 서버가 기존 session과 socket을 폐기하고, Unreal은 기본 0.5초 뒤 새 session으로 재연결한다.
+- 250ms command 공백에서는 서버가 즉시 throttle 해제·full brake·handbrake SafeStop을 적용하되 기존 session과 socket을 유지한다.
+- 같은 session의 신선하고 순서가 맞는 command는 재연결 없이 lease를 다시 arm한다. 100ms를 넘긴 stale queue packet은 SafeStop을 해제하지 못한다.
+- command 공백이 1초를 넘을 때만 session을 retire하고 socket을 1008로 닫으며, Unreal은 기본 0.5초 뒤 새 session으로 재연결한다.
 - Windows에서는 libWebSockets event-loop service를 사용해 새 입력이 socket thread를 즉시 깨우도록 한다.
 - event-loop 미지원 플랫폼의 polling fallback은 240Hz로 설정한다.
 - Editor PIE에서는 background CPU throttling을 꺼 game tick 저하로 heartbeat가 250ms를 넘지 않게 한다.
@@ -63,6 +65,14 @@ WebSocket handshake 중 state frame이 HTTP 101보다 먼저 쓰이던 별도 �
 이 결과는 host와 transport의 loopback 기준이다. Unreal input sampling, render frame, 디스플레이 지연을 모두 포함한 end-to-end 수치는 packaged build에서 추가 측정한다.
 
 추가 PIE 진단에서는 WorldState가 대체로 58~61Hz, `server_age` 약 0~27ms, `local_age` 약 1~31ms로 유지됐지만 실제 키 지연은 계속 증가했다. UE 5.6 송신 FIFO의 60Hz 생산/약 30Hz 소비 불균형을 수정한 뒤 30초 이상 반복 조작에서 사용자가 누적 지연 해결을 확인했다. 상세 재현과 진단 순서는 [UE 5.6 WebSocket 입력 지연 누적 해결 사례](../troubleshooting/ue56-websocket-growing-input-delay.md)에 기록한다.
+
+2026-08-27에는 command FIFO와 다른 1008 사례가 확인됐다. Unreal game tick은 약 66Hz였지만
+WorldState가 59~60Hz에서 24~40Hz로 먼저 저하됐고, 서버의 100ms queue-age 거부와 250ms
+timeout이 뒤따랐다. 서버 단일 `io_context`에서 매 tick overrun을 동기식 stderr로 남긴
+상태로 자동화의 console pipe가 소비되지 않으면 network read까지 정체될 수 있었다.
+overrun 로그를 최대 1Hz 요약으로 바꾸고 background launcher가 파일로 redirect하도록
+했다. 위 2단계 lease는 안전 제동 시간을 늦추지 않으면서 일시적 250~1000ms hitch가
+불필요한 session 폐기로 번지는 것을 막는다. 상세 내용은 [해결 사례](../troubleshooting/ue56-control-lease-timeout-log-backpressure.md)에 기록한다.
 
 ## 결과와 비용
 
@@ -91,6 +101,8 @@ WebSocket handshake 중 state frame이 HTTP 101보다 먼저 쓰이던 별도 �
 - Unreal 5.6 Game target 빌드 통과
 - Unreal 5.6 Editor target 빌드·DLL 링크 통과
 - 실제 PIE 30초 이상 반복 조작에서 누적 입력 지연 해소 확인
+- 250ms soft SafeStop 후 같은 session fresh command 복구, 1초 hard retire·close 1회 C++ 회귀 통과
+- background launcher 파일 redirect와 overrun 1Hz 요약 smoke 통과
 
 위 Windows·PIE 결과는 최초 저지연 수정 기준이다. 종료 재검토에서 추가한 session/queue-age와 최대 30Hz coalescing 변경은 macOS C++·Python 검증까지 통과했으며, 목표 Windows에서 Unreal Game/Editor target과 end-to-end 입력 지연을 다시 측정해야 한다.
 

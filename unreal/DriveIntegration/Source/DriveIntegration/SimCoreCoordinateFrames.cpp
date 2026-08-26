@@ -44,10 +44,31 @@ FRotator BuildUnrealActorRotation(
 	const FVector3d& AngularVelocityBody,
 	double PredictionSeconds)
 {
+	const double PitchRadians = FMath::DegreesToRadians(PitchDegrees);
+	const double RollRadians = FMath::DegreesToRadians(RollDegrees);
+	// angular_velocity_body is a true RH-FLU vector, not a bag of Euler
+	// derivatives. Recover the Euler rates used by this presentation transform
+	// so compound pitch+roll+yaw prediction does not introduce cross-axis drift.
+	// The legacy scalar remains body-Z angular rate by schema contract, so it is
+	// only a gimbal fallback; it is not the navigation Euler yaw rate at a
+	// compound attitude.
+	const double PitchRateRadPerSecond =
+		-AngularVelocityBody.Y * FMath::Cos(RollRadians)
+		+ AngularVelocityBody.Z * FMath::Sin(RollRadians);
+	const double PitchCosine = FMath::Cos(PitchRadians);
+	const double CanonicalNavigationYawRateRadPerSecond =
+		FMath::Abs(PitchCosine) > 1.0e-6
+		? (AngularVelocityBody.Y * FMath::Sin(RollRadians)
+			+ AngularVelocityBody.Z * FMath::Cos(RollRadians)) / PitchCosine
+		: BodyYawRateRadPerSecond;
+	const double RollRateRadPerSecond = AngularVelocityBody.X
+		- CanonicalNavigationYawRateRadPerSecond * FMath::Sin(PitchRadians);
 	return FRotator(
-		PitchDegrees + FMath::RadiansToDegrees(AngularVelocityBody.Y * PredictionSeconds),
+		PitchDegrees + FMath::RadiansToDegrees(
+			PitchRateRadPerSecond * PredictionSeconds),
 		HeadingDegrees - FMath::RadiansToDegrees(
-			BodyYawRateRadPerSecond * PredictionSeconds),
-		-RollDegrees - FMath::RadiansToDegrees(AngularVelocityBody.X * PredictionSeconds));
+			CanonicalNavigationYawRateRadPerSecond * PredictionSeconds),
+		RollDegrees + FMath::RadiansToDegrees(
+			RollRateRadPerSecond * PredictionSeconds));
 }
 }

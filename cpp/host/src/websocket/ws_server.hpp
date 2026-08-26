@@ -5,6 +5,7 @@
 #include <boost/beast/websocket.hpp>
 
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -15,7 +16,8 @@ namespace beast = boost::beast;
 namespace net   = boost::asio;
 using tcp       = net::ip::tcp;
 
-using BinaryMessageCallback = std::function<void(const std::string&)>;
+using BinaryMessageCallback =
+    std::function<void(std::uint64_t, const std::string&)>;
 using ConnectMessageFactory = std::function<std::string()>;
 
 // 단일 WebSocket 연결 세션
@@ -23,7 +25,8 @@ class WsSession : public std::enable_shared_from_this<WsSession> {
 public:
     static constexpr std::size_t kMaxIncomingMessageBytes = 64 * 1024;
 
-    WsSession(tcp::socket socket, BinaryMessageCallback on_msg,
+    WsSession(tcp::socket socket, std::uint64_t connection_generation,
+              BinaryMessageCallback on_msg,
               ConnectMessageFactory on_connect);
     void start();
     void send_binary(std::shared_ptr<const std::string> message);
@@ -36,6 +39,7 @@ private:
 
     beast::websocket::stream<tcp::socket> ws_;
     beast::flat_buffer                    buf_;
+    std::uint64_t                         connection_generation_ = 0;
     BinaryMessageCallback                 on_message_;
     ConnectMessageFactory                 on_connect_;
     std::deque<std::shared_ptr<const std::string>> write_queue_;

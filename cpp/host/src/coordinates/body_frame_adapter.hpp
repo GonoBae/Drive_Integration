@@ -23,12 +23,14 @@ public:
         return -right_positive;
     }
 
-    static constexpr float solver_yaw_rate_to_canonical(float clockwise_positive)
+    static constexpr float solver_heading_rate_to_canonical_yaw_rate(
+        float clockwise_positive)
     {
         return -clockwise_positive;
     }
 
-    static constexpr float canonical_yaw_rate_to_heading_rate(float left_positive)
+    static constexpr float canonical_yaw_rate_to_heading_rate(
+        float left_positive)
     {
         return -left_positive;
     }

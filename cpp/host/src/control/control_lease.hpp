@@ -26,6 +26,12 @@ enum class ControlLeaseDecision {
     ExcessiveQueueAge,
 };
 
+enum class ControlLeaseResetDecision {
+    Ready,
+    SameSession,
+    RetiredSession,
+};
+
 inline const char* control_lease_decision_message(ControlLeaseDecision decision)
 {
     switch (decision) {
@@ -46,13 +52,20 @@ class ControlLease {
 public:
     using Clock = std::chrono::steady_clock;
 
-    ControlLease(std::chrono::nanoseconds timeout,
-                 std::chrono::nanoseconds max_queue_age)
+    ControlLease(
+        std::chrono::nanoseconds timeout,
+        std::chrono::nanoseconds max_queue_age,
+        std::chrono::nanoseconds hard_timeout = std::chrono::seconds(1))
         : timeout_(timeout)
+        , hard_timeout_(hard_timeout)
         , max_queue_age_(max_queue_age)
     {
         if (timeout_ <= std::chrono::nanoseconds::zero()) {
             throw std::invalid_argument("Control lease timeout must be positive");
+        }
+        if (hard_timeout_ <= timeout_) {
+            throw std::invalid_argument(
+                "Hard control lease timeout must exceed the SafeStop timeout");
         }
         if (max_queue_age_ < std::chrono::nanoseconds::zero()) {
             throw std::invalid_argument("Maximum command queue age cannot be negative");
@@ -81,7 +94,10 @@ public:
             if (retired_sessions_.contains(key)) {
                 return ControlLeaseDecision::RetiredSession;
             }
-            if (!active_key_.empty() && !safe_stop_active_) {
+            // A soft timeout keeps the current connection/session owner. Only
+            // an explicit lifecycle handover or the hard timeout may replace
+            // it, so an unrelated source cannot exploit SafeStop to preempt.
+            if (!active_key_.empty()) {
                 return ControlLeaseDecision::ActiveOwnerConflict;
             }
 
@@ -133,6 +149,9 @@ public:
         return ControlLeaseDecision::Accepted;
     }
 
+    // The soft deadline applies SafeStop without retiring the session. A
+    // fresh, ordered command from the same owner may recover immediately;
+    // queued commands still have to pass the queue-age validation in accept().
     bool update_timeout(Clock::time_point now)
     {
         if (safe_stop_active_ || last_receive_time_ == Clock::time_point::min()) {
@@ -142,9 +161,103 @@ public:
             return false;
         }
         safe_stop_active_ = true;
+        return true;
+    }
+
+    // The hard deadline is the connection-fencing boundary. It deliberately
+    // follows the soft SafeStop deadline so a transient editor/transport hitch
+    // cannot force a reconnect while motion has already been made safe.
+    bool update_hard_timeout(Clock::time_point now)
+    {
+        if (last_receive_time_ == Clock::time_point::min()
+            || active_key_.empty()
+            || now - last_receive_time_ <= hard_timeout_) {
+            return false;
+        }
+        safe_stop_active_ = true;
         retired_sessions_.insert(active_key_);
         active_key_.clear();
         return true;
+    }
+
+    // Start a new authoritative simulation while permanently fencing off the
+    // previous controller session. Retired sessions are deliberately kept so
+    // delayed packets from an earlier PIE run cannot re-arm the vehicle.
+    ControlLeaseResetDecision begin_new_simulation(
+        std::string_view source_id,
+        std::string_view session_id)
+    {
+        const std::string key = make_key(source_id, session_id);
+        if (retired_sessions_.contains(key)) {
+            return ControlLeaseResetDecision::RetiredSession;
+        }
+
+        // Validate the candidate before changing any current ownership. This
+        // makes a rejected lifecycle packet strictly side-effect free.
+        if (!active_key_.empty() && active_key_ != key) {
+            retired_sessions_.insert(active_key_);
+        }
+        if (!reset_session_key_.empty() && reset_session_key_ != key) {
+            retired_sessions_.insert(reset_session_key_);
+        }
+        active_key_.clear();
+        active_source_id_.clear();
+        active_session_id_.clear();
+        highest_sequence_ = 0;
+        last_client_time_ns_ = 0;
+        last_receive_time_ = Clock::time_point::min();
+        safe_stop_active_ = true;
+        reset_session_key_ = key;
+        return ControlLeaseResetDecision::Ready;
+    }
+
+    void reset_for_new_simulation()
+    {
+        if (!active_key_.empty()) {
+            retired_sessions_.insert(active_key_);
+        }
+        if (!reset_session_key_.empty()) {
+            retired_sessions_.insert(reset_session_key_);
+        }
+        active_key_.clear();
+        reset_session_key_.clear();
+        active_source_id_.clear();
+        active_session_id_.clear();
+        highest_sequence_ = 0;
+        last_client_time_ns_ = 0;
+        last_receive_time_ = Clock::time_point::min();
+        safe_stop_active_ = true;
+    }
+
+    // A reconnect within the same PIE run changes Envelope.session_id but must
+    // not reset physics. Retire the former connection so the new one can take
+    // the lease immediately, while refusing any already-retired connection.
+    ControlLeaseResetDecision reset_for_reconnect(
+        std::string_view source_id,
+        std::string_view session_id)
+    {
+        const std::string key = make_key(source_id, session_id);
+        if (retired_sessions_.contains(key)) {
+            return ControlLeaseResetDecision::RetiredSession;
+        }
+        if (key == reset_session_key_) {
+            return ControlLeaseResetDecision::SameSession;
+        }
+        if (!reset_session_key_.empty()) {
+            retired_sessions_.insert(reset_session_key_);
+        }
+        if (!active_key_.empty()) {
+            retired_sessions_.insert(active_key_);
+        }
+        active_key_.clear();
+        active_source_id_.clear();
+        active_session_id_.clear();
+        highest_sequence_ = 0;
+        last_client_time_ns_ = 0;
+        last_receive_time_ = Clock::time_point::min();
+        safe_stop_active_ = true;
+        reset_session_key_ = key;
+        return ControlLeaseResetDecision::Ready;
     }
 
     bool safe_stop_active() const { return safe_stop_active_; }
@@ -173,8 +286,10 @@ private:
     }
 
     std::chrono::nanoseconds timeout_;
+    std::chrono::nanoseconds hard_timeout_;
     std::chrono::nanoseconds max_queue_age_;
     std::string active_key_;
+    std::string reset_session_key_;
     std::string active_source_id_;
     std::string active_session_id_;
     std::unordered_set<std::string> retired_sessions_;

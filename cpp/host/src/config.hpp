@@ -6,7 +6,6 @@ namespace Config {
 
     // Protocol
     inline constexpr const char* SOURCE_ID = "simcore-cpp-host";
-    inline constexpr const char* MAP_PACKAGE_CHECKSUM = "unset";
 
     // Optional ZMQ observer (→ frozen Python Relay). The default build does
     // not compile or bind this transport.

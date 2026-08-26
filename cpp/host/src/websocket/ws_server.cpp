@@ -9,9 +9,12 @@ using tcp       = net::ip::tcp;
 
 // --- WsSession ---
 
-WsSession::WsSession(tcp::socket socket, BinaryMessageCallback on_msg,
+WsSession::WsSession(tcp::socket socket,
+                     std::uint64_t connection_generation,
+                     BinaryMessageCallback on_msg,
                      ConnectMessageFactory on_connect)
     : ws_(std::move(socket))
+    , connection_generation_(connection_generation)
     , on_message_(std::move(on_msg))
     , on_connect_(std::move(on_connect))
 {}
@@ -137,7 +140,7 @@ void WsSession::do_read() {
             if (self->close_requested_) {
                 return;
             }
-            self->on_message_(msg);
+            self->on_message_(self->connection_generation_, msg);
             self->do_read();
         });
 }
@@ -196,10 +199,33 @@ void WsSession::do_close() {
 struct WsServer::State : public std::enable_shared_from_this<WsServer::State> {
     State(net::io_context& ioc, unsigned short port,
           BinaryMessageCallback on_msg, ConnectMessageFactory on_connect)
-        : acceptor(ioc, tcp::endpoint(tcp::v4(), port))
+        : acceptor(ioc)
         , on_message(std::move(on_msg))
         , connect_message(std::move(on_connect))
-    {}
+    {
+        const tcp::endpoint endpoint(tcp::v4(), port);
+        acceptor.open(endpoint.protocol());
+#ifdef _WIN32
+        // Windows SO_REUSEADDR semantics can allow two processes to listen on
+        // the same address and distribute incoming Unreal connections between
+        // independent physics worlds. Require exclusive ownership so a second
+        // SimCore fails at startup instead of creating nondeterministic state.
+        const BOOL exclusive_address_use = TRUE;
+        if (::setsockopt(
+                acceptor.native_handle(),
+                SOL_SOCKET,
+                SO_EXCLUSIVEADDRUSE,
+                reinterpret_cast<const char*>(&exclusive_address_use),
+                sizeof(exclusive_address_use)) == SOCKET_ERROR) {
+            throw boost::system::system_error(
+                boost::system::error_code(
+                    WSAGetLastError(), boost::system::system_category()),
+                "SO_EXCLUSIVEADDRUSE");
+        }
+#endif
+        acceptor.bind(endpoint);
+        acceptor.listen(net::socket_base::max_listen_connections);
+    }
 
     void start()
     {
@@ -260,8 +286,11 @@ struct WsServer::State : public std::enable_shared_from_this<WsServer::State> {
                     return;
                 }
 
+                const std::uint64_t connection_generation =
+                    self->next_connection_generation++;
                 auto session = std::make_shared<WsSession>(
-                    std::move(socket), self->on_message, self->connect_message);
+                    std::move(socket), connection_generation,
+                    self->on_message, self->connect_message);
                 self->sessions.push_back(session);
                 session->start();
                 self->do_accept();
@@ -282,6 +311,7 @@ struct WsServer::State : public std::enable_shared_from_this<WsServer::State> {
     BinaryMessageCallback on_message;
     ConnectMessageFactory connect_message;
     std::vector<std::weak_ptr<WsSession>> sessions;
+    std::uint64_t next_connection_generation = 1;
     bool started = false;
     bool stopping = false;
 };

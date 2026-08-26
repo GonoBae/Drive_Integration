@@ -53,6 +53,32 @@ void test_large_overrun_does_not_create_catch_up_deadlines()
             "all skipped wall-clock deadlines must be counted");
 }
 
+void test_reset_elapsed_preserves_the_fixed_step_deadline()
+{
+    using namespace std::chrono_literals;
+    using Clock = SimulationClock::Clock;
+    const auto start = Clock::time_point{};
+    SimulationClock clock(60.0, start);
+
+    clock.advance(start + 1s);
+    require(clock.tick_index() == 1 && clock.overrun_count() > 0,
+            "test setup must advance simulation time and record overruns");
+    const auto scheduled_deadline = clock.next_deadline();
+
+    clock.reset_elapsed();
+
+    require(clock.tick_index() == 0 && clock.simulation_time_ns() == 0,
+            "PIE reset must restart authoritative simulation time at zero");
+    require(clock.overrun_count() == 0,
+            "PIE reset must clear the prior run's timing diagnostics");
+    require(clock.next_deadline() == scheduled_deadline,
+            "elapsed-time reset must not disturb the live timer cadence");
+
+    clock.advance(scheduled_deadline);
+    require(clock.tick_index() == 1 && clock.simulation_time_ns() != 0,
+            "the first post-reset callback must advance exactly one tick");
+}
+
 void test_invalid_frequency_is_rejected()
 {
     using Clock = SimulationClock::Clock;
@@ -77,6 +103,7 @@ int main()
 {
     test_fixed_step_and_overrun_tracking();
     test_large_overrun_does_not_create_catch_up_deadlines();
+    test_reset_elapsed_preserves_the_fixed_step_deadline();
     test_invalid_frequency_is_rejected();
 
     std::cout << "simulation_clock_tests: all tests passed\n";

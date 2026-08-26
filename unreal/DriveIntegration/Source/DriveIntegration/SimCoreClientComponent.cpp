@@ -1,6 +1,13 @@
 #include "SimCoreClientComponent.h"
 
 #include "Async/Async.h"
+#include "Components/StaticMeshComponent.h"
+#include "Engine/StaticMesh.h"
+#include "Engine/StaticMeshActor.h"
+#include "Engine/World.h"
+#include "UObject/ConstructorHelpers.h"
+#include "SimCoreMapPackage.h"
+#include "SimCorePresentation.h"
 #include "WebSocketsModule.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogSimCoreClient, Log, All);
@@ -23,11 +30,18 @@ void ApplyOnGameThread(CallbackType&& Callback)
 USimCoreClientComponent::USimCoreClientComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> CubeMesh(
+		TEXT("/Engine/BasicShapes/Cube.Cube"));
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> CapsuleMesh(
+		TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
+	RuntimeNpcMesh = CubeMesh.Object;
+	RuntimePedestrianMesh = CapsuleMesh.Object;
 }
 
 void USimCoreClientComponent::BeginPlay()
 {
 	Super::BeginPlay();
+	PlaySessionId = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
 	Connect();
 }
 
@@ -51,8 +65,15 @@ void USimCoreClientComponent::TickComponent(
 void USimCoreClientComponent::Connect()
 {
 	if (ConnectionState == ESimCoreConnectionState::Connecting
+		|| ConnectionState == ESimCoreConnectionState::Handshaking
 		|| ConnectionState == ESimCoreConnectionState::Connected)
 	{
+		return;
+	}
+	if (!PrepareMapPackageIdentity())
+	{
+		bAutoReconnectEnabled = false;
+		SetConnectionState(ESimCoreConnectionState::Incompatible);
 		return;
 	}
 
@@ -84,12 +105,14 @@ void USimCoreClientComponent::SetControl(
 	float Throttle,
 	float Brake,
 	float Steering,
-	bool bHandbrake)
+	bool bHandbrake,
+	SimCoreProtocol::EVehicleGear Gear)
 {
 	PendingControl.Throttle = ApplyInputDeadzone(FMath::Clamp(Throttle, 0.0f, 1.0f));
 	PendingControl.Brake = ApplyInputDeadzone(FMath::Clamp(Brake, 0.0f, 1.0f));
 	PendingControl.Steering = ApplyInputDeadzone(FMath::Clamp(Steering, -1.0f, 1.0f));
 	PendingControl.bHandbrake = bHandbrake;
+	PendingControl.Gear = Gear;
 	bControlDirty = HasMeaningfulControlChange();
 }
 
@@ -125,6 +148,37 @@ void USimCoreClientComponent::StartConnectionAttempt()
 
 	BindSocketDelegates(Generation);
 	Socket->Connect();
+}
+
+bool USimCoreClientComponent::PrepareMapPackageIdentity()
+{
+	SimCoreMapPackage::FManifest Manifest;
+	FString Error;
+	if (!SimCoreMapPackage::LoadAndVerifyManifest(
+		MapPackageDirectory,
+		Manifest,
+		Error))
+	{
+		MapPackageChecksum.Reset();
+		UE_LOG(
+			LogSimCoreClient,
+			Error,
+			TEXT("MapPackage validation failed for %s: %s"),
+			*MapPackageDirectory,
+			*Error);
+		return false;
+	}
+
+	MapPackageDirectory = Manifest.PackageDirectory;
+	MapPackageChecksum = Manifest.CollisionChecksum;
+	UE_LOG(
+		LogSimCoreClient,
+		Log,
+		TEXT("Verified MapPackage id=%s checksum=%s directory=%s"),
+		*Manifest.MapId,
+		*MapPackageChecksum,
+		*MapPackageDirectory);
+	return true;
 }
 
 void USimCoreClientComponent::TickConnection()
@@ -180,13 +234,141 @@ void USimCoreClientComponent::ResetConnectionSession()
 	ResetReceivedState();
 	ResetTelemetry();
 	ResetControlSession();
+	bMapHandshakeComplete = false;
 }
 
 void USimCoreClientComponent::ResetReceivedState()
 {
+	DestroyRuntimeProxyActors();
 	LatestState = {};
 	LatestStateReceiveTimeSeconds = 0.0;
 	bHasState = false;
+}
+
+void USimCoreClientComponent::SyncRuntimeProxyActors(
+	const TArray<SimCoreProtocol::FVehicleState>& Entities,
+	double ReceiveTimeSeconds)
+{
+	if (!bShowRuntimeEntities)
+	{
+		DestroyRuntimeProxyActors();
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (World == nullptr)
+	{
+		return;
+	}
+
+	TSet<uint32> SeenEntityIds;
+	for (const SimCoreProtocol::FVehicleState& Entity : Entities)
+	{
+		if (Entity.EntityId == static_cast<uint32>(FMath::Max(ControlledEntityId, 1))
+			|| (Entity.EntityKind != SimCoreProtocol::EEntityKind::NpcVehicle
+				&& Entity.EntityKind != SimCoreProtocol::EEntityKind::Pedestrian))
+		{
+			continue;
+		}
+		SeenEntityIds.Add(Entity.EntityId);
+
+		AStaticMeshActor* Actor = RuntimeEntityActors.FindRef(Entity.EntityId).Get();
+		const SimCoreProtocol::EEntityKind* ExistingKind =
+			RuntimeEntityActorKinds.Find(Entity.EntityId);
+		if (Actor != nullptr && ExistingKind != nullptr
+			&& *ExistingKind != Entity.EntityKind)
+		{
+			Actor->Destroy();
+			RuntimeEntityActors.Remove(Entity.EntityId);
+			RuntimeEntityActorKinds.Remove(Entity.EntityId);
+			Actor = nullptr;
+		}
+
+		UStaticMesh* Mesh = Entity.EntityKind
+			== SimCoreProtocol::EEntityKind::NpcVehicle
+			? RuntimeNpcMesh.Get()
+			: RuntimePedestrianMesh.Get();
+		if (Actor == nullptr && Mesh != nullptr)
+		{
+			FActorSpawnParameters SpawnParameters;
+			SpawnParameters.SpawnCollisionHandlingOverride =
+				ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+			SpawnParameters.ObjectFlags |= RF_Transient;
+			Actor = World->SpawnActor<AStaticMeshActor>(
+				AStaticMeshActor::StaticClass(),
+				FTransform::Identity,
+				SpawnParameters);
+			if (Actor != nullptr)
+			{
+				UStaticMeshComponent* MeshComponent = Actor->GetStaticMeshComponent();
+				MeshComponent->SetMobility(EComponentMobility::Movable);
+				if (!MeshComponent->SetStaticMesh(Mesh))
+				{
+					Actor->Destroy();
+					Actor = nullptr;
+					continue;
+				}
+				MeshComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+				MeshComponent->SetGenerateOverlapEvents(false);
+				Actor->Tags.AddUnique(FName(TEXT("SimCoreRuntimeEntity")));
+				RuntimeEntityActors.Add(Entity.EntityId, Actor);
+				RuntimeEntityActorKinds.Add(Entity.EntityId, Entity.EntityKind);
+			}
+		}
+
+		if (Actor != nullptr)
+		{
+			SimCorePresentation::FRuntimeEntityPresentationSample Sample;
+			const float StateAgeSeconds = static_cast<float>(FMath::Max(
+				0.0,
+				FPlatformTime::Seconds() - ReceiveTimeSeconds));
+			if (SimCorePresentation::BuildRuntimeEntitySample(
+				Entity,
+				StateAgeSeconds,
+				RuntimeEntityMaxExtrapolationSeconds,
+				RuntimeEntityPresentationOffsetCm,
+				Sample))
+			{
+				Actor->SetActorLocationAndRotation(
+					Sample.ActorLocation,
+					Sample.ActorRotation,
+					false,
+					nullptr,
+					ETeleportType::TeleportPhysics);
+				Actor->SetActorScale3D(Sample.ActorScale);
+			}
+		}
+	}
+
+	TArray<uint32> ExistingEntityIds;
+	RuntimeEntityActors.GetKeys(ExistingEntityIds);
+	for (const uint32 EntityId : ExistingEntityIds)
+	{
+		if (SeenEntityIds.Contains(EntityId))
+		{
+			continue;
+		}
+		if (AStaticMeshActor* Actor = RuntimeEntityActors.FindRef(EntityId).Get())
+		{
+			Actor->Destroy();
+		}
+		RuntimeEntityActors.Remove(EntityId);
+		RuntimeEntityActorKinds.Remove(EntityId);
+	}
+}
+
+void USimCoreClientComponent::DestroyRuntimeProxyActors()
+{
+	for (const TPair<uint32, TWeakObjectPtr<AStaticMeshActor>>& Pair
+		: RuntimeEntityActors)
+	{
+		if (AStaticMeshActor* Actor = Pair.Value.Get())
+		{
+			Actor->Destroy();
+		}
+	}
+	RuntimeEntityActors.Reset();
+	RuntimeEntityActorKinds.Reset();
 }
 
 void USimCoreClientComponent::ResetControlSession()
@@ -380,12 +562,13 @@ bool USimCoreClientComponent::HasMeaningfulControlChange() const
 			LastSentControl.Steering,
 			PendingControl.Steering,
 			ControlChangeEpsilon)
-		|| LastSentControl.bHandbrake != PendingControl.bHandbrake;
+		|| LastSentControl.bHandbrake != PendingControl.bHandbrake
+		|| LastSentControl.Gear != PendingControl.Gear;
 }
 
 bool USimCoreClientComponent::ShouldSendControl() const
 {
-	if (!IsConnected()) return false;
+	if (!IsConnected() || !bMapHandshakeComplete) return false;
 	const float HeartbeatInterval = 1.0f / FMath::Max(CommandRateHz, 1.0f);
 	const float ChangedInputInterval = 1.0f / FMath::Max(MaxChangedCommandRateHz, 1.0f);
 	return (bControlDirty && SendAccumulator >= ChangedInputInterval)
@@ -394,7 +577,7 @@ bool USimCoreClientComponent::ShouldSendControl() const
 
 void USimCoreClientComponent::SendControl()
 {
-	if (!IsConnected()) return;
+	if (!IsConnected() || !bMapHandshakeComplete) return;
 	PendingControl.ClientTimeNs = static_cast<uint64>(
 		FPlatformTime::Seconds() * 1'000'000'000.0);
 	const TArray<uint8> Message = SimCoreProtocol::SerializeControlEnvelope(
@@ -410,6 +593,27 @@ void USimCoreClientComponent::SendControl()
 	SendAccumulator = 0.0f;
 }
 
+void USimCoreClientComponent::SendSimulationReset()
+{
+	if (!IsConnected() || !bMapHandshakeComplete || PlaySessionId.IsEmpty()) return;
+	const uint64 ClientTimeNs = static_cast<uint64>(
+		FPlatformTime::Seconds() * 1'000'000'000.0);
+	const TArray<uint8> Message = SimCoreProtocol::SerializeSimulationResetEnvelope(
+		PlaySessionId,
+		ClientTimeNs,
+		OutgoingSequence++,
+		SourceId,
+		SessionId,
+		MapPackageChecksum);
+	Socket->Send(Message.GetData(), Message.Num(), true);
+	UE_LOG(
+		LogSimCoreClient,
+		Log,
+		TEXT("Requested simulation reset for play_session=%s connection_session=%s"),
+		*PlaySessionId,
+		*SessionId);
+}
+
 void USimCoreClientComponent::ApplyConnected(uint64 Generation)
 {
 	if (!IsCurrentSocketGeneration(Generation)
@@ -418,9 +622,13 @@ void USimCoreClientComponent::ApplyConnected(uint64 Generation)
 		return;
 	}
 
-	SetConnectionState(ESimCoreConnectionState::Connected);
-	UE_LOG(LogSimCoreClient, Log, TEXT("Connected to %s session=%s"), *ServerUrl, *SessionId);
-	SendControl();
+	SetConnectionState(ESimCoreConnectionState::Handshaking);
+	UE_LOG(
+		LogSimCoreClient,
+		Log,
+		TEXT("Transport connected to %s session=%s; waiting for MapPackage identity"),
+		*ServerUrl,
+		*SessionId);
 }
 
 void USimCoreClientComponent::ApplyConnectionError(
@@ -456,7 +664,8 @@ void USimCoreClientComponent::ApplyRawMessage(
 	bool bFragmentTooLarge)
 {
 	if (!IsCurrentSocketGeneration(Generation)
-		|| ConnectionState != ESimCoreConnectionState::Connected)
+		|| (ConnectionState != ESimCoreConnectionState::Handshaking
+			&& ConnectionState != ESimCoreConnectionState::Connected))
 	{
 		return;
 	}
@@ -487,22 +696,72 @@ void USimCoreClientComponent::ApplyRawMessage(
 	TArray<uint8> CompleteMessage = MoveTemp(IncomingMessage);
 	IncomingMessage.Reset();
 	SimCoreProtocol::FVehicleState Parsed;
+	TArray<SimCoreProtocol::FVehicleState> ParsedEntities;
 	FString Error;
 	if (!SimCoreProtocol::ParseWorldStateEnvelope(
 		CompleteMessage,
-		ControlledEntityId,
+		static_cast<uint32>(FMath::Max(ControlledEntityId, 1)),
 		Parsed,
+		ParsedEntities,
 		Error))
 	{
 		UE_LOG(LogSimCoreClient, Warning, TEXT("Ignored SimCore packet: %s"), *Error);
-		if (Error.StartsWith(TEXT("Schema version")))
+		if (Error.StartsWith(TEXT("Schema version"))
+			|| Error.StartsWith(TEXT("WorldState is missing a valid map package checksum")))
 		{
 			bAutoReconnectEnabled = false;
 			SetConnectionState(ESimCoreConnectionState::Incompatible);
 			++SocketGeneration;
-			ReleaseSocket(true, TEXT("Incompatible SimCore schema version"));
+			ReleaseSocket(true, TEXT("Incompatible SimCore protocol identity"));
 			ResetReceivedState();
 		}
+		return;
+	}
+
+	if (Parsed.MapPackageChecksum != MapPackageChecksum)
+	{
+		UE_LOG(
+			LogSimCoreClient,
+			Error,
+			TEXT("MapPackage mismatch; control is disabled. local=%s server=%s directory=%s"),
+			*MapPackageChecksum,
+			*Parsed.MapPackageChecksum,
+			*MapPackageDirectory);
+		bAutoReconnectEnabled = false;
+		SetConnectionState(ESimCoreConnectionState::Incompatible);
+		++SocketGeneration;
+		ReleaseSocket(true, TEXT("MapPackage checksum mismatch"));
+		ResetReceivedState();
+		return;
+	}
+
+	if (!bMapHandshakeComplete)
+	{
+		bMapHandshakeComplete = true;
+		SetConnectionState(ESimCoreConnectionState::Connected);
+		UE_LOG(
+			LogSimCoreClient,
+			Log,
+			TEXT("MapPackage handshake complete checksum=%s"),
+			*MapPackageChecksum);
+		// A reconnect repeats the same play-session reset. The host deduplicates it
+		// by source/play-session, while ordinary control remains reset-gated.
+		SendSimulationReset();
+		SendControl();
+	}
+
+	// The host can publish its previous authoritative snapshot immediately after
+	// WebSocket accept, before this PIE's SimulationReset is processed. Only show
+	// snapshots echoed for the current play lifetime. A reconnect within the same
+	// PIE keeps PlaySessionId, so its matching snapshots remain valid.
+	if (Parsed.PlaySessionId.IsEmpty() || Parsed.PlaySessionId != PlaySessionId)
+	{
+		UE_LOG(
+			LogSimCoreClient,
+			Verbose,
+			TEXT("Ignored WorldState for play_session=%s; expected=%s"),
+			*Parsed.PlaySessionId,
+			*PlaySessionId);
 		return;
 	}
 
@@ -524,6 +783,7 @@ void USimCoreClientComponent::ApplyRawMessage(
 	LatestStateWallAgeMs = (UnixNowSeconds - Parsed.Timestamp) * 1000.0;
 	LastStateArrivalTimeSeconds = ArrivalTimeSeconds;
 	++ReceivedStateCount;
+	SyncRuntimeProxyActors(ParsedEntities, ArrivalTimeSeconds);
 	LatestState = MoveTemp(Parsed);
 	LatestStateReceiveTimeSeconds = ArrivalTimeSeconds;
 	bHasState = true;

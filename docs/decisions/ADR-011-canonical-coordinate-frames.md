@@ -4,7 +4,7 @@
 
 - 결정: 채택
 - 결정일: 2026-08-19
-- 구현 상태: schema v2 scalar 부호와 C++ 경계는 적용 완료, 전체 자세·센서·Windows Unreal 검증은 후속
+- 구현 상태: schema v2 scalar/vector 부호와 C++·Unreal 경계 소스 및 Windows UE 5.6 Editor build 완료, 실제 PIE 좌표 시각·Cesium/quaternion·센서 검증은 후속
 - 적용 범위: 현재 C++ SimCore·공통 Protobuf·Unreal, 향후 Python AutonomyServer·MapPackage·SensorRig·Recorder
 
 ## 배경
@@ -48,12 +48,23 @@ Unreal의 로컬 차량 축은 일반적으로 `X=forward, Y=right, Z=up`인 lef
 | normalized steering command | **좌조향 양수** |
 | wheel slip angle·lateral force | wheel-local left 양수 |
 
-항법 `heading`은 body 회전 벡터가 아닌 별도 scalar다. 기존 사용자 표기와 지도 규약을 위해 `0°=North`, 시계 방향 양수를 유지한다. 따라서 평면 운동에서는 다음 관계를 명시적으로 적용한다.
+항법 `heading`은 body 회전 벡터가 아닌 별도 scalar다. 기존 사용자 표기와 지도 규약을 위해 `0°=North`, 시계 방향 양수를 유지한다. `yaw_rate`는 true FLU angular velocity의 body-Z 성분이다. 따라서 수평 자세의 평면 운동에서는 다음 관계를 적용하지만, compound pitch·roll에서는 둘을 같은 scalar로 취급하지 않는다.
 
 ```text
 heading_rate_clockwise = -body_yaw_rate_left_positive
 enu_yaw_ccw_from_east = pi/2 - heading_clockwise_from_north
 ```
+
+compound 자세에서 canonical Euler yaw rate는 true body vector에서 다음처럼 복원한다.
+
+```text
+canonical_euler_yaw_rate =
+    (omega_body_y * sin(roll) + omega_body_z * cos(roll)) / cos(pitch)
+heading_rate_clockwise = -canonical_euler_yaw_rate
+yaw_rate = omega_body_z
+```
+
+현재 drivable ground 계약은 Euler singularity를 피하도록 `|pitch| <= 60°` 범위다.
 
 물리 계산의 각도와 각속도는 radian을 사용하고, 기존 `EntityState.heading/pitch/roll` 표시 필드만 degree를 사용한다.
 
@@ -74,7 +85,7 @@ ENU↔Unreal world 변환은 Cesium Georeference와 원점까지 포함하므로
 | ID | 상태 | 작업 | 목표 게이트 |
 |---|---|---|---|
 | COORD-001 | 완료 | 공개 body 선·각속도와 wheel lateral 값의 FLU/Y-left 계약 및 C++ 회귀 유지 | D7 적용·검증 |
-| COORD-002 | 완료 | `yaw_rate`를 좌회전 양수 body yaw로 정리하고 시계 방향 heading과 부호 관계를 분리 | schema v2·C++ 회귀 통과 |
+| COORD-002 | 완료 | `yaw_rate`를 좌회전 양수 true FLU body-Z로 정리하고 compound 자세의 navigation Euler yaw 복원을 분리 | schema v2·C++ 회귀 통과 |
 | COORD-003 | 소스 적용 | `steering_angle`과 `ControlCommand.steering`을 좌조향 양수로 통일하고 Unreal 입력에서 한 번만 변환 | C++·Proto 통과, Windows UE 검증 대기 |
 | COORD-004 | 부분 완료 | R1 WebSocket의 C++·Unreal v2 exact version 검사로 구 계약 차단; `Hello` handshake는 후속 | packet gate 완료, application handshake D9 |
 | COORD-005 | 부분 완료 | C++ `BodyFrameAdapter`와 Unreal scalar 경계 helper 적용; 완전한 ENU↔Cesium·quaternion adapter는 후속 | C++ 완료, Unreal D9 / M3 |
@@ -87,15 +98,16 @@ ENU↔Unreal world 변환은 Cesium Georeference와 원점까지 포함하므로
 Unreal 소스는 v1 WorldState를 incompatible 상태로 처리한다. Python relay와 ZMQ는
 현재 개발 대상이 아니므로 기본 OFF로 동결했다. opt-in observer는 버전 없는 구
 `EntityStatePacket`을 사용하므로 schema-v2 호환성 증거가 아니며, 향후 Python을
-재개할 때 이 ADR의 canonical 부호와 version handshake를 새 경계에 적용한다. 다만
-Protobuf `Hello`는 아직 정의만 있으므로 이를 application handshake 완료로 기록하지
-않는다. 최신 Unreal 변경의 빌드·PIE 검증은 Windows 환경에서 수행한다.
+    재개할 때 이 ADR의 canonical 부호와 version handshake를 새 경계에 적용한다. 다만
+    Protobuf `Hello`는 아직 정의만 있으므로 이를 application handshake 완료로 기록하지
+    않는다. 최신 Unreal 변경의 Windows UE 5.6 Editor build는 통과했고 실제 PIE 좌표
+    시각 검증은 남아 있다.
 
 ## 완료 기준
 
 - `base_link` 단위축과 임의 vector의 FLU↔solver↔FLU 왕복 오차가 허용 오차 안이다.
 - 좌회전에서 body yaw rate, steering state, steering command, lateral force의 부호가 계약과 일치한다.
-- 같은 회전에서 `heading` 증가 방향과 body yaw rate가 위 관계식으로 일치한다.
+- 같은 회전에서 `heading` 증가 방향과 `angular_velocity_body`에서 복원한 navigation Euler yaw rate가 위 관계식으로 일치하며, scalar `yaw_rate`는 body-Z와 일치한다.
 - quaternion/basis 왕복과 angular velocity axial-vector 시험이 통과한다.
 - Unreal에서 좌·우 조향 및 회전이 C++ 기준 상태와 반대로 보이지 않는다.
 - 센서 메시지와 기록 데이터가 `frame_id`와 frame convention version을 가진다.

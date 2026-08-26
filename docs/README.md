@@ -11,18 +11,25 @@
 | [03_architecture.md](./03_architecture.md) | 시스템 설계 관리 | C++·Unreal·Python 책임, 지도·충돌·통신·센서 구조 |
 | [ADR-005](./decisions/ADR-005-realtime-transport-protocol.md) | 실시간 통신 결정 | WebSocket binary + Protobuf, JSON runtime 제거, UDP 재검토 조건 |
 | [ADR-006](./decisions/ADR-006-custom-vehicle-physics.md) | 자체 차량 물리 결정 | C++ 직접 구현 근거, 단계별 범위, 비교 시험과 재검토 조건 |
+| [ADR-010](./decisions/ADR-010-low-latency-control-presentation.md) | 저지연 제어 결정 | 입력 coalescing, 2단계 control lease, 제한된 상태 예측과 재검토 조건 |
 | [ADR-011](./decisions/ADR-011-canonical-coordinate-frames.md) | 공통 좌표계 결정 | ROS 호환 FLU canonical frame, Unreal FRU 경계 변환, 남은 이행 작업 |
 | [ADR 목록](./decisions/README.md) | 기술 결정 색인 | 현재 ADR과 후속 번호 관리 |
 | [학습 센터](./study/README.md) | 교육 문서의 단일 입구 | 일정, 학습자료, 질문 및 답변의 세 문서로 안내 |
 | [2026-08-14 작업일지](./worklogs/2026-08-14.md) | 일별 실행 기록 | D1 구현, 검증 결과, 남은 위험과 다음 작업 |
 | [2026-08-19 작업일지](./worklogs/2026-08-19.md) | 일별 실행 기록 | D6 4륜 물리·Unreal 통합, 지연 계측, 좌표계 결정, 전체 코드 리팩터링과 재검증 결과 |
+| [2026-08-25 작업일지](./worklogs/2026-08-25.md) | 일별 실행 기록 | AI-D7 보충 실행, 외부 차량 설정, MapPackage 지면, heave·경사 자세와 Windows 회귀 결과 |
+| [2026-08-26 작업일지](./worklogs/2026-08-26.md) | 일별 실행 기록 | 급경사·등판 보완, collision checksum/lifecycle, 지면·충돌 index, 정적 authoring/export와 demo runtime entity 통합 |
+| [2026-08-27 작업일지](./worklogs/2026-08-27.md) | 일별 실행 기록 | 2단계 lease·background log backpressure, 조작감, 자동 후진, 독립 4-corner suspension·차체 자세, UE 부호·MapPackage 경계 보완 |
 | [UE 5.6 WebSocket 입력 지연 해결 사례](./troubleshooting/ue56-websocket-growing-input-delay.md) | 문제 해결 기록 | 60Hz producer/30Hz consumer FIFO 누적, event-loop·20Hz heartbeat 수정과 진단 기준 |
+| [UE 5.6 control lease timeout 해결 사례](./troubleshooting/ue56-control-lease-timeout-log-backpressure.md) | 문제 해결 기록 | single-thread stderr backpressure, background 파일 로그와 250ms/1초 2단계 lease |
+| [Landscape 급경사 접촉 상실 해결 사례](./troubleshooting/ue-landscape-steep-grade-contact-loss.md) | 문제 해결 기록 | stale MapPackage 판별, 절대 자세 제한·downward ray 영구 낙하 수정과 실제 bake 재시험 |
 
 ## 현재 합의된 방향
 
 - 개발 인원: 1명
 - 작업 시간: 하루 8시간
-- 기존 목표일: 2026년 8월 31일, 8월 20일 미작업 반영 후 재산정 대기
+- 이전 AI 기준선: 핵심 2026년 8월 27일·확장 8월 31일(미달성 이력)
+- 현재 관리 목표: Core RC 2026년 9월 7일(수정 버퍼 9월 8일), Should 확장 9월 11일(위험 버퍼 9월 14일)
 - 배경 범위: Manhattan Downtown의 Wall Street·Broad Street 중심 구역
 - Wall Street·Broad Street 핵심부: 실제 특성을 반영해 보행 중심으로 유지
 - 주행: 주변 차량 통행 도로에 제한된 주행 루프 구성
@@ -61,6 +68,6 @@
 ## 문서 기준 정보
 
 - 최초 작성일: 2026-08-14
-- 문서 버전: 1.1
-- 프로젝트 상태: Unreal↔C++ 직접 수동입력과 schema-v2 좌회전·좌조향 C++/Unreal 경계, `GroundQuery`·기본 평지·1D suspension 기반까지 구현; MapPackage terrain provider·차체 6DoF·전체 GeoTransform·센서 frame·Windows UE 재검증은 후속 추적
+- 문서 버전: 1.9
+- 프로젝트 상태: Unreal↔C++ schema-v2 수동입력, 차량 설정 format v4, 250ms soft SafeStop/1초 hard reconnect lease, MapPackage 실제 collision checksum과 reset gate, adaptive ground index, 8m deterministic collision broad phase, 정적 OBB 및 NPC OBB·보행자 capsule core, Unreal `ASimCoreStaticCollider` ground/static 원자적 export, opt-in demo entity lifecycle·`WorldState`·표시까지 자동 구현 완료. 자동 후진·차속 연동 표시 휠·저속 traction 보완에 더해 네 독립 wheel spring/damper 반력, wheel-local tangent force, sprung-body heave·finite-angle pitch/roll, UE roll 부호와 1~3 ray partial support 경계를 반영했다. 최신 C++ Release CTest 11/11, `vehicle_physics_tests`·`vehicle_config_tests` 각각 20/20 반복, UE 5.6 Editor build와 기존 tracked package runtime smoke는 통과했다. 다만 현재 모델은 massless hub·1D suspension 기반 reduced-order 구조이고, `Fit Sampling Bounds To Ground Actor` 적용·재-bake·서버 재시작 뒤 최신 자세와 경계를 확인하는 실제 Landscape PIE 주행은 대기 상태다. tracked Landscape도 `static_colliders=0`이므로 marker bake와 실제 PIE 정적·동적 충돌 전까지 WP-03과 관련 인수 항목은 진행 중이다. LaneGraph·신호 기반 traffic, 센서 frame·record/replay, 성능·30분 안정성은 후속 추적한다.
 - 기준 저장소: `Drive_Integration`

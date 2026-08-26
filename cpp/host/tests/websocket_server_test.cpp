@@ -15,10 +15,32 @@ using tcp = net::ip::tcp;
 
 namespace websocket = boost::beast::websocket;
 
+void test_second_server_cannot_bind_the_same_port()
+{
+    net::io_context first_ioc;
+    WsServer first(first_ioc, 0, [](std::uint64_t, const std::string&) {}, [] {
+        return std::string();
+    });
+
+    bool rejected = false;
+    try {
+        net::io_context second_ioc;
+        WsServer second(second_ioc, first.port(), [](std::uint64_t, const std::string&) {}, [] {
+            return std::string();
+        });
+    } catch (const boost::system::system_error&) {
+        rejected = true;
+    }
+    if (!rejected) {
+        throw std::runtime_error(
+            "a second WebSocket server bound the active SimCore port");
+    }
+}
+
 void test_close_before_handshake_closes_tcp_connection()
 {
     net::io_context server_ioc;
-    WsServer server(server_ioc, 0, [](const std::string&) {}, [] {
+    WsServer server(server_ioc, 0, [](std::uint64_t, const std::string&) {}, [] {
         return std::string("initial-state");
     });
     server.start();
@@ -75,7 +97,7 @@ void test_server_destruction_safely_cancels_pending_accept()
 {
     net::io_context ioc;
     {
-        WsServer server(ioc, 0, [](const std::string&) {}, [] {
+        WsServer server(ioc, 0, [](std::uint64_t, const std::string&) {}, [] {
             return std::string();
         });
         server.start();
@@ -90,7 +112,7 @@ void test_oversized_message_is_not_delivered_to_application()
 {
     std::atomic<int> delivered_messages{0};
     net::io_context server_ioc;
-    WsServer server(server_ioc, 0, [&](const std::string&) {
+    WsServer server(server_ioc, 0, [&](std::uint64_t, const std::string&) {
         ++delivered_messages;
     }, [] {
         return std::string("initial-state");
@@ -123,7 +145,7 @@ void test_oversized_message_is_not_delivered_to_application()
 void test_server_initiated_close_retires_existing_socket()
 {
     net::io_context server_ioc;
-    WsServer server(server_ioc, 0, [](const std::string&) {}, [] {
+    WsServer server(server_ioc, 0, [](std::uint64_t, const std::string&) {}, [] {
         // Large enough to keep async_write alive while close_all is requested.
         return std::string(2 * 1024 * 1024, 's');
     });
@@ -183,12 +205,13 @@ void test_server_initiated_close_retires_existing_socket()
 
 int main()
 {
+    test_second_server_cannot_bind_the_same_port();
     test_close_before_handshake_closes_tcp_connection();
     test_server_destruction_safely_cancels_pending_accept();
     test_oversized_message_is_not_delivered_to_application();
 
     net::io_context server_ioc;
-    WsServer server(server_ioc, 0, [](const std::string&) {}, [] {
+    WsServer server(server_ioc, 0, [](std::uint64_t, const std::string&) {}, [] {
         return std::string("initial-state");
     });
     server.start();

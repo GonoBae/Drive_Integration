@@ -4,6 +4,8 @@ namespace SimCoreProtocol
 {
 namespace
 {
+	constexpr int32 MaxWorldStateEntities = 256;
+
 	void WriteVarint(TArray<uint8>& Out, uint64 Value)
 	{
 		while (Value >= 0x80)
@@ -58,6 +60,10 @@ namespace
 			for (uint32 Shift = 0; Shift < 64 && Offset < Data.Num(); Shift += 7)
 			{
 				const uint8 Byte = Data[Offset++];
+				if (Shift == 63 && (Byte & 0xfe) != 0)
+				{
+					return false;
+				}
 				Out |= static_cast<uint64>(Byte & 0x7f) << Shift;
 				if ((Byte & 0x80) == 0) return true;
 			}
@@ -68,7 +74,9 @@ namespace
 		{
 			uint64 Tag = 0;
 			if (!ReadVarint(Tag) || Tag == 0) return false;
-			Field = static_cast<uint32>(Tag >> 3);
+			const uint64 FieldValue = Tag >> 3;
+			if (FieldValue == 0 || FieldValue > 0x1fffffffULL) return false;
+			Field = static_cast<uint32>(FieldValue);
 			WireType = static_cast<uint8>(Tag & 7);
 			return true;
 		}
@@ -100,6 +108,23 @@ namespace
 			return true;
 		}
 
+		bool ReadString(FString& Out)
+		{
+			TArrayView<const uint8> Bytes;
+			if (!ReadMessage(Bytes)) return false;
+			if (Bytes.IsEmpty())
+			{
+				Out.Reset();
+				return true;
+			}
+
+			FUTF8ToTCHAR Converted(
+				reinterpret_cast<const ANSICHAR*>(Bytes.GetData()),
+				Bytes.Num());
+			Out = FString(Converted.Length(), Converted.Get());
+			return true;
+		}
+
 		bool Skip(uint8 WireType)
 		{
 			switch (WireType)
@@ -116,6 +141,108 @@ namespace
 		TArrayView<const uint8> Data;
 		int32 Offset = 0;
 	};
+
+	bool IsFiniteVector(const FVector3d& Vector)
+	{
+		return FMath::IsFinite(Vector.X)
+			&& FMath::IsFinite(Vector.Y)
+			&& FMath::IsFinite(Vector.Z);
+	}
+
+	bool IsBoundedVector(const FVector3d& Vector, double MaximumMagnitude)
+	{
+		return IsFiniteVector(Vector)
+			&& FMath::Abs(Vector.X) <= MaximumMagnitude
+			&& FMath::Abs(Vector.Y) <= MaximumMagnitude
+			&& FMath::Abs(Vector.Z) <= MaximumMagnitude;
+	}
+
+	bool IsValidEntityState(const FVehicleState& State)
+	{
+		constexpr double MaxWorldCoordinateMeters = 10'000'000.0;
+		constexpr double MaxVelocityMetersPerSecond = 100'000.0;
+		constexpr double MaxAngularVelocityRadPerSecond = 10'000.0;
+		constexpr float MaxCollisionExtentMeters = 1'000.0f;
+		if (State.EntityId == 0
+			|| !FMath::IsFinite(State.Timestamp)
+			|| !FMath::IsFinite(State.Latitude)
+			|| !FMath::IsFinite(State.Longitude)
+			|| !FMath::IsFinite(State.Altitude)
+			|| !FMath::IsFinite(State.HeadingDegrees)
+			|| !FMath::IsFinite(State.PitchDegrees)
+			|| !FMath::IsFinite(State.RollDegrees)
+			|| !FMath::IsFinite(State.SpeedMps)
+			|| !FMath::IsFinite(State.AccelMps2)
+			|| !FMath::IsFinite(State.FuelPercent)
+			|| !FMath::IsFinite(State.EngineRpm)
+			|| !FMath::IsFinite(State.EastMeters)
+			|| !FMath::IsFinite(State.NorthMeters)
+			|| !FMath::IsFinite(State.YawRateRad)
+			|| !FMath::IsFinite(State.SteeringAngleRad)
+			|| FMath::Abs(State.EastMeters) > MaxWorldCoordinateMeters
+			|| FMath::Abs(State.NorthMeters) > MaxWorldCoordinateMeters
+			|| FMath::Abs(State.Altitude) > MaxWorldCoordinateMeters
+			|| !IsBoundedVector(State.PositionEnu, MaxWorldCoordinateMeters)
+			|| !IsBoundedVector(
+				State.LinearVelocityBody, MaxVelocityMetersPerSecond)
+			|| !IsBoundedVector(
+				State.AngularVelocityBody, MaxAngularVelocityRadPerSecond)
+			|| !IsBoundedVector(
+				State.LinearVelocityEnu, MaxVelocityMetersPerSecond)
+			|| !FMath::IsFinite(State.CollisionHalfLengthMeters)
+			|| !FMath::IsFinite(State.CollisionHalfWidthMeters)
+			|| !FMath::IsFinite(State.CollisionHalfHeightMeters)
+			|| !FMath::IsFinite(State.CollisionRadiusMeters)
+			|| State.CollisionHalfLengthMeters < 0.0f
+			|| State.CollisionHalfWidthMeters < 0.0f
+			|| State.CollisionHalfHeightMeters < 0.0f
+			|| State.CollisionRadiusMeters < 0.0f
+			|| State.CollisionHalfLengthMeters > MaxCollisionExtentMeters
+			|| State.CollisionHalfWidthMeters > MaxCollisionExtentMeters
+			|| State.CollisionHalfHeightMeters > MaxCollisionExtentMeters
+			|| State.CollisionRadiusMeters > MaxCollisionExtentMeters)
+		{
+			return false;
+		}
+
+		if (static_cast<uint8>(State.Gear)
+			> static_cast<uint8>(EVehicleGear::Reverse))
+		{
+			return false;
+		}
+		for (const FVehicleState::FWheelState& Wheel : State.Wheels)
+		{
+			if (!FMath::IsFinite(Wheel.SteeringAngleRad)
+				|| !FMath::IsFinite(Wheel.AngularSpeedRad)
+				|| !FMath::IsFinite(Wheel.NormalLoadN)
+				|| !FMath::IsFinite(Wheel.LongitudinalSlip)
+				|| !FMath::IsFinite(Wheel.SlipAngleRad)
+				|| !FMath::IsFinite(Wheel.LongitudinalForceN)
+				|| !FMath::IsFinite(Wheel.LateralForceN)
+				|| !IsFiniteVector(Wheel.ContactPointEnu)
+				|| !IsFiniteVector(Wheel.ContactNormalEnu))
+			{
+				return false;
+			}
+		}
+
+		switch (State.EntityKind)
+		{
+		case EEntityKind::Unspecified:
+		case EEntityKind::EgoVehicle:
+			return true;
+		case EEntityKind::NpcVehicle:
+			return State.CollisionHalfLengthMeters > 0.0f
+				&& State.CollisionHalfWidthMeters > 0.0f
+				&& State.CollisionHalfHeightMeters > 0.0f;
+		case EEntityKind::Pedestrian:
+			return State.CollisionRadiusMeters > 0.0f
+				&& State.CollisionHalfHeightMeters
+					>= State.CollisionRadiusMeters;
+		default:
+			return false;
+		}
+	}
 
 	bool ParseEntity(TArrayView<const uint8> Data, FVehicleState& State)
 	{
@@ -138,7 +265,7 @@ namespace
 				uint32 WheelField; uint8 WheelWire; uint64 Integer = 0;
 				if (!WheelReader.ReadTag(WheelField, WheelWire)) return false;
 				switch (WheelField) {
-				case 1: if (WheelWire != 0 || !WheelReader.ReadVarint(Integer)) return false; Wheel.WheelIndex = static_cast<uint32>(Integer); break;
+				case 1: if (WheelWire != 0 || !WheelReader.ReadVarint(Integer) || Integer > MAX_uint32) return false; Wheel.WheelIndex = static_cast<uint32>(Integer); break;
 				case 2: if (WheelWire != 0 || !WheelReader.ReadVarint(Integer)) return false; Wheel.bInContact = Integer != 0; break;
 				case 3: if (WheelWire != 5 || !WheelReader.ReadFixed32(Wheel.SteeringAngleRad)) return false; break;
 				case 4: if (WheelWire != 5 || !WheelReader.ReadFixed32(Wheel.AngularSpeedRad)) return false; break;
@@ -171,7 +298,7 @@ namespace
 			uint64 Integer = 0;
 			switch (Field)
 			{
-			case 1: if (Wire != 0 || !Reader.ReadVarint(Integer)) return false; State.EntityId = static_cast<uint32>(Integer); break;
+			case 1: if (Wire != 0 || !Reader.ReadVarint(Integer) || Integer > MAX_uint32) return false; State.EntityId = static_cast<uint32>(Integer); break;
 			case 2: if (Wire != 1 || !Reader.ReadFixed64(State.Timestamp)) return false; break;
 			case 3: if (Wire != 1 || !Reader.ReadFixed64(State.Latitude)) return false; break;
 			case 4: if (Wire != 1 || !Reader.ReadFixed64(State.Longitude)) return false; break;
@@ -187,7 +314,7 @@ namespace
 			case 14: if (Wire != 1 || !Reader.ReadFixed64(State.NorthMeters)) return false; break;
 			case 15: if (Wire != 5 || !Reader.ReadFixed32(State.YawRateRad)) return false; break;
 			case 16: if (Wire != 5 || !Reader.ReadFixed32(State.SteeringAngleRad)) return false; break;
-			case 17: if (Wire != 0 || !Reader.ReadVarint(Integer)) return false; State.Gear = static_cast<EVehicleGear>(Integer); break;
+			case 17: if (Wire != 0 || !Reader.ReadVarint(Integer) || Integer > static_cast<uint8>(EVehicleGear::Reverse)) return false; State.Gear = static_cast<EVehicleGear>(Integer); break;
 			case 18:
 			case 19:
 			case 20: {
@@ -197,35 +324,75 @@ namespace
 				if (!ParseVector(VectorData, Vector)) return false; break;
 			}
 			case 21: {
+				if (State.Wheels.Num() >= 32) return false;
 				if (Wire != 2) return false; TArrayView<const uint8> WheelData;
 				if (!Reader.ReadMessage(WheelData)) return false;
 				FVehicleState::FWheelState Wheel;
 				if (!ParseWheel(WheelData, Wheel)) return false;
 				State.Wheels.Add(Wheel); break;
 			}
+			case 22:
+				if (Wire != 0 || !Reader.ReadVarint(Integer)
+					|| Integer > static_cast<uint8>(EEntityKind::Pedestrian)) return false;
+				State.EntityKind = static_cast<EEntityKind>(Integer);
+				break;
+			case 23: {
+				if (Wire != 2) return false;
+				TArrayView<const uint8> VectorData;
+				if (!Reader.ReadMessage(VectorData)
+					|| !ParseVector(VectorData, State.LinearVelocityEnu)) return false;
+				break;
+			}
+			case 24: if (Wire != 5 || !Reader.ReadFixed32(State.CollisionHalfLengthMeters)) return false; break;
+			case 25: if (Wire != 5 || !Reader.ReadFixed32(State.CollisionHalfWidthMeters)) return false; break;
+			case 26: if (Wire != 5 || !Reader.ReadFixed32(State.CollisionHalfHeightMeters)) return false; break;
+			case 27: if (Wire != 5 || !Reader.ReadFixed32(State.CollisionRadiusMeters)) return false; break;
 			default: if (!Reader.Skip(Wire)) return false; break;
 			}
 		}
-		return true;
+		return IsValidEntityState(State);
 	}
 
 	bool ParseWorldState(TArrayView<const uint8> Data, uint32 TargetEntityId,
-		FVehicleState& State)
+		FVehicleState& State, TArray<FVehicleState>& Entities, FString& OutError)
 	{
 		FReader Reader(Data);
 		bool bFoundTarget = false;
+		TSet<uint32> EntityIds;
 		while (!Reader.AtEnd())
 		{
 			uint32 Field; uint8 Wire;
 			if (!Reader.ReadTag(Field, Wire)) return false;
 			if (Field == 1 && Wire == 2)
 			{
+				if (Entities.Num() >= MaxWorldStateEntities)
+				{
+					OutError = FString::Printf(
+						TEXT("WorldState exceeds the %d entity limit"),
+						MaxWorldStateEntities);
+					return false;
+				}
 				TArrayView<const uint8> Entity;
 				FVehicleState Candidate;
-				if (!Reader.ReadMessage(Entity) || !ParseEntity(Entity, Candidate)) return false;
-				if (!bFoundTarget && (TargetEntityId == 0 || Candidate.EntityId == TargetEntityId))
+				if (!Reader.ReadMessage(Entity) || !ParseEntity(Entity, Candidate))
 				{
-					State = MoveTemp(Candidate);
+					OutError = TEXT("WorldState contains an invalid entity");
+					return false;
+				}
+				if (EntityIds.Contains(Candidate.EntityId))
+				{
+					OutError = FString::Printf(
+						TEXT("WorldState contains duplicate entity ID %u"),
+						Candidate.EntityId);
+					return false;
+				}
+				EntityIds.Add(Candidate.EntityId);
+				const bool bIsTarget = !bFoundTarget
+					&& (TargetEntityId == 0 || Candidate.EntityId == TargetEntityId);
+				Entities.Add(MoveTemp(Candidate));
+				if (bIsTarget)
+				{
+					State = Entities.Last();
 					bFoundTarget = true;
 				}
 				continue;
@@ -259,17 +426,52 @@ TArray<uint8> SerializeControlEnvelope(const FControlCommand& Command, uint64 Se
 	return Envelope;
 }
 
+TArray<uint8> SerializeSimulationResetEnvelope(
+	const FString& PlaySessionId,
+	uint64 ClientTimeNs,
+	uint64 Sequence,
+	const FString& SourceId,
+	const FString& ConnectionSessionId,
+	const FString& MapChecksum)
+{
+	TArray<uint8> Reset;
+	WriteString(Reset, 1, PlaySessionId);
+	WriteTag(Reset, 2, 0); WriteVarint(Reset, ClientTimeNs);
+
+	TArray<uint8> Envelope;
+	WriteTag(Envelope, 1, 0); WriteVarint(Envelope, SchemaVersion);
+	WriteTag(Envelope, 2, 0); WriteVarint(Envelope, Sequence);
+	WriteString(Envelope, 4, SourceId);
+	WriteString(Envelope, 5, MapChecksum);
+	WriteString(Envelope, 6, ConnectionSessionId);
+	WriteString(Envelope, 7, PlaySessionId);
+	WriteBytes(Envelope, 14, Reset);
+	return Envelope;
+}
+
 bool ParseWorldStateEnvelope(TArrayView<const uint8> Data, uint32 TargetEntityId,
 	FVehicleState& OutState, FString& OutError)
 {
+	TArray<FVehicleState> IgnoredEntities;
+	return ParseWorldStateEnvelope(
+		Data, TargetEntityId, OutState, IgnoredEntities, OutError);
+}
+
+bool ParseWorldStateEnvelope(TArrayView<const uint8> Data, uint32 TargetEntityId,
+	FVehicleState& OutState, TArray<FVehicleState>& OutEntities, FString& OutError)
+{
 	OutError.Reset();
+	OutState = {};
+	OutEntities.Reset();
 	FReader Reader(Data);
 	uint32 Version = 0;
 	uint64 Sequence = 0;
 	uint64 SimulationTimeNs = 0;
+	FString MapPackageChecksum;
+	FString PlaySessionId;
 	FVehicleState ParsedState;
 	TArrayView<const uint8> WorldStatePayload;
-	bool bFoundWorldState = false;
+	uint32 LastPayloadField = 0;
 	while (!Reader.AtEnd())
 	{
 		uint32 Field; uint8 Wire;
@@ -277,7 +479,7 @@ bool ParseWorldStateEnvelope(TArrayView<const uint8> Data, uint32 TargetEntityId
 		uint64 Integer = 0;
 		if (Field == 1 && Wire == 0)
 		{
-			if (!Reader.ReadVarint(Integer)) { OutError = TEXT("Invalid schema version"); return false; }
+			if (!Reader.ReadVarint(Integer) || Integer > MAX_uint32) { OutError = TEXT("Invalid schema version"); return false; }
 			Version = static_cast<uint32>(Integer);
 		}
 		else if (Field == 2 && Wire == 0)
@@ -288,26 +490,60 @@ bool ParseWorldStateEnvelope(TArrayView<const uint8> Data, uint32 TargetEntityId
 		{
 			if (!Reader.ReadVarint(SimulationTimeNs)) { OutError = TEXT("Invalid simulation time"); return false; }
 		}
-		else if (Field == 12 && Wire == 2)
+		else if (Field == 5 && Wire == 2)
 		{
-			if (!Reader.ReadMessage(WorldStatePayload))
+			if (!Reader.ReadString(MapPackageChecksum)) { OutError = TEXT("Invalid map package checksum"); return false; }
+		}
+		else if (Field == 7 && Wire == 2)
+		{
+			if (!Reader.ReadString(PlaySessionId)) { OutError = TEXT("Invalid play session ID"); return false; }
+		}
+		else if (Field >= 10 && Field <= 14)
+		{
+			if (Wire != 2)
 			{
-				OutError = TEXT("Invalid WorldState payload");
+				OutError = TEXT("Invalid Envelope payload wire type");
 				return false;
 			}
-			bFoundWorldState = true;
+			TArrayView<const uint8> Payload;
+			if (!Reader.ReadMessage(Payload))
+			{
+				OutError = TEXT("Invalid Envelope payload");
+				return false;
+			}
+			LastPayloadField = Field;
+			if (Field == 12)
+			{
+				WorldStatePayload = Payload;
+			}
 		}
 		else if (!Reader.Skip(Wire)) { OutError = TEXT("Unsupported protobuf wire value"); return false; }
 	}
 	if (Version != SchemaVersion) { OutError = FString::Printf(TEXT("Schema version mismatch: expected %u, got %u"), SchemaVersion, Version); return false; }
-	if (!bFoundWorldState) { OutError = TEXT("Envelope does not contain WorldState"); return false; }
-	if (!ParseWorldState(WorldStatePayload, TargetEntityId, ParsedState))
+	if (MapPackageChecksum.IsEmpty() || MapPackageChecksum == TEXT("unset")) { OutError = TEXT("WorldState is missing a valid map package checksum"); return false; }
+	if (LastPayloadField != 12) { OutError = TEXT("Envelope does not contain WorldState as its active payload"); return false; }
+	if (!ParseWorldState(
+		WorldStatePayload, TargetEntityId, ParsedState, OutEntities, OutError))
 	{
-		OutError = FString::Printf(TEXT("WorldState does not contain entity %u"), TargetEntityId);
+		if (OutError.IsEmpty())
+		{
+			OutError = FString::Printf(
+				TEXT("WorldState does not contain entity %u"), TargetEntityId);
+		}
+		OutEntities.Reset();
 		return false;
 	}
-	ParsedState.Sequence = Sequence;
-	ParsedState.SimulationTimeNs = SimulationTimeNs;
+	for (FVehicleState& Entity : OutEntities)
+	{
+		Entity.Sequence = Sequence;
+		Entity.SimulationTimeNs = SimulationTimeNs;
+		Entity.MapPackageChecksum = MapPackageChecksum;
+		Entity.PlaySessionId = PlaySessionId;
+		if (Entity.EntityId == ParsedState.EntityId)
+		{
+			ParsedState = Entity;
+		}
+	}
 	OutState = MoveTemp(ParsedState);
 	return true;
 }

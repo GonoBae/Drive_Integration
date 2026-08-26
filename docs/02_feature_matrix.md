@@ -4,10 +4,10 @@
 
 | 항목 | 값 |
 |---|---|
-| 버전 | 1.2 |
+| 버전 | 2.1 |
 | 작성일 | 2026-08-19 |
-| 최종 수정 | 2026-08-21 |
-| R1 | 수동운전 버티컬 슬라이스; 기존 2026-08-31 목표는 일정 재산정 대기 |
+| 최종 수정 | 2026-08-27 |
+| R1 | 수동운전 버티컬 슬라이스; Core RC 2026-09-07(9/8 수정 버퍼), Should 확장 2026-09-11(9/14 위험 버퍼) |
 | R2 | 자율주행 환경·경로계획 기반, 일정 추후 확정 |
 | R3 | 학습·평가 기반 FSD 연구, 일정 추후 확정 |
 | 관련 문서 | [일정표](./01_schedule.md), [아키텍처](./03_architecture.md) |
@@ -28,6 +28,14 @@
 | 연기 | R1에서 구현하지 않음 |
 
 > 2026-08-21 검증 주석: `NET-001/002/003/006`, `UE-001/002`의 기능 경로는 이전 Windows UE 통합 검증을 통과했다. 이후 적용한 Unreal 연결 수명주기와 schema-v2 좌표·표시 경계는 이 Mac에서 정적 검토까지만 완료했으며, 최신 revision의 Windows UE 5.6 Game/Editor 재빌드·PIE는 R1 최종 게이트로 남아 있다.
+
+> 2026-08-25 검증 주석: 최신 schema-v2 서버와 Unreal 5.6의 직접 수동운전 smoke test를 Windows에서 통과했다. 같은 날 추가한 MapPackage 지면 기반 z·pitch·roll 표시는 후속 PIE 시각 확인이 필요하다.
+
+> 2026-08-26 물리 검증 주석: 외부 차량 SDK 없이 자체 모델의 경사 법선 하중·종횡 하중 이동, Ackermann 조향, RWD open differential와 60Hz 타이어 implicit coupling을 구현했다. 20° RWD 등판 자동 회귀와 CTest 9/9는 통과했으며, 특정 실차 정밀 검증과 사용자 Landscape 최종 PIE 등판은 후속이다.
+
+> 2026-08-26 현재 상태: **M2 자동 게이트 완료·Unreal 수동 확인 대기, WP-03 진행 중**이다. WP-03 자동 범위인 checksum/lifecycle gate, adaptive ground index·8m deterministic broad phase, strict OBB collision, Unreal `ASimCoreStaticCollider` authoring과 ground/static 원자적 export, opt-in `--demo-entities` lifecycle·`WorldState`·Unreal 표시는 구현됐다. 최종 C++ Release 11/11, 핵심 4종 각 20회, UE 5.6 Editor build와 Landscape/demo runtime smoke도 통과했다. 현재 `landscape_local_v1`은 marker가 bake되지 않은 `static_colliders=0`이며 실제 PIE 벽·동적 충돌은 미검증이다. 잔여 Core는 38~55h다.
+
+> 2026-08-27 차량 자세 검증 주석: 네 독립 wheel spring/damper 반력을 tire load와 sprung-body heave·finite-angle pitch/roll에 결합하고, UE roll 이중 반전과 기존 pitch ±6°·roll ±8° hard clamp를 제거했다. wheel ray 1~3개는 partial support로 계속 풀며 centre coverage miss 또는 0 wheel ray에서만 fail-closed한다. 최신 Windows C++ Release CTest 11/11, `vehicle_physics_tests`·`vehicle_config_tests` 각각 20/20 반복과 UE 5.6 Editor build는 통과했지만, fit 적용·재-bake·서버 재시작 뒤 최신 자세 부호·각도 경계·등판을 확인하는 실제 Landscape PIE는 수동 검증 대기다. 이 모델은 massless hub·1D suspension과 planar yaw를 사용하는 reduced-order 구조이며 완전한 airborne/전복 6DoF나 특정 실차 동정 모델이 아니다.
 
 ## 3. R1 범위 요약
 
@@ -57,9 +65,9 @@ R1은 다음 장면을 완성하는 릴리스다.
 - Google Photorealistic 3D Tiles 의존
 - Python relay·ZMQ observer의 기능 확장과 R1 runtime 검증
 
-### 3.3 기존 8월 31일 확장 범위(일정 재산정 대기)
+### 3.3 Should 확장 범위(새 목표 9월 11일, 위험 버퍼 9월 14일)
 
-기존 기준선에서는 8월 27일까지 모든 Must 기능과 인수 게이트를 Core RC로 먼저 완료하고 그 이후에만 다음 Should 기능을 추가한다. 8월 20일 미작업을 반영한 새 완료일과 범위는 별도 합의 전까지 확정하지 않는다. 핵심 성능·안정성을 깨면 해당 확장 기능만 제외한다.
+8월 19일의 8월 27일 Core·8월 31일 확장 기준선은 미달성 이력으로 보존한다. 현재는 9월 7일 Core RC 통과 후에만 다음 Should 기능을 추가하며, 9월 8일 Must 수정 버퍼를 사용하면 Core 복구를 우선한다. 확장 포함 목표는 9월 11일이고 Core 수정으로 밀리면 9월 14일을 위험 버퍼로 사용한다. 핵심 성능·안정성을 깨면 해당 확장 기능만 제외한다.
 
 - 속도·기어·FPS·연결·state age·SafeStop을 한 화면에 표시하는 운전 HUD
 - 운전자·추적·고정·자유 카메라 전환
@@ -73,7 +81,7 @@ R1은 다음 장면을 완성하는 릴리스다.
 
 | ID | 우선순위 | 상태 | 기능 | R1 완료 기준 | 향후 재사용 |
 |---|---|---|---|---|---|
-| MAP-001 | Must | 결정 | Wall/Broad 범위 MapPackage | 원점, 버전, 체크섬, 차선, 충돌, 신호, 스폰 데이터가 한 패키지로 로드됨 | 다른 도시·트랙도 같은 포맷 사용 |
+| MAP-001 | Must | 구현 중 | Wall/Broad 범위 MapPackage | bootstrap triangle, WorldStatic ground bake, `ASimCoreStaticCollider` OBB authoring, ground/static staging·교체와 manifest-last checksum, strict loader는 구현; 현재 tracked Landscape는 `static_colliders=0`이며 ENU 원점 metadata·차선·신호·spawn 데이터와 실제 marker bake/PIE 검증은 후속 | 다른 도시·트랙도 같은 포맷 사용 |
 | MAP-002 | Must | 결정 | Cesium Georeference 사용 | WGS84 위치와 로컬 ENU 위치가 왕복 변환 시험을 통과 | GNSS와 다른 도시 좌표에 재사용 |
 | MAP-003 | Must | 결정 | 로컬 주행면·보도·커브 | 주행 루프의 표면과 충돌이 스트리밍 LOD에 영향받지 않음 | 다른 MapPackage에서 자동 생성 |
 | MAP-004 | Must | 결정 | 보행 중심 핵심부 | Wall/Broad 핵심 보행 구역을 차량 경로가 통과하지 않음 | 통행 제한 속성으로 재사용 |
@@ -91,13 +99,13 @@ R1은 다음 장면을 완성하는 릴리스다.
 | PHY-002 | Must | 구현 중 | 자체 C++ 차량 동역학 코어 | 외부 차량 SDK 없이 단계별 모델과 회귀 시험이 macOS·Windows에서 동작 | 수식·파라미터·상태를 직접 확장 가능 |
 | PHY-003 | Must | 구현 | 로컬 ENU 물리 좌표 | 위·경도를 직접 적분하지 않고 meter 단위 ENU에서 계산 | GNSS 변환과 대규모 월드 대응 |
 | PHY-004 | Must | 구현 중 | 고정 시뮬레이션 tick | 렌더 FPS와 무관한 기본 60Hz와 overrun skip은 구현; configurable substep은 후속 | headless·재생·학습에 재사용 |
-| PHY-005 | Must | 구현 중 | 기본 차량 동역학 | `GroundQuery`·`FlatGroundQuery`, 바퀴별 접촉·no-hit와 제한된 1D spring/damper 기반 구현; MapPackage provider, 3D tire force와 차체 heave/6DoF는 후속 | 차량 설정 교체로 다른 차종 지원 |
-| PHY-006 | Must | 결정 | 정적 충돌 | 지면, 커브, 벽과 지속 관통하지 않고 C++에서 접촉 해결 | 시나리오 지도 공통 |
-| PHY-007 | Must | 결정 | 동적 충돌 프록시 | NPC OBB와 보행자 capsule이 같은 tick 기준으로 충돌 월드에 존재 | 향후 다중 에이전트 |
+| PHY-005 | Must | 구현 중 | 기본 차량 동역학 | 네 wheel의 독립 1D spring/damper 반력이 tire load와 sprung-body heave·finite-angle pitch/roll을 함께 결정하고, wheel-local tangent tire force·Ackermann·RWD 차동·60Hz 종타이어 implicit coupling·저속 횡력 우선 traction control·유한 조향/출력/drag를 collision-resolved ENU XY·heading과 결합한다. massless hub, unsprung/tire carcass/airborne 동역학과 planar yaw 역결합이 없는 reduced-order 한계 및 실제 Landscape PIE 감각 검증은 후속 | 차량 설정 교체로 다른 차종 지원 |
+| PHY-006 | Must | 구현 중 | 정적 충돌 | strict OBB CSV, 수평 SAT+수직 interval, 0.10m/1°·64 microstep fail-closed, impulse와 차량 XY/yaw 통합, adaptive ground index·8m 결정적 broad phase, Unreal marker authoring/export 자동 경로는 구현; tracked package에 실제 marker를 bake한 뒤 PIE 벽·커브 비관통을 확인해야 완료 | 시나리오 지도 공통 |
+| PHY-007 | Must | 구현 중 | 동적 충돌 프록시 | NPC kinematic OBB·보행자 vertical capsule, 상대 접촉속도·결정성 시험과 opt-in demo entity spawn/reset/move lifecycle·`WorldState` 발행·Unreal transient 표시를 구현; 실제 PIE identity/표시/충돌과 목표 traffic 동작은 후속 | 향후 다중 에이전트 |
 | PHY-008 | Must | 결정 | 노면 재질·마찰 | MapPackage의 표면 ID로 마찰 파라미터를 선택 | 젖은 노면 등 시나리오 확장 |
-| PHY-009 | Must | 구현 | 입력 안전장치 | 입력 범위 clamp, 250ms timeout, 세션·순번·큐 age 검증을 통과한 최신 명령만 SafeStop 해제 | 자율주행 fail-safe |
-| PHY-010 | Must | 결정 | 물리 파라미터 파일화 | 차량 수치가 코드가 아닌 버전 관리 설정 파일에 존재 | 차량 교체·튜닝·시험 |
-| PHY-011 | Must | 구현 중 | 물리 회귀 시험 | 직진·정지·회전과 flat/slope hit·no-hit·1D suspension clamp 시험은 구현; 실제 경사 주행·충돌·replay는 후속 | 수식·파라미터 변경 검증 |
+| PHY-009 | Must | 구현 | 입력 안전장치 | 입력 clamp·세션·순번·100ms 큐 age를 검증하고, 250ms에는 즉시 SafeStop만 적용해 같은 session의 fresh command로 복구하며 1초 연속 단절에서만 session retire·1008 close | 자율주행 fail-safe |
+| PHY-010 | Must | 구현 | 물리 파라미터 파일화 | 전체 SI 차량 수치가 format v4 `vehicle_sedan.cfg`에 있고 하중·구동·제동 비율, 조향·파워트레인 응답, 출력·drag, 타이어 slip regularization, 횡력 우선·traction control·공중 휠 감쇠를 포함한 strict loader·validation·checksum으로 재컴파일 없이 교체 | 차량 교체·튜닝·시험 |
+| PHY-011 | Must | 구현 중 | 물리 회귀 시험 | 기존 경사·contact·collision·조작감 회귀에 positive pitch/roll 부호, 기존 6°/8° 초과 연속 자세, deep one-side·대칭 four-wheel hard-stop, inactive corner travel, wheel-local tangent, 1~3 ray partial support·centre/0-ray gate와 compound body-Z yaw 계약을 추가했다. 최신 Windows C++ Release CTest 11/11은 통과했으며, 사용자 Landscape에서 fit·재-bake 후 자세·경계·등판·전후진·저속 선회·휠 표시를 함께 확인하고 replay는 후속 | 수식·파라미터 변경 검증 |
 | PHY-012 | Future | 연기 | 실차 파라미터 동정 | 대상 차량 계측 데이터와 기준 주행에 맞춰 오차 검증 | 차량별 현실성 향상 |
 
 ### 4.3 통신과 동기화
@@ -107,20 +115,20 @@ R1은 다음 장면을 완성하는 릴리스다.
 | NET-001 | Must | 구현 | Unreal↔C++ 직접 연결 | Python relay 없이 명령과 상태가 양방향 전달됨 | 지연과 장애 지점 감소 |
 | NET-002 | Must | 구현 | 단일 공통 Protobuf 스키마 | C++와 Unreal wire adapter가 루트 `protocol/`의 하나의 R1 필드 계약을 사용; 동결된 Python 생성물도 같은 원본에서 생성 | 스키마 중복 제거 |
 | NET-003 | Must | 구현 | 메시지 Envelope | schema version, sequence, simulation time, source, map checksum, session ID 포함 | 기록·재생·오류 진단 |
-| NET-004 | Must | 구현 중 | 재연결·중복·순서 처리 | session별 sequence·큐 age, timeout socket 폐기와 Unreal 자동 재연결은 구현; Hello handshake까지 통과 | 네트워크 견고성 |
-| NET-005 | Must | 결정 | MapPackage handshake | Unreal과 C++ 체크섬이 다르면 주행 시작을 거부하고 이유 표시 | 충돌 불일치 방지 |
+| NET-004 | Must | 구현 중 | 재연결·중복·순서 처리 | session별 sequence·큐 age, 250ms soft SafeStop/1초 hard socket 폐기, 같은 session fresh-command 복구, Unreal 자동 재연결과 reset 전 일반 control 차단은 구현; 명시적 `Hello` capability 교환과 재연결 full snapshot 표시는 후속 | 네트워크 견고성 |
+| NET-005 | Must | 구현 중 | MapPackage handshake | 양쪽이 `manifest.cfg`의 실제 collision payload checksum을 독립 검증하고 Unreal은 첫 `WorldState` checksum 일치 후에만 Reset/Control을 보낸다. 불일치 fail-closed와 UE 5.6 빌드는 통과했으며 PIE 오류 표시·`Hello` 통합은 후속 | 충돌 불일치 방지 |
 | NET-006 | Must | 구현 | WebSocket binary + Protobuf transport | JSON 없이 ControlCommand와 WorldState가 C++↔Unreal 사이에서 전이중 전달되고 HTTP 101보다 payload가 선행하지 않음 | 이후 측정 결과에 따라 UDP/IPC로 교체 가능 |
 | NET-007 | Future | 연기 | 고대역 센서 transport | 이미지·LiDAR는 control/state와 분리된 shared memory/전용 채널 사용 | FSD 처리량 확보 |
 | NET-008 | Must | 구현 중 | 저지연 60Hz 전달 | Windows 로컬 state 간격 p95 18.5ms 이하, 변화 입력 coalescing 후 33ms 이내 전송; packaged build에서 command/state age를 재측정 | LAN·다중 엔티티 확장 시 transport 판단 기준 |
-| NET-009 | Must | 구현 중 | 좌표·부호 schema 계약 | schema v2에서 공개 body FLU와 좌회전/좌조향 양수, 별도 시계 방향 heading, C++·Unreal exact version gate 구현; Python/ZMQ는 동결, Hello와 Windows UE 검증은 후속 | 향후 Python·센서·ROS 확장 시 동일 계약 사용 |
+| NET-009 | Must | 구현 중 | 좌표·부호 schema 계약 | schema v2에서 공개 body FLU와 좌회전/좌조향 양수, 별도 시계 방향 heading, C++·Unreal exact version gate 구현; Python/ZMQ는 동결, checksum gate 포함 UE 5.6 Game·Editor 빌드 성공, Hello·전체 quaternion PIE 검증은 후속 | 향후 Python·센서·ROS 확장 시 동일 계약 사용 |
 
 ### 4.4 Unreal IG와 수동운전
 
 | ID | 우선순위 | 상태 | 기능 | R1 완료 기준 | 향후 재사용 |
 |---|---|---|---|---|---|
-| UE-001 | Must | 구현 | 수동 입력 경로(현재 Pawn 내장) | W/S/A/D·Space와 게임패드 입력에 deadzone을 적용하고 최신 변화값을 최대 30Hz, 유지 명령을 20Hz heartbeat로 전송하며 FIFO 지연이 증가하지 않음 | 향후 ManualInputComponent로 분리해 AI 명령과 같은 포맷 사용 |
-| UE-002 | Must | 구현 | ExternalVehiclePawn | C++ pose와 4개 wheel state를 표시하고 Ego Chaos 동역학은 비활성 | 외부 물리 엔티티 공통 기반 |
-| UE-003 | Must | 구현 중 | 상태 표시·제한 외삽 | 최대 50ms dead reckoning, stale wheel 정지와 자동 재연결은 구현; packet-gap HUD와 재연결 full snapshot은 후속 | 네트워크 지연 완화 |
+| UE-001 | Must | 구현 | 수동 입력 경로(현재 Pawn 내장) | W/S/A/D·Space와 게임패드 입력에 deadzone을 적용한다. S는 전진 중 제동 후 정지에서 Reverse, W는 후진 중 제동 후 정지에서 Drive로 전환하고 W+S 동시 입력은 제동한다. 방향 전환은 fresh authoritative state가 정지를 확인할 때만 허용하며, 최신 변화값은 최대 30Hz·유지 명령은 20Hz heartbeat로 전송해 FIFO 지연이 증가하지 않음 | 향후 ManualInputComponent로 분리해 AI 명령과 같은 포맷 사용 |
+| UE-002 | Must | 구현 | ExternalVehiclePawn | C++ Ego pose·4개 wheel state를 표시하되 시각 휠 회전은 부호 있는 차체 종방향 속도와 타이어 반지름에 연동하고 정지 시 0으로 고정한다. Ego Chaos 동역학은 비활성; opt-in `WorldState`의 NPC·보행자는 별도 transient proxy로 표시 | 외부 물리 엔티티 공통 기반 |
+| UE-003 | Must | 구현 중 | 상태 표시·제한 외삽 | 최대 50ms dead reckoning, stale wheel 정지, 자동 재연결, checksum/play-session gate와 runtime entity 생성·갱신·제거 표시는 구현; packet-gap HUD, 재연결 full snapshot과 실제 demo PIE 검증은 후속 | 네트워크 지연 완화 |
 | UE-004 | Must | 구현 중 | 좌표 변환 어댑터 | scalar steering/yaw와 평면 ENU·FLU 경계 소스는 적용; `map_enu`↔Cesium/Unreal, quaternion·axial vector 왕복 automation과 Windows PIE 검증은 후속 | 지도 원점 변경과 ROS 호환 센서에 재사용 |
 | UE-005 | Must | 결정 | 운전자 카메라와 외부 카메라 | 운전용 카메라와 영상·검증용 외부 고정 camera rig 제공 | 센서와 촬영 분리 |
 | UE-006 | Must | 결정 | 핵심 디버그 HUD | 연결, sim tick, packet age, 속도, map checksum, collision, SafeStop 상태 표시 | 통합 문제 진단 |
@@ -136,9 +144,9 @@ R1은 다음 장면을 완성하는 릴리스다.
 |---|---|---|---|---|---|
 | TRA-001 | Must | 결정 | 신호 상태기계 | 최소 1개 교차로가 설정된 주기로 차량·보행 신호를 전환 | 지도 데이터로 교차로 추가 |
 | TRA-002 | Must | 결정 | TrafficDirector | 차선 추종, 목표 속도, 신호 정지 의도를 생성 | C++ 물리와 분리된 rule AI |
-| TRA-003 | Must | 결정 | NPC 차량 3~4대 | LaneGraph를 따라가고 신호와 선행 차량에 정지 | 자율주행 상호작용 대상 |
-| TRA-004 | Must | 결정 | 보행자 6~8명 | 정해진 경로를 걷고 보행 신호에 따라 횡단·대기 | 센서와 위험 시나리오 대상 |
-| TRA-005 | Must | 결정 | 동적 엔티티 물리 상태 | AI는 intent를 만들고 C++가 충돌에 쓰는 최종 상태를 계산 | C++/Unreal 불일치 제거 |
+| TRA-003 | Must | 구현 중 | NPC 차량 3~4대 | opt-in 고정 demo NPC 1대의 C++ lifecycle·충돌 상태·Unreal 표시는 구현; LaneGraph 추종, 신호·선행 차량 정지와 목표 3~4대는 후속 | 자율주행 상호작용 대상 |
+| TRA-004 | Must | 구현 중 | 보행자 6~8명 | opt-in 고정 demo 보행자 1명의 C++ lifecycle·capsule 상태·Unreal 표시는 구현; 경로·보행 신호와 목표 6~8명은 후속 | 센서와 위험 시나리오 대상 |
+| TRA-005 | Must | 구현 중 | 동적 엔티티 물리 상태 | C++ authoritative demo entity spawn/reset/move와 정적·동적 collision snapshot, `WorldState` identity/shape/velocity 발행 및 UE 표시를 구현; 실제 PIE 일치와 최종 TrafficDirector intent 통합은 후속 | C++/Unreal 불일치 제거 |
 | TRA-006 | Future | 연기 | 군중 시뮬레이션 | 대규모 보행자 회피·밀도 모델 | R1 제외 |
 | TRA-007 | Future | 연기 | 사고·파손 | 차량 변형, 파편, 상세 충격 | R1 제외 |
 
@@ -192,7 +200,7 @@ R1은 다음 장면을 완성하는 릴리스다.
 | 시험 ID | 시나리오 | 성공 조건 | 관련 기능 |
 |---|---|---|---|
 | AT-01 | 서버 실행 및 지도 handshake | 동일 체크섬일 때 시작, 불일치일 때 명확히 거부 | MAP-001, NET-005 |
-| AT-02 | 수동 가속·제동·조향 | 입력이 C++ 고정 tick에 반영되고 Unreal에 표시되며 NFR-012 지연 기준 통과 | PHY-004~005, UE-001~003, NFR-012 |
+| AT-02 | 수동 가속·제동·조향·후진 | 입력이 C++ 고정 tick에 반영되고 Unreal에 표시되며 NFR-012 지연 기준을 통과한다. S/W가 반대 방향 주행 중 먼저 제동하고 정지 뒤 Reverse/Drive로 전환하며, 동시 입력과 stale state에서는 안전하게 제동한다. 저속 선회가 과도하게 횡미끄러지지 않고 표시 휠 회전 방향·속도가 차속과 일치한다. | PHY-004~005, UE-001~003, NFR-012 |
 | AT-03 | 커브·벽 충돌 | 지속 관통하지 않고 C++ 결과와 Unreal 표시가 일치 | PHY-006, NFR-006 |
 | AT-04 | NPC·보행자 상호작용 | 동적 proxy가 충돌 월드와 화면에서 같은 엔티티를 나타냄 | PHY-007, TRA-003~005 |
 | AT-05 | 신호 동작 | 차량과 보행자가 자신의 신호에 맞춰 정지·이동 | TRA-001~004 |
@@ -201,6 +209,8 @@ R1은 다음 장면을 완성하는 릴리스다.
 | AT-08 | 장시간·성능 | 목표 PC에서 30분 안정성과 NFR-001 측정값 기록 | NFR-001~002 |
 | AT-09 | 촬영 | replay를 카메라 변경 후 재생하고 영상 출력 가능 | UE-005, REC-003 |
 | AT-10 | 좌표·부호 계약 | 좌회전에서 body yaw·steering·wheel lateral 부호가 FLU 계약과 일치하고, heading 관계식 및 FLU↔Unreal 자세 왕복 시험 통과 | NET-009, UE-004, NFR-004 |
+
+현재 AT-01의 strict manifest·실제 collision checksum·reset 전 control 차단 자동 경계는 구현됐지만 실제 PIE의 checksum 일치·불일치 표시는 확인 대기다. AT-03의 adaptive index·8m broad phase·정적 OBB contact와 Unreal marker/export 자동 경로도 구현됐지만 현재 package가 `static_colliders=0`이고 실제 PIE 벽·커브 시험 전이므로 완료가 아니다. AT-04는 opt-in demo NPC·보행자 lifecycle·`WorldState`·Unreal 표시와 runtime `runtime_count=2` smoke까지 통과했으나 실제 PIE identity/동작/충돌과 최종 traffic 개체 수를 확인하지 않아 아직 통과하지 않았다. 최종 C++ 11/11·핵심 4종×20회·UE Editor build는 통과했다.
 
 ## 7. 결정 입력 및 상태
 
@@ -212,14 +222,24 @@ R1은 다음 장면을 완성하는 릴리스다.
 | DEC-F04 | 대상 차량 종류와 기본 제원 | D3 | 물리는 동작하지만 현실성 검증 기준이 불명확 |
 | DEC-F05 | Wall/Broad 정확한 지도 경계와 주행 루프 | D8 이전 | LaneGraph와 환경 범위 변동 |
 | DEC-F06 | 사용할 건물·차량·보행자 에셋과 라이선스 | D8 이전 | 영상 품질 또는 배포 가능성 저하 |
-| DEC-F07 | **완료: 8월 20일 이후 주말을 제외하고 AI 협업 2배 기준 적용** | 2026-08-19 결정 | 핵심 R1은 8월 27일, 확장 포함 최종 릴리스는 8월 31일로 관리 |
+| DEC-F07 | **완료·이력: 8월 20일 이후 주말 제외, AI 협업 2배 기준 적용** | 2026-08-19 결정 | 8월 27일 Core·8월 31일 확장 기준선은 미달성했으며 DEC-F10으로 대체 |
 | DEC-F08 | **완료: Core RC 통과 후 운전 UX·카메라·디버그·replay·데모 기능 추가** | 2026-08-19 결정 | Must 회귀 시 해당 Should 확장만 제외하고 핵심 릴리스를 보호 |
 | DEC-F09 | **완료: 공통 공개 좌표는 ROS 호환 FLU, Unreal FRU는 경계 adapter에서 변환** ([ADR-011](./decisions/ADR-011-canonical-coordinate-frames.md)) | 2026-08-19 결정, schema v2 이행 2026-08-21 | 전체 GeoTransform·quaternion·센서 frame 검증 전에는 좌표 계약 완료를 선언하지 않음 |
+| DEC-F10 | **완료: 실제 잔여 범위와 AI 병렬 통합 한계를 반영한 일정 재기준선** | 2026-08-26 결정 | Core RC 9월 7일(9/8 Must 버퍼), Should 확장 9월 11일(9/14 위험 버퍼); 완료 기준은 축소하지 않음 |
 
 ## 8. 변경 이력
 
 | 버전 | 날짜 | 변경 내용 |
 |---|---|---|
+| 2.1 | 2026-08-27 | 네 독립 suspension reaction 기반 4-corner reduced-order 자세, wheel-local tangent, finite-angle pitch/roll, UE roll 부호, partial support·centre coverage 경계와 자동/수동 검증 범위를 PHY-005·011에 반영 |
+| 2.0 | 2026-08-27 | 정지 기반 W/S 전진·후진 전환, 동시 입력·stale-state gear interlock, 차속 연동 표시 휠과 저속 선회 횡력 우선 traction control을 PHY-005·011, UE-001·002와 AT-02에 반영 |
+| 1.9 | 2026-08-27 | 차량 설정 v3의 저속 횡그립·속도별 rate-limited 조향·출력/drag와 조작감 회귀, 250ms soft SafeStop/1초 hard reconnect lease, background 파일 로그를 PHY-005·009~011과 NET-004에 반영 |
+| 1.8 | 2026-08-26 | adaptive ground index·8m broad phase, `ASimCoreStaticCollider` ground/static 원자적 export, opt-in demo entity lifecycle/WorldState/UE 표시와 최종 C++ 11/11·핵심 4종×20회·UE Editor build·runtime smoke를 반영; WP-03 전체는 tracked `static_colliders=0`·수동 PIE gate 때문에 진행 중, 잔여 Core 38~55h |
+| 1.7 | 2026-08-26 | strict 정적 collider loader, OBB-prism SAT·microstep·projection/impulse, VehiclePhysics XY/yaw 통합, NPC OBB·보행자 capsule 최소 API, CTest 11/11·UE Editor·runtime smoke 실적과 남은 WP-03 수동/runtime 경계를 반영 |
+| 1.6 | 2026-08-26 | M2 자동 게이트 완료·WP-03 진행 중 상태, strict MapPackage manifest/실제 collision checksum, 첫 WorldState 일치 후 Reset/Control과 reset 전 일반 control 차단, UE 5.6 빌드, Core 9/7·Should 9/11 재기준선을 반영 |
+| 1.5 | 2026-08-26 | 외부 SDK 없이 차량 설정 format v2, CG 기반 차축 위치, 경사 force/moment equilibrium 하중 이동, Ackermann·RWD 차동·타이어 implicit coupling과 20° 등판 회귀를 PHY-005·010·011에 반영 |
+| 1.4 | 2026-08-26 | Unreal WorldStatic 충돌의 개발용 MapPackage bake 경로와 UE 5.6 Game·Editor 빌드를 MAP-001·PHY-006 구현 중 범위에 반영; 실제 Landscape PIE는 수동 검증 대기 |
+| 1.3 | 2026-08-25 | 외부 차량 설정·checksum, MapPackage triangle ground provider, heave·노면 pitch/roll·경사 주행과 Windows CTest 9/9 반영; 새 지형 pose PIE 확인은 후속 |
 | 1.2 | 2026-08-21 | ZMQ 기본 OFF·Python observer 동결과 GroundQuery·1D suspension 기반의 부분 완료·후속 범위를 반영 |
 | 1.1 | 2026-08-21 | 좌회전·좌조향 양수 schema v2 exact gate와 C++ 회귀 완료, Unreal scalar 경계 소스 적용 및 Windows 검증 대기 상태 반영 |
 | 1.0 | 2026-08-19 | ADR-011 FLU canonical 결정, 좌표·부호 schema와 Unreal adapter, 센서 frame metadata, AT-10 이행 기준 추가 |

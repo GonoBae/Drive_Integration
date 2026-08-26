@@ -25,7 +25,8 @@ void test_solver_lateral_and_yaw_values_publish_as_flu()
         simcore_host::BodyFrameAdapter::solver_lateral_to_canonical(solver_right_speed)
         == -2.f);
     static_assert(
-        simcore_host::BodyFrameAdapter::solver_yaw_rate_to_canonical(solver_clockwise_yaw)
+        simcore_host::BodyFrameAdapter::solver_heading_rate_to_canonical_yaw_rate(
+            solver_clockwise_yaw)
         == -0.3f);
     static_assert(
         simcore_host::BodyFrameAdapter::canonical_yaw_rate_to_heading_rate(-0.3f)

@@ -1,0 +1,3 @@
+# Static blocking OBB prisms in map_enu meters. Navigation heading is radians,
+# North=0 and clockwise-positive. Header-only means no authored blockers yet.
+collider_id,semantic,shape,center_e_m,center_n_m,center_u_m,heading_rad,half_length_m,half_width_m,half_height_m,friction,restitution

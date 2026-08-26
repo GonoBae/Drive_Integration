@@ -51,12 +51,28 @@ target_link_libraries(simcore_protocol PUBLIC
     protobuf::libprotobuf
 )
 
+add_library(simcore_collision
+    src/collision/collision_world.cpp
+    src/collision/map_package_static_collision.cpp
+)
+
+target_include_directories(simcore_collision PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
 add_library(simcore_physics
+    src/physics/vehicle_config.cpp
     src/physics/vehicle_physics.cpp
+    src/terrain/map_package_ground_query.cpp
+    src/terrain/map_package_manifest.cpp
 )
 
 target_include_directories(simcore_physics PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(simcore_physics PUBLIC
+    simcore_collision
 )
 
 add_library(simcore_websocket
@@ -112,6 +128,11 @@ target_link_libraries(simcore_publisher PRIVATE
     simcore_websocket
 )
 
+target_compile_definitions(simcore_publisher PRIVATE
+    SIMCORE_DEFAULT_VEHICLE_CONFIG_PATH="${CMAKE_CURRENT_SOURCE_DIR}/config/vehicle_sedan.cfg"
+    SIMCORE_DEFAULT_MAP_PACKAGE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../map_packages/wall_broad_v1"
+)
+
 if(SIMCORE_ENABLE_ZMQ_OBSERVER)
     target_compile_definitions(simcore_publisher PRIVATE
         SIMCORE_ENABLE_ZMQ_OBSERVER=1
@@ -137,6 +158,62 @@ if(BUILD_TESTING)
     )
 
     add_test(NAME vehicle_physics_tests COMMAND vehicle_physics_tests)
+
+    add_executable(vehicle_config_tests
+        tests/vehicle_config_test.cpp
+    )
+
+    target_link_libraries(vehicle_config_tests PRIVATE
+        simcore_physics
+    )
+
+    target_compile_definitions(vehicle_config_tests PRIVATE
+        SIMCORE_TEST_VEHICLE_CONFIG_PATH="${CMAKE_CURRENT_SOURCE_DIR}/config/vehicle_sedan.cfg"
+    )
+
+    add_test(NAME vehicle_config_tests COMMAND vehicle_config_tests)
+
+    add_executable(map_package_ground_query_tests
+        tests/map_package_ground_query_test.cpp
+    )
+
+    target_link_libraries(map_package_ground_query_tests PRIVATE
+        simcore_physics
+    )
+
+    target_compile_definitions(map_package_ground_query_tests PRIVATE
+        SIMCORE_TEST_MAP_PACKAGE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../map_packages/wall_broad_v1"
+    )
+
+    add_test(NAME map_package_ground_query_tests COMMAND map_package_ground_query_tests)
+
+    add_executable(collision_world_tests
+        tests/collision_world_test.cpp
+    )
+
+    target_link_libraries(collision_world_tests PRIVATE
+        simcore_collision
+    )
+
+    add_test(NAME collision_world_tests COMMAND collision_world_tests)
+
+    add_executable(map_package_static_collision_tests
+        tests/map_package_static_collision_test.cpp
+    )
+
+    target_link_libraries(map_package_static_collision_tests PRIVATE
+        simcore_collision
+        simcore_physics
+    )
+
+    target_compile_definitions(map_package_static_collision_tests PRIVATE
+        SIMCORE_TEST_MAP_PACKAGE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../map_packages/wall_broad_v1"
+    )
+
+    add_test(
+        NAME map_package_static_collision_tests
+        COMMAND map_package_static_collision_tests
+    )
 
     add_executable(vehicle_protocol_tests
         tests/vehicle_protocol_test.cpp

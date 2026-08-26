@@ -21,8 +21,11 @@ namespace SimCoreCoordinateFrames
 	DRIVEINTEGRATION_API float CanonicalSteeringToUnrealYawDegrees(
 		float LeftPositiveSteeringRadians);
 
-	// Navigation heading is clockwise-positive while schema-v2 body yaw is
-	// left/counter-clockwise-positive, so prediction subtracts body yaw.
+	// Navigation heading is clockwise-positive while schema-v2 angular velocity
+	// is a true right-handed FLU vector and scalar yaw_rate remains its body-Z
+	// component. At level attitude, nose-up pitch is negative body-Y and left-up
+	// roll is positive body-X; compound attitude is converted back to Euler rates
+	// before the limited presentation prediction.
 	DRIVEINTEGRATION_API FRotator BuildUnrealActorRotation(
 		float HeadingDegrees,
 		float PitchDegrees,

@@ -20,6 +20,15 @@ public:
     std::uint64_t tick_index() const { return tick_index_; }
     std::uint32_t overrun_count() const { return overrun_count_; }
 
+    // Reset simulation-relative time without moving the already-armed wall
+    // clock deadline. This keeps the fixed-step timer monotonic and avoids a
+    // cancel/reschedule race when a reset arrives between ticks.
+    void reset_elapsed()
+    {
+        tick_index_ = 0;
+        overrun_count_ = 0;
+    }
+
     void advance(Clock::time_point completed_at)
     {
         ++tick_index_;

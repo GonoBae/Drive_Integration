@@ -14,6 +14,15 @@ enum ControlMode {
     CONTROL_MODE_ESTOP = 2;
 }
 
+// Additive R1 entity classification. Existing schema-v2 clients ignore these
+// values and continue selecting the Ego by entity_id.
+enum EntityKind {
+    ENTITY_KIND_UNSPECIFIED = 0;
+    ENTITY_KIND_EGO_VEHICLE = 1;
+    ENTITY_KIND_NPC_VEHICLE = 2;
+    ENTITY_KIND_PEDESTRIAN = 3;
+}
+
 message Vector3d {
     double x = 1;
     double y = 2;
@@ -24,14 +33,14 @@ message WheelState {
     uint32 wheel_index = 1; // 0=front-left, 1=front-right, 2=rear-left, 3=rear-right
     bool in_contact = 2;
     float steering_angle = 3; // wheel-local radians, positive = left
-    float angular_speed = 4;
+    float angular_speed = 4; // rad/s, signed in the vehicle's forward direction
     float normal_load = 5;
     float longitudinal_slip = 6;
     float slip_angle = 7; // wheel-local, positive = left
     float longitudinal_force = 8;
     float lateral_force = 9; // wheel-local, positive = left
-    Vector3d contact_point_enu = 10;
-    Vector3d contact_normal_enu = 11;
+    Vector3d contact_point_enu = 10; // true tire tangent patch in ENU meters
+    Vector3d contact_normal_enu = 11; // upward unit surface normal at the patch
 }
 
 // 단일 엔티티 상태 (CIGI Entity State Packet 기반)
@@ -60,13 +69,22 @@ message EntityState {
     // 로컬 물리 좌표와 조향 상태
     double east          = 13; // Local ENU X (meters)
     double north         = 14; // Local ENU Y (meters)
-    float yaw_rate       = 15; // FLU body yaw rate (rad/s), positive = left turn
+    float yaw_rate       = 15; // true FLU angular-velocity Z component (rad/s), left-positive
     float steering_angle = 16; // road wheel angle (radians), positive = left
     VehicleGear gear     = 17;
     Vector3d position_enu = 18;
     Vector3d linear_velocity_body = 19;  // body frame: X forward, Y left, Z up
     Vector3d angular_velocity_body = 20; // right-handed body frame: X forward, Y left, Z up
     repeated WheelState wheels = 21;
+
+    // Additive runtime-entity presentation/collision metadata. Field numbers
+    // 1~21 keep their schema-v2 meaning for backward wire compatibility.
+    EntityKind entity_kind = 22;
+    Vector3d linear_velocity_enu = 23;
+    float collision_half_length = 24;
+    float collision_half_width = 25;
+    float collision_half_height = 26;
+    float collision_radius = 27;
 }
 
 // 여러 엔티티를 한 패킷에 담을 때 사용
@@ -102,6 +120,14 @@ message Health {
     string message = 4;
 }
 
+// Requests that the authoritative simulation return to its configured spawn.
+// play_session_id is stable across reconnects within one Unreal PIE run, so
+// retransmission is safe and a new PIE run remains distinguishable.
+message SimulationReset {
+    string play_session_id = 1;
+    uint64 client_time_ns = 2;
+}
+
 message Envelope {
     uint32 schema_version = 1; // must be 2 for the left-positive FLU scalar contract
     uint64 sequence = 2;
@@ -109,11 +135,13 @@ message Envelope {
     string source_id = 4;
     string map_package_checksum = 5;
     string session_id = 6; // unique for each controller connection/process lifetime
+    string play_session_id = 7; // authoritative PIE identity echoed on WorldState
 
     oneof payload {
         Hello hello = 10;
         ControlCommand control_command = 11;
         WorldState world_state = 12;
         Health health = 13;
+        SimulationReset simulation_reset = 14;
     }
 }

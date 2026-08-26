@@ -49,19 +49,20 @@ void test_stale_queued_packet_cannot_release_safe_stop()
             "250ms command timeout must enter SafeStop");
 
     require(lease.accept(command("manual", "session-a", 2, 1'010'000'000), start + 252ms)
-                == ControlLeaseDecision::RetiredSession,
-            "the timed-out session must be retired with its queued packets");
+                == ControlLeaseDecision::ExcessiveQueueAge,
+            "an old queued packet must not release the soft SafeStop");
     require(lease.safe_stop_active(),
             "rejected queued input must leave SafeStop active");
 
-    require(lease.accept(command("manual", "session-b", 1, 10'000'000), start + 260ms)
+    require(lease.accept(command("manual", "session-a", 3, 1'253'000'000),
+                         start + 253ms)
                 == ControlLeaseDecision::Accepted,
-            "a new connection session may re-arm control");
+            "a fresh command from the retained session must re-arm control");
     require(!lease.safe_stop_active(),
             "fresh input must release SafeStop");
 }
 
-void test_new_session_can_acquire_only_after_timeout()
+void test_new_session_can_acquire_only_after_hard_timeout()
 {
     ControlLease lease(250ms, 100ms);
     const auto start = ControlLease::Clock::time_point{};
@@ -71,11 +72,22 @@ void test_new_session_can_acquire_only_after_timeout()
     require(lease.accept(command("manual", "session-b", 1, 10'000'000), start + 100ms)
                 == ControlLeaseDecision::ActiveOwnerConflict,
             "reconnect session must wait for lease expiry");
-    require(lease.update_timeout(start + 251ms), "lease must expire");
-    require(lease.accept(command("manual", "session-b", 1, 20'000'000), start + 252ms)
+    require(lease.update_timeout(start + 251ms),
+            "soft timeout must enter SafeStop");
+    require(lease.accept(command("manual", "session-b", 1, 20'000'000),
+                         start + 252ms)
+                == ControlLeaseDecision::ActiveOwnerConflict,
+            "soft timeout must retain the original session owner");
+    require(!lease.update_hard_timeout(start + 1s),
+            "hard timeout is strict and must not fire at exactly one second");
+    require(lease.update_hard_timeout(start + 1001ms),
+            "hard timeout must retire the stale owner after one second");
+    require(lease.accept(command("manual", "session-b", 1, 20'000'000),
+                         start + 1002ms)
                 == ControlLeaseDecision::Accepted,
-            "new process session must acquire after timeout");
-    require(lease.accept(command("manual", "session-a", 10, 1'260'000'000), start + 253ms)
+            "new process session must acquire after hard timeout");
+    require(lease.accept(command("manual", "session-a", 10, 1'260'000'000),
+                         start + 1003ms)
                 == ControlLeaseDecision::RetiredSession,
             "packets from the replaced session must stay retired");
 }
@@ -138,6 +150,90 @@ void test_rejected_queue_age_does_not_poison_sequence_state()
             "queue-age rejection must not advance the sequence high-water mark");
 }
 
+void test_new_simulation_retires_the_previous_control_session()
+{
+    ControlLease lease(250ms, 100ms);
+    const auto start = ControlLease::Clock::time_point{};
+    require(lease.accept(command("manual", "session-a", 7, 1'000'000'000), start)
+                == ControlLeaseDecision::Accepted,
+            "test setup must acquire the original PIE lease");
+
+    lease.reset_for_new_simulation();
+
+    require(lease.safe_stop_active(),
+            "a newly reset simulation must wait in SafeStop for fresh control");
+    require(lease.active_source_id().empty()
+            && lease.active_session_id().empty(),
+            "reset must release the previous active owner");
+    require(lease.accept(command("manual", "session-a", 8, 1'010'000'000),
+                         start + 1ms)
+                == ControlLeaseDecision::RetiredSession,
+            "delayed control from the previous PIE must stay fenced off");
+    require(lease.accept(command("manual", "session-b", 1, 2'000'000'000),
+                         start + 2ms)
+                == ControlLeaseDecision::Accepted,
+            "the new PIE connection must acquire control without a timeout wait");
+}
+
+void test_same_pie_reconnect_hands_over_without_reusing_retired_sessions()
+{
+    ControlLease lease(250ms, 100ms);
+    const auto start = ControlLease::Clock::time_point{};
+    require(lease.accept(command("manual", "socket-a", 3, 1'000'000'000), start)
+                == ControlLeaseDecision::Accepted,
+            "test setup must acquire the pre-reconnect lease");
+
+    require(lease.reset_for_reconnect("manual", "socket-b")
+                == ControlLeaseResetDecision::Ready,
+            "a fresh socket in the same PIE must be prepared for handover");
+    require(lease.safe_stop_active(),
+            "handover must apply SafeStop until the new socket sends control");
+    require(lease.accept(command("manual", "socket-a", 4, 1'010'000'000),
+                         start + 1ms)
+                == ControlLeaseDecision::RetiredSession,
+            "queued control from the disconnected socket must be rejected");
+    require(lease.accept(command("manual", "socket-b", 2, 2'000'000'000),
+                         start + 2ms)
+                == ControlLeaseDecision::Accepted,
+            "the reconnect socket must acquire immediately after handover");
+    require(lease.reset_for_reconnect("manual", "socket-a")
+                == ControlLeaseResetDecision::RetiredSession,
+            "an old socket must never be reusable as a reconnect target");
+    require(lease.reset_for_reconnect("manual", "socket-b")
+                == ControlLeaseResetDecision::SameSession,
+            "repeating handover for the active socket must be idempotent");
+}
+
+void test_retired_new_simulation_candidate_is_side_effect_free()
+{
+    ControlLease lease(250ms, 100ms);
+    const auto start = ControlLease::Clock::time_point{};
+    require(lease.begin_new_simulation("manual", "socket-a")
+                == ControlLeaseResetDecision::Ready,
+            "first lifecycle session must be prepared");
+    require(lease.accept(command("manual", "socket-a", 2, 1'000'000'000), start)
+                == ControlLeaseDecision::Accepted,
+            "first lifecycle session must acquire control");
+    require(lease.reset_for_reconnect("manual", "socket-b")
+                == ControlLeaseResetDecision::Ready,
+            "fresh reconnect must retire socket-a");
+    require(lease.accept(command("manual", "socket-b", 2, 2'000'000'000),
+                         start + 1ms)
+                == ControlLeaseDecision::Accepted,
+            "socket-b must become the active owner");
+
+    require(lease.begin_new_simulation("manual", "socket-a")
+                == ControlLeaseResetDecision::RetiredSession,
+            "retired candidate must be rejected before lifecycle mutation");
+    require(!lease.safe_stop_active()
+            && lease.active_session_id() == "socket-b",
+            "rejected candidate must leave the current owner and safety state intact");
+    require(lease.accept(command("manual", "socket-b", 3, 2'001'000'000),
+                         start + 2ms)
+                == ControlLeaseDecision::Accepted,
+            "current owner must remain valid after rejected lifecycle candidate");
+}
+
 } // namespace
 
 int main()
@@ -145,11 +241,14 @@ int main()
     try {
         test_sequence_and_owner_rules();
         test_stale_queued_packet_cannot_release_safe_stop();
-        test_new_session_can_acquire_only_after_timeout();
+        test_new_session_can_acquire_only_after_hard_timeout();
         test_queue_age_is_rejected_before_timeout();
         test_required_identity_fields();
         test_rejected_packet_does_not_poison_sequence_state();
         test_rejected_queue_age_does_not_poison_sequence_state();
+        test_new_simulation_retires_the_previous_control_session();
+        test_same_pie_reconnect_hands_over_without_reusing_retired_sessions();
+        test_retired_new_simulation_candidate_is_side_effect_free();
         std::cout << "control_lease_tests: all tests passed\n";
         return 0;
     } catch (const std::exception& error) {

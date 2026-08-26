@@ -2,7 +2,9 @@
 
 #include "Camera/CameraComponent.h"
 #include "Components/InputComponent.h"
+#include "Components/SceneComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "GameFramework/SpringArmComponent.h"
 #include "SimCoreClientComponent.h"
 #include "SimCoreCoordinateFrames.h"
 #include "SimCorePresentation.h"
@@ -12,39 +14,56 @@ AExternalVehiclePawn::AExternalVehiclePawn()
 {
 	PrimaryActorTick.bCanEverTick = true;
 	AutoPossessPlayer = EAutoReceiveInput::Player0;
+	PresentationRoot = CreateDefaultSubobject<USceneComponent>(TEXT("PresentationRoot"));
+	SetRootComponent(PresentationRoot);
 	VehicleMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("VehicleMesh"));
-	SetRootComponent(VehicleMesh);
+	VehicleMesh->SetupAttachment(PresentationRoot);
 	VehicleMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	static ConstructorHelpers::FObjectFinder<UStaticMesh> Cube(TEXT("/Engine/BasicShapes/Cube.Cube"));
 	if (Cube.Succeeded())
 	{
 		VehicleMesh->SetStaticMesh(Cube.Object);
-		VehicleMesh->SetRelativeScale3D(FVector(2.2, 1.0, 0.6));
+		// Match the authoritative sedan envelope while leaving the root unscaled.
+		VehicleMesh->SetRelativeLocation(FVector(-13.5, 0.0, 0.0));
+		VehicleMesh->SetRelativeScale3D(FVector(4.3, 1.8, 0.6));
 	}
 	const FVector WheelLocations[4] = {
-		FVector(135.0, -79.0, -55.0),
-		FVector(135.0, 79.0, -55.0),
-		FVector(-135.0, -79.0, -55.0),
-		FVector(-135.0, 79.0, -55.0),
+		FVector(121.5, -79.0, -23.0),
+		FVector(121.5, 79.0, -23.0),
+		FVector(-148.5, -79.0, -23.0),
+		FVector(-148.5, 79.0, -23.0),
 	};
 	for (int32 Index = 0; Index < 4; ++Index)
 	{
+		USceneComponent* WheelPivot = CreateDefaultSubobject<USceneComponent>(
+			*FString::Printf(TEXT("WheelPivot%d"), Index));
+		WheelPivot->SetupAttachment(PresentationRoot);
+		WheelPivot->SetRelativeLocation(WheelLocations[Index]);
+		WheelPivots.Add(WheelPivot);
+
 		UStaticMeshComponent* Wheel = CreateDefaultSubobject<UStaticMeshComponent>(
 			*FString::Printf(TEXT("Wheel%d"), Index));
-		Wheel->SetupAttachment(VehicleMesh);
+		Wheel->SetupAttachment(WheelPivot);
 		Wheel->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		if (Cube.Succeeded())
 		{
 			Wheel->SetStaticMesh(Cube.Object);
 		}
-		Wheel->SetRelativeLocation(WheelLocations[Index]);
-		Wheel->SetRelativeScale3D(FVector(0.65, 0.22, 0.65));
+		Wheel->SetRelativeScale3D(FVector(0.64, 0.22, 0.64));
 		WheelMeshes.Add(Wheel);
 	}
+	CameraBoom = CreateDefaultSubobject<USpringArmComponent>(TEXT("CameraBoom"));
+	CameraBoom->SetupAttachment(PresentationRoot);
+	CameraBoom->SetRelativeLocation(FVector(0.0, 0.0, 145.0));
+	CameraBoom->SetRelativeRotation(FRotator(-12.0, 0.0, 0.0));
+	CameraBoom->TargetArmLength = 500.0f;
+	CameraBoom->bUsePawnControlRotation = false;
+	CameraBoom->bInheritPitch = false;
+	CameraBoom->bInheritRoll = false;
+	CameraBoom->bInheritYaw = true;
+	CameraBoom->bDoCollisionTest = false;
 	Camera = CreateDefaultSubobject<UCameraComponent>(TEXT("Camera"));
-	Camera->SetupAttachment(VehicleMesh);
-	Camera->SetRelativeLocation(FVector(-500.0, 0.0, 250.0));
-	Camera->SetRelativeRotation(FRotator(-12.0, 0.0, 0.0));
+	Camera->SetupAttachment(CameraBoom, USpringArmComponent::SocketName);
 	SimCoreClient = CreateDefaultSubobject<USimCoreClientComponent>(TEXT("SimCoreClient"));
 }
 
@@ -63,6 +82,7 @@ void AExternalVehiclePawn::Tick(float DeltaSeconds)
 			MaxExtrapolationSeconds,
 			StateStaleTimeoutSeconds,
 			VisualWheelStopSpeedMps,
+			VisualTireRadiusMeters,
 			VisualPositionOffsetCm);
 	SetActorLocationAndRotation(
 		Sample.ActorLocation,
@@ -82,12 +102,26 @@ void AExternalVehiclePawn::Tick(float DeltaSeconds)
 
 	for (const SimCoreProtocol::FVehicleState::FWheelState& WheelState : State.Wheels)
 	{
-		if (!WheelMeshes.IsValidIndex(WheelState.WheelIndex)) continue;
+		if (!WheelMeshes.IsValidIndex(WheelState.WheelIndex)
+			|| !WheelPivots.IsValidIndex(WheelState.WheelIndex))
+		{
+			continue;
+		}
 		const float AxleSpinDegrees = WheelState.WheelIndex < 2
 			? FrontAxleSpinDegrees
 			: RearAxleSpinDegrees;
+		const SimCorePresentation::FWheelGroundPresentationSample& WheelSample =
+			Sample.Wheels[WheelState.WheelIndex];
+		if (WheelSample.bHasGroundContact)
+		{
+			WheelPivots[WheelState.WheelIndex]->SetRelativeLocationAndRotation(
+				WheelSample.RelativeCenterLocationCm,
+				SimCorePresentation::BuildWheelPivotRelativeRotation(
+					WheelState,
+					WheelSample.RelativeContactNormal));
+		}
 		WheelMeshes[WheelState.WheelIndex]->SetRelativeRotation(
-			SimCorePresentation::BuildWheelRelativeRotation(WheelState, AxleSpinDegrees));
+			SimCorePresentation::BuildWheelSpinRelativeRotation(AxleSpinDegrees));
 	}
 }
 
@@ -103,13 +137,13 @@ void AExternalVehiclePawn::SetupPlayerInputComponent(UInputComponent* Input)
 
 void AExternalVehiclePawn::SetThrottle(float Value)
 {
-	ThrottleInput = Value;
+	ForwardPedalInput = FMath::Clamp(Value, 0.0f, 1.0f);
 	PushControl();
 }
 
 void AExternalVehiclePawn::SetBrake(float Value)
 {
-	BrakeInput = Value;
+	ReversePedalInput = FMath::Clamp(Value, 0.0f, 1.0f);
 	PushControl();
 }
 
@@ -135,9 +169,75 @@ void AExternalVehiclePawn::SetHandbrakeReleased()
 
 void AExternalVehiclePawn::PushControl()
 {
+	float AuthoritativeSpeedMps = 0.0f;
+	float StateAgeSeconds = 0.0f;
+	SimCoreProtocol::FVehicleState State;
+	const bool bHasFreshState = SimCoreClient->GetLatestState(State, StateAgeSeconds)
+		&& StateAgeSeconds <= DirectionStateMaxAgeSeconds;
+	if (bHasFreshState)
+	{
+		AuthoritativeSpeedMps = static_cast<float>(State.LinearVelocityBody.X);
+	}
+
+	float CommandThrottle = 0.0f;
+	float CommandBrake = 0.0f;
+	const bool bForwardPressed = ForwardPedalInput > KINDA_SMALL_NUMBER;
+	const bool bReversePressed = ReversePedalInput > KINDA_SMALL_NUMBER;
+	if (bForwardPressed && bReversePressed)
+	{
+		// Conflicting pedals can never create drive torque.
+		CommandBrake = FMath::Max(ForwardPedalInput, ReversePedalInput);
+	}
+	else if (bForwardPressed)
+	{
+		if (SelectedGear == SimCoreProtocol::EVehicleGear::Drive)
+		{
+			// W remains usable with a stale state only when it cannot change gear.
+			CommandThrottle = !bHasFreshState
+				|| AuthoritativeSpeedMps >= -DirectionChangeSpeedMps
+				? ForwardPedalInput
+				: 0.0f;
+			CommandBrake = CommandThrottle > 0.0f ? 0.0f : ForwardPedalInput;
+		}
+		else if (bHasFreshState
+			&& AuthoritativeSpeedMps >= -DirectionChangeSpeedMps)
+		{
+			SelectedGear = SimCoreProtocol::EVehicleGear::Drive;
+			CommandThrottle = ForwardPedalInput;
+		}
+		else
+		{
+			// While reversing, W is the service brake until nearly stopped.
+			CommandBrake = ForwardPedalInput;
+		}
+	}
+	else if (bReversePressed)
+	{
+		if (SelectedGear == SimCoreProtocol::EVehicleGear::Reverse)
+		{
+			CommandThrottle = !bHasFreshState
+				|| AuthoritativeSpeedMps <= DirectionChangeSpeedMps
+				? ReversePedalInput
+				: 0.0f;
+			CommandBrake = CommandThrottle > 0.0f ? 0.0f : ReversePedalInput;
+		}
+		else if (bHasFreshState
+			&& AuthoritativeSpeedMps <= DirectionChangeSpeedMps)
+		{
+			SelectedGear = SimCoreProtocol::EVehicleGear::Reverse;
+			CommandThrottle = ReversePedalInput;
+		}
+		else
+		{
+			// While moving forward, S is the service brake until nearly stopped.
+			CommandBrake = ReversePedalInput;
+		}
+	}
+
 	SimCoreClient->SetControl(
-		ThrottleInput,
-		BrakeInput,
+		CommandThrottle,
+		CommandBrake,
 		SteeringInput,
-		bHandbrakeInput);
+		bHandbrakeInput,
+		SelectedGear);
 }

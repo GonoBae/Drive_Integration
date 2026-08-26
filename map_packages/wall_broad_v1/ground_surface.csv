@@ -1,0 +1,5 @@
+# R1 bootstrap ground collision in local ENU meters.
+# WP-03 replaces this broad flat bootstrap with cooked Wall/Broad surfaces.
+surface_id,e0,n0,u0,e1,n1,u1,e2,n2,u2
+asphalt,-500,-500,0,500,-500,0,500,500,0
+asphalt,-500,-500,0,500,500,0,-500,500,0
