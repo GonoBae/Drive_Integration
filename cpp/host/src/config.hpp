@@ -21,6 +21,7 @@ namespace Config {
     // A control packet whose generation clock trails receive time by more than
     // this amount is considered queued/stale and cannot re-arm SafeStop.
     inline constexpr std::uint64_t MAX_COMMAND_QUEUE_AGE_NS = 100'000'000;
+    inline constexpr std::uint64_t HARD_COMMAND_TIMEOUT_NS = 1'000'000'000;
 
     // Temporary Wall/Broad ENU anchor. The MapPackage loader will replace
     // altitude and the actual drivable-lane spawn when it is implemented.

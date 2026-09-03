@@ -38,6 +38,35 @@ void test_sequence_and_owner_rules()
             "a second controller must not preempt an active lease");
 }
 
+void test_health_accessors_distinguish_waiting_soft_and_hard_stop()
+{
+    ControlLease lease(250ms, 100ms);
+    const auto start = ControlLease::Clock::time_point{};
+    require(!lease.has_control_command() && !lease.requires_reconnect(),
+            "initial SafeStop has neither a command nor an expired owner");
+    require(lease.accept(command("manual", "socket-a", 1, 1), start)
+                == ControlLeaseDecision::Accepted,
+            "health accessor fixture must acquire a command");
+    require(lease.has_control_command() && !lease.requires_reconnect(),
+            "active lease must expose an accepted command");
+    require(lease.update_timeout(start + 251ms)
+            && lease.has_control_command() && !lease.requires_reconnect(),
+            "soft timeout must remain distinguishable from hard retirement");
+    require(lease.update_hard_timeout(start + 1001ms)
+            && lease.has_control_command() && lease.requires_reconnect(),
+            "hard timeout must retain command age while exposing retirement");
+    require(lease.reset_for_reconnect("manual", "socket-b")
+                == ControlLeaseResetDecision::Ready
+            && !lease.has_control_command() && !lease.requires_reconnect(),
+            "fresh reconnect must wait for control with no stale command age");
+    require(lease.accept(command("manual", "socket-b", 2, 2), start + 1002ms)
+                == ControlLeaseDecision::Accepted,
+            "reconnect fixture must acquire its new command");
+    lease.reset_for_new_simulation();
+    require(!lease.has_control_command() && !lease.requires_reconnect(),
+            "map reset must erase both accepted age and hard-expiry status");
+}
+
 void test_stale_queued_packet_cannot_release_safe_stop()
 {
     ControlLease lease(250ms, 100ms);
@@ -240,6 +269,7 @@ int main()
 {
     try {
         test_sequence_and_owner_rules();
+        test_health_accessors_distinguish_waiting_soft_and_hard_stop();
         test_stale_queued_packet_cannot_release_safe_stop();
         test_new_session_can_acquire_only_after_hard_timeout();
         test_queue_age_is_rejected_before_timeout();

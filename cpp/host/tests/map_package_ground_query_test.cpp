@@ -60,6 +60,18 @@ void test_tracked_map_package_bootstrap_loads()
     require(ground.collision_checksum().starts_with("fnv1a64:")
             && ground.collision_checksum().size() == 24,
             "tracked MapPackage must publish a verified collision checksum");
+    const auto& bounds = ground.bounds_enu();
+    require(bounds.minimum.east_m == -500.0
+            && bounds.maximum.east_m == 500.0
+            && bounds.minimum.north_m == -500.0
+            && bounds.maximum.north_m == 500.0
+            && bounds.minimum.up_m == 0.0
+            && bounds.maximum.up_m == 0.0,
+            "tracked MapPackage must publish its exact ENU vertex bounds");
+    require(bounds.east_span_m() == 1000.0
+            && bounds.north_span_m() == 1000.0
+            && bounds.up_span_m() == 0.0,
+            "tracked MapPackage must publish human-readable ENU spans");
     const auto hit = ground.query_down({{0.0, 0.0, 0.55}, 1.0});
     require(hit.has_value(), "bootstrap MapPackage must cover the spawn origin");
     require(hit->point_enu.up_m == 0.0 && hit->distance_m == 0.55,
@@ -140,12 +152,24 @@ void test_sloped_triangle_interpolates_height_and_normal()
             "triangle height must use barycentric interpolation");
     require(hit->normal_enu.north_m < 0.0 && hit->normal_enu.up_m > 0.0,
             "triangle normal must preserve the uphill direction");
+    require(hit->surface_material_id
+                == simcore_host::GroundSurfaceMaterialId::Default
+            && hit->friction_multiplier == 1.0,
+            "legacy triangle ground must retain default material metadata");
     const double length = std::hypot(
         hit->normal_enu.east_m,
         hit->normal_enu.north_m,
         hit->normal_enu.up_m);
     require(std::abs(length - 1.0) < 1e-12,
             "MapPackage provider must normalize the ground normal");
+    const auto& bounds = ground.bounds_enu();
+    require(bounds.minimum.east_m == -10.0
+            && bounds.maximum.east_m == 10.0
+            && bounds.minimum.north_m == -10.0
+            && bounds.maximum.north_m == 10.0
+            && bounds.minimum.up_m == -0.5
+            && bounds.maximum.up_m == 0.5,
+            "ground bounds must include exact vertical and horizontal extents");
 }
 
 void test_nearest_surface_wins_and_bounds_are_enforced()

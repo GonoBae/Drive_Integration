@@ -2,9 +2,11 @@
 
 #include "vehicle.pb.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <numbers>
 #include <stdexcept>
 #include <string>
@@ -29,6 +31,166 @@ simcore_host::EnvelopeMetadata make_metadata()
     };
 }
 
+void test_traffic_snapshot_is_additive_and_atomic()
+{
+    VehicleState state;
+    state.entity_id = 1;
+    simcore_host::TrafficSignalSnapshot signal;
+    signal.id = 7;
+    signal.group_id = 1;
+    signal.aspect = simcore_host::SignalAspect::Green;
+    signal.position_enu = {-8, 137, .16};
+    signal.heading_deg = 90;
+    signal.remaining_seconds = 11.5;
+    const std::string checksum = "fnv1a64:0123456789abcdef";
+    simcore::Envelope envelope;
+    require(envelope.ParseFromString(simcore_host::serialize_world_state_envelope(
+        state, {}, make_metadata(), simcore_host::HealthSnapshot{}, {signal}, checksum)),
+        "traffic WorldState parses");
+    const auto& world = envelope.world_state();
+    require(world.entities_size() == 1 && world.has_health()
+            && world.traffic_signals_size() == 1 && envelope.sequence() == 42,
+            "traffic must share pose/health identity and sequence");
+    require(world.traffic_network_checksum() == checksum
+            && world.traffic_signals(0).signal_id() == 7
+            && world.traffic_signals(0).controller_id() == 1
+            && world.traffic_signals(0).signal_kind() == simcore::TRAFFIC_SIGNAL_KIND_VEHICLE
+            && world.traffic_signals(0).aspect() == simcore::TRAFFIC_SIGNAL_GREEN
+            && world.traffic_signals(0).position_enu().x() == -8
+            && world.traffic_signals(0).remaining_seconds() == 11.5f,
+            "signal wire semantics must roundtrip");
+    auto pedestrian = signal;
+    pedestrian.id = 101;
+    pedestrian.kind = simcore_host::TrafficSignalKind::Pedestrian;
+    simcore::Envelope pedestrian_wire;
+    require(pedestrian_wire.ParseFromString(simcore_host::serialize_world_state_envelope(
+                state, {}, make_metadata(), std::nullopt, {pedestrian}, checksum))
+            && pedestrian_wire.world_state().traffic_signals(0).signal_kind()
+                == simcore::TRAFFIC_SIGNAL_KIND_PEDESTRIAN,
+            "pedestrian signal kind must roundtrip additively");
+    for (const double heading : {0.0, 90.0, 359.999, 359.999999}) {
+        auto boundary = signal;
+        boundary.heading_deg = heading;
+        simcore::Envelope rounded;
+        require(rounded.ParseFromString(simcore_host::serialize_world_state_envelope(
+            state, {}, make_metadata(), std::nullopt, {boundary}, checksum)),
+            "heading boundary WorldState parses");
+        const float wire = rounded.world_state().traffic_signals(0).heading_deg();
+        require(wire >= 0.f && wire < 360.f,
+                "float rounding must preserve the receiver's heading range");
+        const double difference = std::abs(static_cast<double>(wire) - heading);
+        require(std::min(difference, 360.0 - difference) < .0001,
+                "wrapped heading must retain the same physical orientation");
+    }
+    for (int invalid = 0; invalid < 7; ++invalid) {
+        auto bad = signal;
+        auto hash = checksum;
+        auto signals = std::vector<simcore_host::TrafficSignalSnapshot>{bad};
+        if (invalid == 0) hash.clear();
+        if (invalid == 1) signals.push_back(signal);
+        if (invalid == 2) signals[0].remaining_seconds = std::numeric_limits<double>::quiet_NaN();
+        if (invalid == 3) signals[0].aspect = static_cast<simcore_host::SignalAspect>(99);
+        if (invalid == 4) signals[0].heading_deg = 360.0;
+        if (invalid == 5) signals[0].heading_deg = -0.1;
+        if (invalid == 6) signals[0].kind = static_cast<simcore_host::TrafficSignalKind>(99);
+        bool rejected = false;
+        try { (void)simcore_host::serialize_world_state_envelope(
+            state, {}, make_metadata(), std::nullopt, signals, hash); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        require(rejected, "invalid traffic snapshot must not serialize");
+    }
+
+    const auto rejects = [&](std::vector<simcore_host::TrafficSignalSnapshot> signals,
+                             const char* message) {
+        bool rejected = false;
+        try {
+            (void)simcore_host::serialize_world_state_envelope(
+                state, {}, make_metadata(), std::nullopt, signals, checksum);
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        require(rejected, message);
+    };
+    const auto serializes = [&](std::vector<simcore_host::TrafficSignalSnapshot> signals,
+                                const char* message) {
+        simcore::Envelope parsed;
+        require(parsed.ParseFromString(simcore_host::serialize_world_state_envelope(
+                    state, {}, make_metadata(), std::nullopt, signals, checksum)), message);
+        return parsed;
+    };
+
+    auto other_controller = signal;
+    other_controller.id = 8;
+    other_controller.controller_id = 2;
+    other_controller.group_id = 2;
+    const auto independent = serializes(
+        {signal, other_controller},
+        "different controllers may publish simultaneous permissive groups");
+    require(independent.world_state().traffic_signals(0).controller_id() == 1
+            && independent.world_state().traffic_signals(1).controller_id() == 2,
+            "controller identity must roundtrip on every signal head");
+
+    auto boundary = signal;
+    boundary.id = 9;
+    boundary.controller_id = 64;
+    boundary.group_id = 4096;
+    const auto upper_bounds = serializes(
+        {boundary}, "maximum supported controller and group IDs must serialize");
+    require(upper_bounds.world_state().traffic_signals(0).controller_id() == 64
+            && upper_bounds.world_state().traffic_signals(0).group_id() == 4096,
+            "controller/group upper bounds must survive protobuf serialization");
+
+    auto long_plan_countdown = boundary;
+    long_plan_countdown.remaining_seconds = simcore_host::kMaxTrafficSignalCountdownSeconds;
+    const auto long_plan = serializes(
+        {long_plan_countdown}, "maximum version 2 plan countdown must serialize");
+    require(long_plan.world_state().traffic_signals(0).remaining_seconds() == 3600.0f,
+            "one-hour plan countdown must survive protobuf serialization");
+    long_plan_countdown.remaining_seconds =
+        simcore_host::kMaxTrafficSignalCountdownSeconds + 0.01;
+    rejects({long_plan_countdown}, "countdown beyond the plan-cycle bound must fail closed");
+
+    auto same_controller_conflict = signal;
+    same_controller_conflict.id = 10;
+    same_controller_conflict.group_id = 2;
+    same_controller_conflict.aspect = simcore_host::SignalAspect::Yellow;
+    rejects({signal, same_controller_conflict},
+            "one controller cannot publish two distinct permissive groups");
+
+    auto same_group_conflict = signal;
+    same_group_conflict.id = 11;
+    same_group_conflict.aspect = simcore_host::SignalAspect::Red;
+    rejects({signal, same_group_conflict},
+            "heads in one controller/group must agree on aspect");
+    same_group_conflict.aspect = signal.aspect;
+    same_group_conflict.remaining_seconds += .01;
+    rejects({signal, same_group_conflict},
+            "heads in one controller/group must agree on countdown");
+
+    auto independent_same_group = signal;
+    independent_same_group.id = 12;
+    independent_same_group.controller_id = 2;
+    independent_same_group.aspect = simcore_host::SignalAspect::Red;
+    independent_same_group.remaining_seconds += 1.0;
+    (void)serializes({signal, independent_same_group},
+                     "the same group ID in different controllers is independent");
+
+    for (const std::uint32_t bad_group : {0u, 4097u}) {
+        auto bad = signal;
+        bad.group_id = bad_group;
+        rejects({bad}, "out-of-range traffic group must fail closed");
+    }
+    for (const std::uint32_t bad_controller : {0u, 65u}) {
+        auto bad = signal;
+        bad.controller_id = bad_controller;
+        rejects({bad}, "out-of-range traffic controller must fail closed");
+    }
+    auto duplicate_across_controllers = signal;
+    duplicate_across_controllers.controller_id = 2;
+    rejects({signal, duplicate_across_controllers},
+            "signal IDs remain globally unique across controllers");
+}
+
 void test_world_state_envelope_roundtrip()
 {
     static_assert(simcore_host::kProtocolSchemaVersion == 2);
@@ -49,6 +211,13 @@ void test_world_state_envelope_roundtrip()
     state.position_enu = {3.0, 4.0, 0.5};
     state.linear_velocity_body = {8.5, 0.2, 0.0};
     state.angular_velocity_body = {0.0, 0.0, 0.2};
+    state.damage_percent = 37.5f;
+    state.last_impact_impulse_n_s = 9125.f;
+    state.damage_zone = VehicleDamageZone::Front;
+    state.collision_event_sequence = 3;
+    state.collision_half_length_m = 2.15f;
+    state.collision_half_width_m = 0.94f;
+    state.collision_half_height_m = 0.75f;
     state.wheels[0].wheel_index = 0;
     state.wheels[0].in_contact = true;
     state.wheels[0].normal_load = 3500.f;
@@ -68,6 +237,8 @@ void test_world_state_envelope_roundtrip()
     require(envelope.play_session_id() == "play-session-test",
             "WorldState envelope must echo its authoritative play session");
     require(envelope.has_world_state(), "payload must be WorldState");
+    require(!envelope.world_state().has_health(),
+            "legacy serializer callers must retain the optional Health absence");
     require(envelope.world_state().entities_size() == 1,
             "WorldState must contain one entity");
 
@@ -91,6 +262,74 @@ void test_world_state_envelope_roundtrip()
             "wheel contact state must roundtrip");
     require(std::abs(entity.wheels(0).steering_angle() - 0.3f) < 1e-6f,
             "left-positive wheel steering must roundtrip exactly");
+    require(std::abs(entity.damage_percent() - 37.5f) < 1e-6f
+            && std::abs(entity.last_impact_impulse_n_s() - 9125.f) < 1e-3f
+            && entity.damage_zone() == simcore::VEHICLE_DAMAGE_ZONE_FRONT
+            && entity.collision_event_sequence() == 3,
+            "authoritative collision damage fields must roundtrip additively");
+    require(entity.collision_half_length() == 2.15f
+            && entity.collision_half_width() == 0.94f
+            && entity.collision_half_height() == 0.75f,
+            "Ego must publish the same chassis box used by the debug overlay");
+}
+
+void test_world_health_is_additive_and_atomic()
+{
+    using simcore_host::HealthStatus;
+    constexpr std::array statuses{
+        HealthStatus::AwaitingReset, HealthStatus::AwaitingControl,
+        HealthStatus::Active, HealthStatus::SafeStop,
+        HealthStatus::ReconnectRequired, HealthStatus::EstopLatched};
+    constexpr std::array names{
+        "awaiting_reset", "awaiting_control", "active", "safe_stop",
+        "reconnect_required", "estop_latched"};
+    VehicleState state;
+    for (std::size_t index = 0; index < statuses.size(); ++index) {
+        const simcore_host::HealthSnapshot health{
+            statuses[index], std::numeric_limits<std::uint32_t>::max(),
+            std::numeric_limits<std::uint64_t>::max(), "authority detail", true};
+        simcore::Envelope envelope;
+        require(envelope.ParseFromString(
+                    simcore_host::serialize_world_state_envelope(
+                        state, make_metadata(), health)),
+                "world-health.v1 must parse without a schema bump");
+        require(envelope.schema_version() == 2 && envelope.has_world_state()
+                && !envelope.has_health() && envelope.sequence() == 42
+                && envelope.world_state().entities_size() == 1,
+                "Health must share the existing WorldState payload and sequence");
+        require(envelope.world_state().has_health(),
+                "a provided authority snapshot must be explicitly present");
+        const auto& parsed = envelope.world_state().health();
+        require(parsed.status() == names[index]
+                && parsed.has_control_command()
+                && parsed.tick_overrun_count()
+                    == std::numeric_limits<std::uint32_t>::max()
+                && parsed.last_command_age_ns()
+                    == std::numeric_limits<std::uint64_t>::max()
+                && parsed.message() == "authority detail",
+                "all whitelisted states and full-width metrics must roundtrip");
+    }
+
+    simcore::Envelope no_command;
+    require(no_command.ParseFromString(
+                simcore_host::serialize_world_state_envelope(
+                    state, {}, make_metadata(),
+                    simcore_host::HealthSnapshot{
+                        HealthStatus::AwaitingControl, 0, 999, {}, false}))
+            && !no_command.world_state().health().has_control_command()
+            && no_command.world_state().health().last_command_age_ns() == 0,
+            "absence of an accepted command must encode age zero, never a sentinel");
+
+    bool invalid_status_rejected = false;
+    try {
+        (void)simcore_host::serialize_world_state_envelope(
+            state, make_metadata(),
+            simcore_host::HealthSnapshot{static_cast<HealthStatus>(255)});
+    } catch (const std::invalid_argument&) {
+        invalid_status_rejected = true;
+    }
+    require(invalid_status_rejected,
+            "server serialization must not emit an unknown authority status");
 }
 
 void test_control_command_envelope_maps_to_input()
@@ -128,6 +367,40 @@ void test_control_command_envelope_maps_to_input()
             "left-positive steering must map without a protocol-layer sign change");
     require(input->input.handbrake, "handbrake must map");
     require(input->input.gear == VehicleGear::Reverse, "gear must map");
+}
+
+void test_hello_envelope_roundtrip_and_capabilities()
+{
+    auto metadata = make_metadata();
+    metadata.session_id = "server-session";
+    const std::vector<std::string> capabilities{
+        "world-state.v2",
+        "control.v2",
+        "simulation-reset.v1",
+        "map-package-checksum.v1",
+    };
+    const auto bytes = simcore_host::serialize_hello_envelope(
+        metadata, "simcore-test-build", capabilities);
+
+    simcore::Envelope wire;
+    require(wire.ParseFromString(bytes) && wire.has_hello(),
+            "serialized Hello envelope must parse");
+    require(wire.hello().schema() == simcore_host::kProtocolSchemaName
+            && wire.hello().build() == "simcore-test-build"
+            && wire.hello().capabilities_size() == 4,
+            "Hello must advertise its exact schema, build, and capabilities");
+
+    std::string error;
+    const auto parsed = simcore_host::parse_client_message_envelope(bytes, &error);
+    require(parsed.has_value(), "Hello must parse: " + error);
+    const auto* hello = std::get_if<simcore_host::ParsedHello>(&*parsed);
+    require(hello != nullptr
+            && hello->sequence == metadata.sequence
+            && hello->session_id == "server-session"
+            && hello->map_package_checksum == metadata.map_package_checksum
+            && hello->schema == simcore_host::kProtocolSchemaName
+            && hello->capabilities == capabilities,
+            "parsed Hello must retain envelope identity and ordered capabilities");
 }
 
 void test_runtime_entities_are_additive_and_deterministically_ordered()
@@ -305,8 +578,11 @@ int main()
 {
     try {
         test_world_state_envelope_roundtrip();
+        test_traffic_snapshot_is_additive_and_atomic();
+        test_world_health_is_additive_and_atomic();
         test_runtime_entities_are_additive_and_deterministically_ordered();
         test_control_command_envelope_maps_to_input();
+        test_hello_envelope_roundtrip_and_capabilities();
         test_simulation_reset_envelope_maps_to_lifecycle_request();
         test_rejects_incompatible_schema_control_commands();
         test_missing_gear_keeps_default_drive();

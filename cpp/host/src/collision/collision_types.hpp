@@ -54,9 +54,11 @@ struct VerticalCapsule {
 
 using KinematicProxyShape = std::variant<ObbPrism, VerticalCapsule>;
 
-// Tick-local collision snapshot for an NPC vehicle or pedestrian. Proxies are
-// infinite-mass kinematic obstacles: their motion affects Ego but the solve
-// never modifies the caller's authoritative proxy state.
+// Tick-local collision snapshot for an NPC vehicle or pedestrian. The default
+// zero mass/inertia keeps the original infinite-mass kinematic-obstacle
+// contract. A positive mass opts a proxy into the finite, equal-and-opposite
+// Ego contact solve; OBBs then also require a positive yaw inertia. Capsules
+// are heading-invariant and therefore keep yaw inertia at zero.
 struct KinematicCollisionProxy {
     std::string proxy_id;
     KinematicProxyShape shape;
@@ -65,6 +67,12 @@ struct KinematicCollisionProxy {
     // velocity for contact response; capsule orientation itself is invariant.
     double heading_rate_rad_s = 0.0;
     CollisionMaterial material;
+    double mass_kg = 0.0;
+    double yaw_inertia_kg_m2 = 0.0;
+    // Optional numerical/presentation guard for finite proxies. Zero preserves
+    // the legacy unbounded kinematic contract. Managed traffic always supplies
+    // a positive bound.
+    double maximum_linear_speed_mps = 0.0;
 };
 
 struct PlanarRigidBody {
@@ -95,6 +103,10 @@ struct CollisionContact {
 struct CollisionStepResult {
     PlanarRigidBody body;
     std::vector<CollisionContact> contacts;
+    // Sorted by proxy_id. Finite proxies include the equal-and-opposite
+    // position/velocity/yaw response; legacy infinite proxies contain their
+    // prescribed motion advanced through the accepted microsteps.
+    std::vector<KinematicCollisionProxy> resolved_dynamic_proxies;
     std::size_t substep_count = 0;
     bool motion_clamped = false;
     std::size_t broad_phase_query_count = 0;

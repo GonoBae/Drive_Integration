@@ -37,6 +37,9 @@ public:
         return global_triangle_indices_.size();
     }
     [[nodiscard]] std::size_t maximum_query_candidate_count() const;
+    [[nodiscard]] const GroundBoundsEnu& bounds_enu() const {
+        return ground_bounds_enu_;
+    }
     [[nodiscard]] const std::string& package_id() const { return package_id_; }
     [[nodiscard]] const std::string& collision_checksum() const {
         return collision_checksum_;
@@ -62,6 +65,7 @@ private:
     double grid_cell_size_m_ = 1.0;
     std::size_t grid_columns_ = 0;
     std::size_t grid_rows_ = 0;
+    GroundBoundsEnu ground_bounds_enu_{};
     std::string package_id_;
     std::string collision_checksum_;
 };

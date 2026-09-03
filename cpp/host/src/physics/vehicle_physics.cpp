@@ -1,6 +1,7 @@
 #include "physics/vehicle_physics.hpp"
 
 #include "coordinates/body_frame_adapter.hpp"
+#include "physics/chassis_ground_contact.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -16,6 +17,9 @@ constexpr double DEG2RAD = std::numbers::pi_v<double> / 180.0;
 constexpr double RAD2DEG = 180.0 / std::numbers::pi_v<double>;
 constexpr float GRAVITY_MPS2 = 9.80665f;
 constexpr float MIN_CONTACT_NORMAL_LOAD_N = 0.001f;
+// Shared by the velocity constraint and the next-step tire support estimate.
+// A ground ray alone is not evidence of a loaded compression stop.
+constexpr double HARD_STOP_ACTIVATION_SLOP_M = 1e-4;
 // A downward-only ray that starts exactly at the suspension mount cannot
 // recover once a fast-rising surface is a few centimeters above the reduced
 // model's lagging chassis pose. Lift the probe while preserving the actual
@@ -42,6 +46,27 @@ constexpr double COLLISION_BODY_OVERHANG_M = 0.80;
 constexpr double COLLISION_BODY_SIDE_PADDING_M = 0.15;
 constexpr double COLLISION_BODY_GROUND_CLEARANCE_M = 0.10;
 constexpr double COLLISION_BODY_HALF_HEIGHT_M = 0.75;
+// The authored sedan shell spans -0.29m..+0.96m from the CG. Ground contact
+// follows that visible body instead of the taller conservative wall prism;
+// retaining 0.26m upright clearance also preserves the supported 0.24m curb
+// contract and its real front/rear approach clearance.
+constexpr double CHASSIS_SHELL_CENTER_UP_OFFSET_M = 0.335;
+constexpr double CHASSIS_SHELL_HALF_HEIGHT_M = 0.625;
+// Below roughly a 6 km/h rigid-body delta-v, contacts are treated as ordinary
+// parking/curb loads. Stronger impacts accumulate visible body damage.
+constexpr double DAMAGE_IMPULSE_THRESHOLD_N_S = 2500.0;
+constexpr double DAMAGE_IMPULSE_PER_PERCENT_N_S = 500.0;
+// A forward-driven rigid wheel can climb a square step only while the contact
+// corner is below its centre (rise < radius). The R1 curb contract is narrower:
+// authored curb rise and continuous support behind it may be at most 75% of R.
+constexpr double MAX_SUPPORTED_CURB_RISE_TIRE_RADIUS_FRACTION = 0.75;
+constexpr double CURB_SUPPORT_MIN_RISE_M = 0.02;
+constexpr double CURB_SUPPORT_RASTER_HEIGHT_TOLERANCE_TIRE_RADIUS_FRACTION = 0.30;
+// The near pair represents the wheel's immediate step transition. A second
+// pair three tire radii from the curb centre verifies the raised support that
+// the suspension is actually about to occupy. Keeping these roles separate
+// prevents a narrow curb-top sample from certifying a missing sidewalk.
+constexpr double CURB_FAR_SUPPORT_TIRE_RADIUS_MULTIPLIER = 3.0;
 
 struct GroundBasis {
     // ENU unit vectors for the vehicle's terrain-tangent solver axes.
@@ -73,6 +98,34 @@ double dot_product(
     const std::array<double, 3>& rhs)
 {
     return lhs[0] * rhs[0] + lhs[1] * rhs[1] + lhs[2] * rhs[2];
+}
+
+std::array<float, 2> integrate_body_planar_velocity(
+    float forward_speed, float lateral_speed, float yaw_rate,
+    float forward_force, float lateral_force, float mass, double dt)
+{
+    // Freeze the sampled forces and yaw rate for this first-order step, but
+    // integrate the rotating-frame term exactly. Explicit Euler would add
+    // kinetic energy even with zero force: |v_next|^2=|v|^2*(1+(r*dt)^2).
+    // This rotation preserves speed when force-free; it neither supplies grip
+    // nor alters the tire-generated yaw moment or the steering request.
+    const double angle = static_cast<double>(yaw_rate) * dt;
+    const double cosine = std::cos(angle);
+    const double sine = std::sin(angle);
+    const double angle_squared = angle * angle;
+    const double sinc = std::abs(angle) < 1e-5
+        ? 1.0 - angle_squared / 6.0 + angle_squared * angle_squared / 120.0
+        : sine / angle;
+    const double cosc = std::abs(angle) < 1e-5
+        ? angle * (0.5 - angle_squared / 24.0 + angle_squared * angle_squared / 720.0)
+        : (1.0 - cosine) / angle;
+    const double forward_acceleration = static_cast<double>(forward_force) / mass;
+    const double lateral_acceleration = static_cast<double>(lateral_force) / mass;
+    return {
+        static_cast<float>(cosine * forward_speed + sine * lateral_speed
+            + dt * (sinc * forward_acceleration + cosc * lateral_acceleration)),
+        static_cast<float>(-sine * forward_speed + cosine * lateral_speed
+            + dt * (-cosc * forward_acceleration + sinc * lateral_acceleration))};
 }
 
 std::array<double, 3> make_horizontal_right(double heading_rad)
@@ -386,17 +439,46 @@ double current_unix_time_seconds()
     return std::chrono::duration<double>(now.time_since_epoch()).count();
 }
 
+float surface_profile_scale(
+    const VehicleParameters& parameters,
+    simcore_host::GroundSurfaceMaterialId material_id)
+{
+    switch (material_id) {
+    case simcore_host::GroundSurfaceMaterialId::Asphalt:
+        return parameters.surface_asphalt_friction_scale;
+    case simcore_host::GroundSurfaceMaterialId::LowFriction:
+        return parameters.surface_low_friction_scale;
+    case simcore_host::GroundSurfaceMaterialId::Rough:
+        return parameters.surface_rough_friction_scale;
+    case simcore_host::GroundSurfaceMaterialId::Default:
+        return parameters.surface_default_friction_scale;
+    }
+    return parameters.surface_default_friction_scale;
+}
+
+float effective_surface_friction_multiplier(
+    const VehicleParameters& parameters,
+    simcore_host::GroundSurfaceMaterialId material_id,
+    float authored_multiplier)
+{
+    const float safe_authored_multiplier =
+        std::isfinite(authored_multiplier) && authored_multiplier > 0.f
+        ? authored_multiplier
+        : 1.f;
+    return safe_authored_multiplier
+        * surface_profile_scale(parameters, material_id);
+}
+
 } // namespace
 
 bool valid_vehicle_parameters(const VehicleParameters& parameters)
 {
-    const std::array<float, 48> finite_values{
+    const std::array<float, 52> finite_values{
         parameters.mass_kg,
         parameters.wheelbase_m,
         parameters.max_steering_angle_rad,
         parameters.steering_rate_rad_s,
         parameters.steering_return_rate_rad_s,
-        parameters.comfortable_lateral_accel_mps2,
         parameters.max_drive_force_n,
         parameters.max_reverse_force_n,
         parameters.max_drive_power_w,
@@ -429,9 +511,14 @@ bool valid_vehicle_parameters(const VehicleParameters& parameters)
         parameters.roll_inertia_kg_m2,
         parameters.attitude_spring_n_m_rad,
         parameters.attitude_damping_n_m_s_rad,
-        parameters.tire_corner_stiffness_n_rad,
+        parameters.front_tire_corner_stiffness_n_rad,
+        parameters.rear_tire_corner_stiffness_n_rad,
         parameters.tire_longitudinal_stiffness_n,
         parameters.tire_friction,
+        parameters.surface_default_friction_scale,
+        parameters.surface_asphalt_friction_scale,
+        parameters.surface_low_friction_scale,
+        parameters.surface_rough_friction_scale,
         parameters.lateral_grip_priority,
         parameters.traction_control_slip_target,
         parameters.traction_control_full_cut_slip,
@@ -451,7 +538,6 @@ bool valid_vehicle_parameters(const VehicleParameters& parameters)
         && parameters.max_steering_angle_rad < std::numbers::pi_v<float> * 0.5f
         && parameters.steering_rate_rad_s > 0.f
         && parameters.steering_return_rate_rad_s > 0.f
-        && parameters.comfortable_lateral_accel_mps2 > 0.f
         && parameters.max_drive_force_n >= 0.f
         && parameters.max_reverse_force_n >= 0.f
         && parameters.max_drive_power_w > 0.f
@@ -489,9 +575,18 @@ bool valid_vehicle_parameters(const VehicleParameters& parameters)
         // four-corner model does not permit a synthetic body-to-ground spring.
         && parameters.attitude_spring_n_m_rad == 0.f
         && parameters.attitude_damping_n_m_s_rad == 0.f
-        && parameters.tire_corner_stiffness_n_rad > 0.f
+        && parameters.front_tire_corner_stiffness_n_rad > 0.f
+        && parameters.rear_tire_corner_stiffness_n_rad > 0.f
         && parameters.tire_longitudinal_stiffness_n > 0.f
         && parameters.tire_friction > 0.f
+        && parameters.surface_default_friction_scale > 0.f
+        && parameters.surface_default_friction_scale <= 4.f
+        && parameters.surface_asphalt_friction_scale > 0.f
+        && parameters.surface_asphalt_friction_scale <= 4.f
+        && parameters.surface_low_friction_scale > 0.f
+        && parameters.surface_low_friction_scale <= 4.f
+        && parameters.surface_rough_friction_scale > 0.f
+        && parameters.surface_rough_friction_scale <= 4.f
         && parameters.lateral_grip_priority > 0.f
         && parameters.lateral_grip_priority <= 1.f
         && parameters.traction_control_slip_target >= 0.f
@@ -563,7 +658,16 @@ void VehiclePhysics::reset()
     suspension_compression_m_.fill(0.f);
     suspension_base_force_n_.fill(0.f);
     suspension_had_contact_.fill(false);
+    wheel_contact_support_ = {};
+    previous_hard_stop_normal_force_n_.fill(0.f);
+    compression_stop_active_.fill(false);
     ground_query_hit_count_ = 0;
+    ground_surface_hit_by_wheel_.fill(false);
+    ground_surface_material_by_wheel_.fill(
+        simcore_host::GroundSurfaceMaterialId::Default);
+    ground_friction_multiplier_by_wheel_.fill(1.f);
+    last_resolved_dynamic_proxies_.clear();
+    last_collision_contacts_.clear();
 
     state_.lat = origin_lat_;
     state_.lon = origin_lon_;
@@ -571,6 +675,13 @@ void VehiclePhysics::reset()
     state_.heading = static_cast<float>(heading_rad_ * RAD2DEG);
     state_.rpm = parameters_.idle_rpm;
     state_.position_enu = {0.0, 0.0, parameters_.cg_height_m};
+    state_.collision_half_length_m = static_cast<float>(
+        parameters_.wheelbase_m * 0.5 + COLLISION_BODY_OVERHANG_M);
+    state_.collision_half_width_m = static_cast<float>(
+        std::max(parameters_.front_track_m, parameters_.rear_track_m) * 0.5
+        + COLLISION_BODY_SIDE_PADDING_M);
+    state_.collision_half_height_m = static_cast<float>(
+        COLLISION_BODY_HALF_HEIGHT_M);
     for (std::size_t index = 0; index < state_.wheels.size(); ++index) {
         auto& wheel = state_.wheels[index];
         wheel.wheel_index = static_cast<std::uint32_t>(index);
@@ -617,9 +728,22 @@ void VehiclePhysics::reset()
         state_.wheels[index].wheel_index = static_cast<std::uint32_t>(index);
     }
 
-    resolve_non_penetrating_wheel_contacts(true);
+    resolve_non_penetrating_ground_contacts(true);
     state_.pitch = static_cast<float>(pitch_rad_ * RAD2DEG);
     state_.roll = static_cast<float>(roll_rad_ * RAD2DEG);
+}
+
+void VehiclePhysics::replace_environment(
+    std::shared_ptr<const simcore_host::GroundQuery> ground_query,
+    std::shared_ptr<const simcore_host::CollisionWorld> collision_world)
+{
+    if (!ground_query) {
+        throw std::invalid_argument(
+            "Vehicle environment requires an authoritative ground query");
+    }
+    ground_query_ = std::move(ground_query);
+    collision_world_ = std::move(collision_world);
+    reset();
 }
 
 void VehiclePhysics::set_input(const VehicleInput& input) {
@@ -659,6 +783,18 @@ VehicleState VehiclePhysics::update(
     }
 
     const float fdt = static_cast<float>(dt);
+    last_resolved_dynamic_proxies_.clear();
+    last_collision_contacts_.clear();
+    std::vector<simcore_host::KinematicCollisionProxy>
+        accepted_resolved_dynamic_proxies;
+    std::vector<simcore_host::CollisionContact> accepted_collision_contacts;
+    std::array<double, 4> tick_hard_stop_impulses{};
+    wheel_contact_support_ = {};
+    const auto previous_hard_stop_normal_force_n =
+        previous_hard_stop_normal_force_n_;
+    // Commit a new estimate only after the complete step is accepted. A
+    // coverage rollback or an exception must not retain an older reaction.
+    previous_hard_stop_normal_force_n_.fill(0.f);
 
     // R1 is a ground-bound vehicle model: it has no airborne, cliff, or jump
     // semantics. Keep the last published supported pose for this step so a
@@ -707,6 +843,12 @@ VehicleState VehiclePhysics::update(
             + force_sample_body_basis.up[2] * wheel.contact_normal_enu.z;
         suspension_normal_force_n[index] = suspension_base_force_n_[index]
             * static_cast<float>(std::max(0.0, body_up_normal_dot));
+        wheel_contact_support_[index].suspension_normal_force_n =
+            suspension_normal_force_n[index];
+        if (compression_stop_active_[index]) {
+            wheel_contact_support_[index].tire_hard_stop_normal_force_n =
+                previous_hard_stop_normal_force_n[index];
+        }
         suspension_heave_force_n += suspension_normal_force_n[index];
     }
 
@@ -733,8 +875,7 @@ VehicleState VehiclePhysics::update(
     // brings wheel surface speed back toward road speed.
     const bool drive_force_suppressed = forward_limiter_active
         || reverse_limiter_active
-        || in.brake > 0.f
-        || in.handbrake;
+        || in.brake > 0.f;
     const float desired_drive_force = drive_force_suppressed
         ? 0.f
         : gear_sign * in.throttle * available_drive_force;
@@ -764,19 +905,13 @@ VehicleState VehiclePhysics::update(
     const float total_brake_force = in.handbrake
         ? std::max(service_brake_force, parameters_.max_handbrake_force_n)
         : service_brake_force;
-    // Keyboard input is a requested steering fraction, not an instantaneous
-    // 32-degree road-wheel teleport. Limit the target by a comfortable lateral
-    // acceleration at speed and then move the steering rack at a finite rate.
-    const float planar_speed_mps = std::hypot(
-        body_longitudinal_speed_mps_, solver_lateral_speed_mps_);
-    const float speed_limited_angle_rad = std::atan(
-        parameters_.wheelbase_m * parameters_.comfortable_lateral_accel_mps2
-        / std::max(planar_speed_mps * planar_speed_mps, 0.25f));
-    const float steering_limit_rad = std::min(
-        parameters_.max_steering_angle_rad, speed_limited_angle_rad);
+    // The input requests a road-wheel angle, independent of vehicle speed.
+    // Move the rack at a finite rate, then apply Ackermann geometry below.
+    // Tire slip, normal loads and friction determine the resulting turn;
+    // no speed-sensitive input assist silently reduces the requested angle.
     const float steering_target_rad =
         simcore_host::BodyFrameAdapter::canonical_steering_to_solver(in.steering)
-        * steering_limit_rad;
+        * parameters_.max_steering_angle_rad;
     const bool steering_is_returning =
         solver_road_wheel_angle_rad_ * steering_target_rad <= 0.f
         || std::abs(steering_target_rad) < std::abs(solver_road_wheel_angle_rad_);
@@ -868,6 +1003,8 @@ VehicleState VehiclePhysics::update(
     std::array<float, 4> wheel_cosine{};
     std::array<float, 4> wheel_sine{};
     std::array<float, 4> tire_force_y_by_wheel{};
+    std::array<float, 4> unconstrained_tire_force_y_by_wheel{};
+    std::array<float, 4> tire_friction_limit_by_wheel{};
     std::array<float, 4> longitudinal_force_reserve{};
     std::array<float, 4> previous_longitudinal_slip{};
     std::array<std::array<double, 3>, 4> contact_force_world_by_wheel{};
@@ -892,14 +1029,19 @@ VehicleState VehiclePhysics::update(
         wheel.steering_angle =
             simcore_host::BodyFrameAdapter::solver_steering_to_canonical(
                 solver_wheel_steering);
-        // Tire capacity comes from this corner's real spring/damper reaction.
-        // The former quasi-static table overwrote suspension loads and could
-        // give an unloaded/full-droop tire artificial grip.
+        // Spring/damper force is capped by the suspension model. A compressed
+        // hard stop supplies an additional real normal reaction, measured from
+        // the prior accepted tick's velocity impulse. It is a one-step force
+        // estimate because tire integration precedes this tick's constraints.
+        // The impulse has already acted on body heave/roll/pitch: use it only
+        // in the tire budget, never add it to those body forces a second time.
+        // Nor is the rigid-stop reaction subject to the spring's force cap.
         wheel.normal_load = wheel.in_contact
             ? std::clamp(
                 suspension_normal_force_n[index],
                 0.f,
                 parameters_.suspension.max_force_n)
+                + wheel_contact_support_[index].tire_hard_stop_normal_force_n
             : 0.f;
         total_normal_load += wheel.normal_load;
 
@@ -947,18 +1089,38 @@ VehicleState VehiclePhysics::update(
             simcore_host::BodyFrameAdapter::solver_lateral_to_canonical(
                 internal_slip_angle);
 
-        const float friction_limit =
-            parameters_.tire_friction * wheel.normal_load;
+        const float surface_friction_multiplier =
+            effective_surface_friction_multiplier(
+                parameters_,
+                ground_surface_material_by_wheel_[index],
+                ground_friction_multiplier_by_wheel_[index]);
+        const float friction_limit = parameters_.tire_friction
+            * surface_friction_multiplier * wheel.normal_load;
+        tire_friction_limit_by_wheel[index] = friction_limit;
         const float lateral_limit =
             friction_limit * parameters_.lateral_grip_priority;
+        const float corner_stiffness = index < 2
+            ? parameters_.front_tire_corner_stiffness_n_rad
+            : parameters_.rear_tire_corner_stiffness_n_rad;
+        unconstrained_tire_force_y_by_wheel[index] =
+            -corner_stiffness * internal_slip_angle;
         tire_force_y_by_wheel[index] = std::clamp(
-            -parameters_.tire_corner_stiffness_n_rad * internal_slip_angle,
+            unconstrained_tire_force_y_by_wheel[index],
             -lateral_limit,
             lateral_limit);
-        longitudinal_force_reserve[index] = std::sqrt(std::max(
-            0.f,
-            friction_limit * friction_limit
-                - tire_force_y_by_wheel[index] * tire_force_y_by_wheel[index]));
+        const bool rear_handbrake_tire = in.handbrake && index >= 2;
+        // A mechanical side brake acts on the rear axle. A locked/slipping
+        // rear tire spends its friction budget resisting longitudinal motion
+        // first; only the remaining circle can generate cornering force. The
+        // normal driving path intentionally keeps the existing lateral-first
+        // allocation so service braking and ordinary steering are unchanged.
+        longitudinal_force_reserve[index] = rear_handbrake_tire
+            ? friction_limit
+            : std::sqrt(std::max(
+                0.f,
+                friction_limit * friction_limit
+                    - tire_force_y_by_wheel[index]
+                        * tire_force_y_by_wheel[index]));
     }
 
     // Model equal half-shaft torque with traction control. If either wheel on a
@@ -1034,7 +1196,7 @@ VehicleState VehiclePhysics::update(
         const float applied_torque = drive_torque - brake_torque;
 
         float tire_force_x = 0.f;
-        const float tire_force_y = tire_force_y_by_wheel[index];
+        float tire_force_y = tire_force_y_by_wheel[index];
         if (wheel.in_contact) {
             const float slip_denominator =
                 std::max(std::abs(longitudinal_velocity), 1.f);
@@ -1065,6 +1227,19 @@ VehicleState VehiclePhysics::update(
                 raw_longitudinal_force,
                 -longitudinal_force_reserve[index],
                 longitudinal_force_reserve[index]);
+
+            if (in.handbrake && index >= 2) {
+                const float friction_limit =
+                    tire_friction_limit_by_wheel[index];
+                const float remaining_lateral_force = std::sqrt(std::max(
+                    0.f,
+                    friction_limit * friction_limit
+                        - tire_force_x * tire_force_x));
+                tire_force_y = std::clamp(
+                    unconstrained_tire_force_y_by_wheel[index],
+                    -remaining_lateral_force,
+                    remaining_lateral_force);
+            }
 
             const bool tire_force_saturated =
                 raw_implicit_slip != implicit_slip
@@ -1146,8 +1321,18 @@ VehicleState VehiclePhysics::update(
     const float required_static_force_y = -gravity_force_y;
     const float required_static_force = std::hypot(
         required_static_force_x, required_static_force_y);
-    const float static_friction_capacity =
-        parameters_.tire_friction * total_normal_load;
+    float static_friction_capacity = 0.f;
+    for (std::size_t index = 0; index < state_.wheels.size(); ++index) {
+        if (!state_.wheels[index].in_contact) {
+            continue;
+        }
+        static_friction_capacity += parameters_.tire_friction
+            * effective_surface_friction_multiplier(
+                parameters_,
+                ground_surface_material_by_wheel_[index],
+                ground_friction_multiplier_by_wheel_[index])
+            * state_.wheels[index].normal_load;
+    }
     if (static_hold_candidate
         && required_static_force <= static_friction_capacity + 1e-3f) {
         total_force_x = 0.f;
@@ -1270,10 +1455,11 @@ VehicleState VehiclePhysics::update(
 
     const float longitudinal_accel = total_force_x / parameters_.mass_kg
                                    + solver_lateral_speed_mps_ * solver_yaw_rate_rad_s_;
-    const float lateral_accel_body = total_force_y / parameters_.mass_kg
-                                  - body_longitudinal_speed_mps_ * solver_yaw_rate_rad_s_;
-    body_longitudinal_speed_mps_ += longitudinal_accel * fdt;
-    solver_lateral_speed_mps_ += lateral_accel_body * fdt;
+    const auto integrated_velocity = integrate_body_planar_velocity(
+        body_longitudinal_speed_mps_, solver_lateral_speed_mps_, solver_yaw_rate_rad_s_,
+        total_force_x, total_force_y, parameters_.mass_kg, dt);
+    body_longitudinal_speed_mps_ = integrated_velocity[0];
+    solver_lateral_speed_mps_ = integrated_velocity[1];
     solver_yaw_rate_rad_s_ += total_yaw_moment / parameters_.yaw_inertia_kg_m2 * fdt;
 
     if (total_brake_force > 0.f) {
@@ -1317,6 +1503,184 @@ VehicleState VehiclePhysics::update(
         const double collision_half_width =
             std::max(parameters_.front_track_m, parameters_.rear_track_m) * 0.5
             + COLLISION_BODY_SIDE_PADDING_M;
+        std::vector<std::string> tire_supported_curb_ids;
+        const auto support_height = [&](double east, double north)
+            -> std::optional<double> {
+            const simcore_host::GroundQueryRequest request{
+                {east, north, state_.position_enu.z
+                    + GROUND_PENETRATION_RECOVERY_M},
+                GROUND_QUERY_DEPTH_M + GROUND_PENETRATION_RECOVERY_M};
+            const auto hit = ground_query_->query_down(request);
+            if (!hit || !std::isfinite(hit->distance_m)
+                || hit->distance_m < 0.0
+                || hit->distance_m > request.max_distance_m
+                || !std::isfinite(hit->point_enu.up_m)
+                || !std::isfinite(hit->normal_enu.up_m)
+                || hit->normal_enu.up_m <= 0.0) {
+                return std::nullopt;
+            }
+            return hit->point_enu.up_m;
+        };
+        for (const auto& collider : collision_world_->static_colliders()) {
+            if (collider.semantic != simcore_host::StaticColliderSemantic::Curb)
+                continue;
+            const double sine = std::sin(collider.shape.heading_rad);
+            const double cosine = std::cos(collider.shape.heading_rad);
+            const std::array<double, 2> forward{sine, cosine};
+            const std::array<double, 2> right{cosine, -sine};
+            const auto local_coordinates = [&](double east, double north) {
+                const double relative_east = east
+                    - collider.shape.center_enu.east_m;
+                const double relative_north = north
+                    - collider.shape.center_enu.north_m;
+                return std::array<double, 2>{
+                    relative_east * forward[0] + relative_north * forward[1],
+                    relative_east * right[0] + relative_north * right[1]};
+            };
+            const auto start_local = local_coordinates(east_m_, north_m_);
+            const auto end_local = local_coordinates(
+                east_m_ + east_velocity * dt,
+                north_m_ + north_velocity * dt);
+            const auto body_projection = [&](double body_heading,
+                                             const std::array<double, 2>& axis) {
+                const std::array<double, 2> body_forward{
+                    std::sin(body_heading), std::cos(body_heading)};
+                const std::array<double, 2> body_right{
+                    std::cos(body_heading), -std::sin(body_heading)};
+                return collision_half_length * std::abs(
+                           body_forward[0] * axis[0]
+                           + body_forward[1] * axis[1])
+                    + collision_half_width * std::abs(
+                           body_right[0] * axis[0]
+                           + body_right[1] * axis[1]);
+            };
+            // Body projection is Lipschitz-bounded by its circumscribed radius.
+            // This padding conservatively covers orientations between the tick's
+            // start and predicted end without turning the filter into speed-only
+            // padding that could still miss a diagonal crossing.
+            const double rotation_projection_padding = std::hypot(
+                collision_half_length, collision_half_width)
+                * std::abs(static_cast<double>(solver_yaw_rate_rad_s_) * dt);
+            const double swept_body_forward_extent =
+                std::max(
+                    body_projection(heading_rad_, forward),
+                    body_projection(predicted_heading_rad, forward))
+                + rotation_projection_padding;
+            const double swept_body_right_extent =
+                std::max(
+                    body_projection(heading_rad_, right),
+                    body_projection(predicted_heading_rad, right))
+                + rotation_projection_padding;
+            const double expanded_forward_half_extent =
+                collider.shape.half_length_m + swept_body_forward_extent
+                + parameters_.tire_radius_m;
+            const double expanded_right_half_extent =
+                collider.shape.half_width_m + swept_body_right_extent
+                + parameters_.tire_radius_m;
+            const auto segment_stays_outside = [](
+                double start, double end, double half_extent) {
+                return (start < -half_extent && end < -half_extent)
+                    || (start > half_extent && end > half_extent);
+            };
+            if (segment_stays_outside(
+                    start_local[0], end_local[0], expanded_forward_half_extent)
+                || segment_stays_outside(
+                    start_local[1], end_local[1], expanded_right_half_extent)) {
+                continue;
+            }
+            const double support_interval_min = std::max(
+                -collider.shape.half_length_m,
+                std::min(start_local[0], end_local[0])
+                    - swept_body_forward_extent);
+            const double support_interval_max = std::min(
+                collider.shape.half_length_m,
+                std::max(start_local[0], end_local[0])
+                    + swept_body_forward_extent);
+            if (support_interval_min > support_interval_max) {
+                continue;
+            }
+            const double near_sample_offset = collider.shape.half_width_m
+                + parameters_.tire_radius_m;
+            const double far_sample_offset = collider.shape.half_width_m
+                + parameters_.tire_radius_m
+                    * CURB_FAR_SUPPORT_TIRE_RADIUS_MULTIPLIER;
+            const double maximum_supported_rise = parameters_.tire_radius_m
+                * MAX_SUPPORTED_CURB_RISE_TIRE_RADIUS_FRACTION;
+            const double support_height_tolerance = parameters_.tire_radius_m
+                * CURB_SUPPORT_RASTER_HEIGHT_TOLERANCE_TIRE_RADIUS_FRACTION;
+            const double collider_height = collider.shape.half_height_m * 2.0;
+            bool entire_swept_location_is_supported =
+                collider_height <= maximum_supported_rise + 1e-6;
+            const double support_interval_span =
+                support_interval_max - support_interval_min;
+            const int support_segment_count = std::max(
+                1,
+                static_cast<int>(std::ceil(
+                    support_interval_span / parameters_.tire_radius_m)));
+            for (int sample = 0;
+                 entire_swept_location_is_supported
+                    && sample <= support_segment_count;
+                 ++sample) {
+                const double alpha = static_cast<double>(sample)
+                    / support_segment_count;
+                const double support_local_forward = support_interval_min
+                    + support_interval_span * alpha;
+                const double support_base_east =
+                    collider.shape.center_enu.east_m
+                    + forward[0] * support_local_forward;
+                const double support_base_north =
+                    collider.shape.center_enu.north_m
+                    + forward[1] * support_local_forward;
+                const auto near_negative_side = support_height(
+                    support_base_east - right[0] * near_sample_offset,
+                    support_base_north - right[1] * near_sample_offset);
+                const auto near_positive_side = support_height(
+                    support_base_east + right[0] * near_sample_offset,
+                    support_base_north + right[1] * near_sample_offset);
+                const auto far_negative_side = support_height(
+                    support_base_east - right[0] * far_sample_offset,
+                    support_base_north - right[1] * far_sample_offset);
+                const auto far_positive_side = support_height(
+                    support_base_east + right[0] * far_sample_offset,
+                    support_base_north + right[1] * far_sample_offset);
+                if (!near_negative_side || !near_positive_side
+                    || !far_negative_side || !far_positive_side) {
+                    entire_swept_location_is_supported = false;
+                    break;
+                }
+                const double near_support_delta =
+                    *near_positive_side - *near_negative_side;
+                const double far_support_delta =
+                    *far_positive_side - *far_negative_side;
+                const double support_rise = std::abs(near_support_delta);
+                const bool far_support_rises_on_same_side =
+                    (near_support_delta > 0.0 && far_support_delta > 0.0)
+                    || (near_support_delta < 0.0 && far_support_delta < 0.0);
+                entire_swept_location_is_supported =
+                    support_rise >= CURB_SUPPORT_MIN_RISE_M
+                    // A 50 cm heightfield can undershoot the road-side near
+                    // sample by a few centimetres at a cell diagonal. The
+                    // collider and far plateau still define the true step, so
+                    // allow only the same bounded raster tolerance already
+                    // required for their height agreement.
+                    && support_rise <= maximum_supported_rise
+                        + support_height_tolerance + 1e-6
+                    && far_support_rises_on_same_side
+                    && std::abs(collider_height - std::abs(far_support_delta))
+                        <= support_height_tolerance;
+            }
+            if (entire_swept_location_is_supported) {
+                // The curb is only removed from the planar body prism solve.
+                // The <=R-spaced along samples cover the whole swept body
+                // footprint. Each near pair verifies the immediate step; the
+                // far pair must repeat that rise in the same direction and at
+                // the collider's authored height. Comparing height deltas is
+                // invariant to a grade running along the curb.
+                // Wheel rays independently raise each suspension corner; no
+                // z/yaw pose is injected here.
+                tire_supported_curb_ids.push_back(collider.collider_id);
+            }
+        }
         const double body_ground_height =
             state_.position_enu.z - parameters_.cg_height_m;
         const double surface_vertical_rate = ground_basis.normal[2] > 1e-9
@@ -1348,8 +1712,66 @@ VehicleState VehiclePhysics::update(
             parameters_.mass_kg,
             parameters_.yaw_inertia_kg_m2,
         };
-        const auto collision_result = collision_world_->integrate(
-            std::move(collision_body), dt, std::move(dynamic_proxies));
+        const auto collision_result = collision_world_
+            ->integrate_with_tire_supported_curbs(
+                std::move(collision_body), dt, std::move(dynamic_proxies),
+                std::move(tire_supported_curb_ids));
+        accepted_resolved_dynamic_proxies =
+            collision_result.resolved_dynamic_proxies;
+        accepted_collision_contacts = collision_result.contacts;
+        const auto strongest_contact = std::max_element(
+            collision_result.contacts.begin(),
+            collision_result.contacts.end(),
+            [](const auto& lhs, const auto& rhs) {
+                return lhs.accumulated_normal_impulse_n_s
+                    < rhs.accumulated_normal_impulse_n_s;
+            });
+        if (strongest_contact != collision_result.contacts.end()
+            && std::isfinite(
+                strongest_contact->accumulated_normal_impulse_n_s)
+            && strongest_contact->accumulated_normal_impulse_n_s
+                > DAMAGE_IMPULSE_THRESHOLD_N_S) {
+            const double impulse =
+                strongest_contact->accumulated_normal_impulse_n_s;
+            state_.last_impact_impulse_n_s = static_cast<float>(impulse);
+            state_.damage_percent = std::clamp(
+                state_.damage_percent + static_cast<float>(
+                    (impulse - DAMAGE_IMPULSE_THRESHOLD_N_S)
+                    / DAMAGE_IMPULSE_PER_PERCENT_N_S),
+                0.f,
+                100.f);
+            if (state_.collision_event_sequence
+                != std::numeric_limits<std::uint32_t>::max()) {
+                ++state_.collision_event_sequence;
+            }
+
+            const double relative_east =
+                strongest_contact->contact_point_enu.east_m
+                - collision_result.body.shape.center_enu.east_m;
+            const double relative_north =
+                strongest_contact->contact_point_enu.north_m
+                - collision_result.body.shape.center_enu.north_m;
+            const double heading_sine = std::sin(
+                collision_result.body.shape.heading_rad);
+            const double heading_cosine = std::cos(
+                collision_result.body.shape.heading_rad);
+            const double local_forward =
+                relative_east * heading_sine
+                + relative_north * heading_cosine;
+            const double local_right =
+                relative_east * heading_cosine
+                - relative_north * heading_sine;
+            if (std::abs(local_forward) / collision_half_length
+                >= std::abs(local_right) / collision_half_width) {
+                state_.damage_zone = local_forward >= 0.0
+                    ? VehicleDamageZone::Front
+                    : VehicleDamageZone::Rear;
+            } else {
+                state_.damage_zone = local_right >= 0.0
+                    ? VehicleDamageZone::Right
+                    : VehicleDamageZone::Left;
+            }
+        }
         east_m_ = collision_result.body.shape.center_enu.east_m;
         north_m_ = collision_result.body.shape.center_enu.north_m;
         heading_rad_ = collision_result.body.shape.heading_rad;
@@ -1422,7 +1844,7 @@ VehicleState VehiclePhysics::update(
     state_.position_enu.y = north_m_;
     // Refresh the published hit point and normal from the post-integration
     // pose. Spring/damper history advances only in the pre-force sample above.
-    resolve_non_penetrating_wheel_contacts(false);
+    resolve_non_penetrating_ground_contacts(false, &tick_hard_stop_impulses);
     state_.linear_velocity_body = {
         body_longitudinal_speed_mps_,
         simcore_host::BodyFrameAdapter::solver_lateral_to_canonical(
@@ -1491,7 +1913,7 @@ VehicleState VehiclePhysics::update(
     // Attitude changes move every suspension mount vertically. Re-evaluate the
     // final pose so the state published to Unreal cannot penetrate between the
     // earlier position solve and this attitude solve.
-    resolve_non_penetrating_wheel_contacts(false);
+    resolve_non_penetrating_ground_contacts(false, &tick_hard_stop_impulses);
 
     const simcore_host::GroundQueryRequest centre_coverage_request{
         {east_m_, north_m_, state_.position_enu.z
@@ -1506,14 +1928,25 @@ VehicleState VehiclePhysics::update(
             <= centre_coverage_request.max_distance_m
         && std::isfinite(centre_coverage_hit->normal_enu.up_m)
         && centre_coverage_hit->normal_enu.up_m > 0.0;
-    if (!centre_has_ground_coverage || ground_query_hit_count_ == 0) {
-        // One to three valid rays are physical partial support, not a map wall.
-        // Use a separate centre coverage query for the fail-closed MapPackage
-        // policy, so the first wheel ray leaving the bake is no longer an
-        // invisible wall. Restore the previous supported pose only after the
-        // vehicle centre (or all four rays) loses authored ground. Fitting the
-        // exporter to the Ground Actor moves this terminal boundary to the
-        // actual Landscape extent.
+    const bool full_front_edge_lost =
+        !ground_surface_hit_by_wheel_[0] && !ground_surface_hit_by_wheel_[1];
+    const bool full_rear_edge_lost =
+        !ground_surface_hit_by_wheel_[2] && !ground_surface_hit_by_wheel_[3];
+    const bool full_left_edge_lost =
+        !ground_surface_hit_by_wheel_[0] && !ground_surface_hit_by_wheel_[2];
+    const bool full_right_edge_lost =
+        !ground_surface_hit_by_wheel_[1] && !ground_surface_hit_by_wheel_[3];
+    const bool terminal_footprint_coverage_lost = full_front_edge_lost
+        || full_rear_edge_lost || full_left_edge_lost || full_right_edge_lost;
+    if (!centre_has_ground_coverage || ground_query_hit_count_ == 0
+        || terminal_footprint_coverage_lost) {
+        // A single missing corner remains physical three-wheel partial support,
+        // and diagonally opposed two-wheel coverage remains solvable. Once a
+        // complete axle or side leaves authored terrain, however, the remaining
+        // two springs would tip this non-airborne reduced model through the map
+        // before the centre query reaches the boundary. Restore the previous
+        // supported pose instead. Fitting the exporter to the Ground Actor moves
+        // this terminal safety edge to the actual Landscape extent.
         state_ = step_start_state;
         state_.timestamp = update_timestamp;
         east_m_ = step_start_east_m;
@@ -1538,7 +1971,7 @@ VehicleState VehiclePhysics::update(
         suspension_base_force_n_ = step_start_suspension_force;
         suspension_had_contact_ = step_start_suspension_contact;
 
-        resolve_non_penetrating_wheel_contacts(false);
+        resolve_non_penetrating_ground_contacts(false);
 
         state_.speed = 0.f;
         state_.accel = 0.f;
@@ -1552,15 +1985,20 @@ VehicleState VehiclePhysics::update(
                 solver_steering_angle);
         for (std::size_t index = 0; index < state_.wheels.size(); ++index) {
             auto& wheel = state_.wheels[index];
-            wheel.steering_angle = index < 2
-                ? state_.steering_angle
-                : 0.f;
+            // A coverage stop arrests motion, not the steering linkage. Keep
+            // the same Ackermann angles as the normal integration path.
+            wheel.steering_angle =
+                simcore_host::BodyFrameAdapter::solver_steering_to_canonical(
+                    solver_wheel_steering_angles[index]);
             wheel.angular_speed = 0.f;
             wheel.longitudinal_slip = 0.f;
             wheel.slip_angle = 0.f;
             wheel.longitudinal_force = 0.f;
             wheel.lateral_force = 0.f;
         }
+        // The attempted motion was discarded. Its reactions must not appear
+        // as support supplied by this published fail-closed state.
+        wheel_contact_support_ = {};
         return state_;
     }
 
@@ -1584,6 +2022,24 @@ VehicleState VehiclePhysics::update(
         state_.fuel = std::max(
             0.f, state_.fuel - in.throttle * parameters_.fuel_rate_percent_s * fdt);
 
+    for (std::size_t index = 0; index < state_.wheels.size(); ++index) {
+        wheel_contact_support_[index].hard_stop_impulse_n_s =
+            tick_hard_stop_impulses[index];
+        if (state_.wheels[index].in_contact && compression_stop_active_[index]) {
+            // The producing dt is essential if callers change their step
+            // duration. Internal contact re-queries use dt=0 and cannot be
+            // used to convert an impulse into a normal force.
+            const double reaction_force_n = tick_hard_stop_impulses[index] / dt;
+            if (std::isfinite(reaction_force_n)
+                && reaction_force_n <= std::numeric_limits<float>::max()) {
+                previous_hard_stop_normal_force_n_[index] =
+                    static_cast<float>(reaction_force_n);
+            }
+        }
+    }
+    last_resolved_dynamic_proxies_ =
+        std::move(accepted_resolved_dynamic_proxies);
+    last_collision_contacts_ = std::move(accepted_collision_contacts);
     return state_;
 }
 
@@ -1591,18 +2047,72 @@ VehicleState VehiclePhysics::get_state() const {
     return state_;
 }
 
-bool VehiclePhysics::resolve_non_penetrating_wheel_contacts(
-    bool update_suspension)
+std::array<WheelContactSupportDiagnostics, 4>
+VehiclePhysics::get_wheel_contact_support_diagnostics() const
 {
-    // A correction can move a wheel mount onto a different baked triangle.
-    // Re-query and solve a bounded number of times in the same simulation tick
-    // so triangle edges cannot leave a one-frame sink/jitter artifact. Only the
-    // first pass may advance spring history.
+    return wheel_contact_support_;
+}
+
+bool VehiclePhysics::resolve_non_penetrating_ground_contacts(
+    bool update_suspension,
+    std::array<double, 4>* tick_hard_stop_impulses)
+{
+    // A wheel or chassis-shell correction can move a sample onto a different
+    // baked triangle. Re-query both contact families in the same tick so a
+    // roof/side impact cannot leave a one-frame terrain penetration.
     constexpr int maximum_surface_requery_passes = 4;
     bool any_correction = false;
     for (int pass = 0; pass < maximum_surface_requery_passes; ++pass) {
-        const bool corrected = update_wheel_contacts(
-            0.f, update_suspension && pass == 0, true);
+        const bool wheel_corrected = update_wheel_contacts(
+            0.f, update_suspension && pass == 0, true, false,
+            tick_hard_stop_impulses);
+
+        const double collision_half_length =
+            parameters_.wheelbase_m * 0.5 + COLLISION_BODY_OVERHANG_M;
+        const double collision_half_width =
+            std::max(parameters_.front_track_m, parameters_.rear_track_m) * 0.5
+            + COLLISION_BODY_SIDE_PADDING_M;
+        const GroundBasis local_ground_basis = make_ground_basis(
+            heading_rad_, ground_pitch_rad_, ground_roll_rad_);
+        const double normal_up = std::max(
+            local_ground_basis.normal[2], 1e-6);
+        const auto chassis_result =
+            simcore_host::resolve_chassis_ground_contact(
+                {
+                    east_m_,
+                    north_m_,
+                    state_.position_enu.z,
+                    heading_rad_,
+                    pitch_rad_,
+                    roll_rad_,
+                    vertical_speed_mps_ / normal_up,
+                    pitch_rate_rad_s_,
+                    roll_rate_rad_s_,
+                },
+                {
+                    CHASSIS_SHELL_CENTER_UP_OFFSET_M,
+                    collision_half_length,
+                    collision_half_width,
+                    CHASSIS_SHELL_HALF_HEIGHT_M,
+                    parameters_.mass_kg,
+                    parameters_.roll_inertia_kg_m2,
+                    parameters_.pitch_inertia_kg_m2,
+                    parameters_.yaw_inertia_kg_m2,
+                },
+                *ground_query_);
+        state_.position_enu.z = chassis_result.pose.up_m;
+        pitch_rad_ = static_cast<float>(chassis_result.pose.pitch_rad);
+        roll_rad_ = static_cast<float>(chassis_result.pose.roll_rad);
+        pitch_rate_rad_s_ = static_cast<float>(
+            chassis_result.pose.pitch_rate_rad_s);
+        roll_rate_rad_s_ = static_cast<float>(
+            chassis_result.pose.roll_rate_rad_s);
+        vertical_speed_mps_ = static_cast<float>(
+            chassis_result.pose.root_up_velocity_mps * normal_up);
+        state_.pitch = static_cast<float>(pitch_rad_ * RAD2DEG);
+        state_.roll = static_cast<float>(roll_rad_ * RAD2DEG);
+
+        const bool corrected = wheel_corrected || chassis_result.corrected;
         any_correction = any_correction || corrected;
         if (!corrected) {
             return any_correction;
@@ -1617,7 +2127,8 @@ bool VehiclePhysics::resolve_non_penetrating_wheel_contacts(
 
 bool VehiclePhysics::update_wheel_contacts(
     float dt_seconds, bool update_suspension, bool enforce_non_penetration,
-    bool update_attitude_target)
+    bool update_attitude_target,
+    std::array<double, 4>* tick_hard_stop_impulses)
 {
     const double cg_to_rear_axle_m = parameters_.wheelbase_m
         * parameters_.front_static_load_fraction;
@@ -1705,6 +2216,15 @@ bool VehiclePhysics::update_wheel_contacts(
         const bool valid_surface_hit = finite_hit
             && normal_length > 1e-9
             && normal_up > 0.0;
+        ground_surface_hit_by_wheel_[index] = valid_surface_hit;
+        ground_surface_material_by_wheel_[index] = valid_surface_hit
+            ? hit->surface_material_id
+            : simcore_host::GroundSurfaceMaterialId::Default;
+        ground_friction_multiplier_by_wheel_[index] = valid_surface_hit
+            && std::isfinite(hit->friction_multiplier)
+            && hit->friction_multiplier > 0.0
+            ? static_cast<float>(hit->friction_multiplier)
+            : 1.f;
         const double normal_east = valid_surface_hit
             ? hit->normal_enu.east_m / normal_length : 0.0;
         const double normal_north = valid_surface_hit
@@ -1730,6 +2250,14 @@ bool VehiclePhysics::update_wheel_contacts(
             && body_up_normal_dot > 1e-6
             && std::isfinite(measured_suspension_length)
             && measured_suspension_length <= maximum_suspension_length;
+        const double minimum_suspension_length =
+            parameters_.suspension.rest_length_m
+            - parameters_.suspension.max_compression_m;
+        const double compression_stop_clearance = mount_normal_clearance
+            - parameters_.tire_radius_m
+            - minimum_suspension_length * body_up_normal_dot;
+        compression_stop_active_[index] = suspension_contact
+            && compression_stop_clearance <= HARD_STOP_ACTIVATION_SLOP_M;
 
         if (valid_surface_hit) {
             normal_sum.east_m += normal_east;
@@ -2058,7 +2586,6 @@ bool VehiclePhysics::update_wheel_contacts(
             // order-dependent roll/pitch rate into a symmetric four-wheel hit.
             constexpr int velocity_constraint_iterations = 32;
             constexpr double impulse_delta_tolerance = 1e-8;
-            constexpr double constraint_activation_slop_m = 1e-4;
             struct VelocityConstraint {
                 bool active = false;
                 double jacobian_z = 0.0;
@@ -2098,7 +2625,7 @@ bool VehiclePhysics::update_wheel_contacts(
                         * (state_.position_enu.z + stop_offset[2]
                            - constraint.point.up_m)
                     - parameters_.tire_radius_m;
-                if (clearance > constraint_activation_slop_m) {
+                if (clearance > HARD_STOP_ACTIVATION_SLOP_M) {
                     // A valid ray is not necessarily a compressed hard stop.
                     // Do not lock suspension travel at unloaded corners.
                     continue;
@@ -2175,6 +2702,16 @@ bool VehiclePhysics::update_wheel_contacts(
                 }
                 if (maximum_impulse_delta <= impulse_delta_tolerance) {
                     break;
+                }
+            }
+            if (tick_hard_stop_impulses) {
+                // Each projection has already changed velocity. Accumulate its
+                // final unilateral reaction once, including both the heave and
+                // attitude solves and any surface re-query passes this tick.
+                for (std::size_t index = 0;
+                     index < accumulated_constraint_impulses.size(); ++index) {
+                    (*tick_hard_stop_impulses)[index] +=
+                        accumulated_constraint_impulses[index];
                 }
             }
             vertical_speed_mps_ = static_cast<float>(

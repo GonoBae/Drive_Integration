@@ -361,6 +361,73 @@ void test_approaching_kinematic_proxy_pushes_ego_with_relative_velocity()
         "moving infinite-mass NPC must finish without Ego penetration");
 }
 
+void test_finite_npc_receives_equal_opposite_normal_and_tangent_impulse()
+{
+    auto npc = make_npc_proxy("finite-npc", {0.0, 0.0});
+    npc.material = {0.8, 0.05};
+    npc.mass_kg = 1500.0;
+    npc.yaw_inertia_kg_m2 = 2500.0;
+    npc.maximum_linear_speed_mps = 100.0;
+    const auto body = make_body({-3.0, 0.0}, {30.0, 5.0});
+    const double initial_east_momentum =
+        body.mass_kg * body.linear_velocity_enu_mps.east_m;
+    const double initial_north_momentum =
+        body.mass_kg * body.linear_velocity_enu_mps.north_m;
+
+    const auto result = simcore_host::CollisionWorld{}.integrate(
+        body, 0.1, {npc});
+    require(result.contacts.size() == 1
+                && result.contacts[0].collider_id == "finite-npc"
+                && result.resolved_dynamic_proxies.size() == 1,
+            "finite NPC contact must return one sorted resolved proxy");
+    const auto& resolved = result.resolved_dynamic_proxies[0];
+    require(resolved.linear_velocity_enu_mps.east_m > 0.0
+                && resolved.linear_velocity_enu_mps.north_m > 0.0
+                && result.body.linear_velocity_enu_mps.east_m < 30.0
+                && result.body.linear_velocity_enu_mps.north_m < 5.0,
+            "finite NPC must receive both normal and friction impulse while Ego slows");
+    require(near(
+                result.body.mass_kg * result.body.linear_velocity_enu_mps.east_m
+                    + resolved.mass_kg * resolved.linear_velocity_enu_mps.east_m,
+                initial_east_momentum, 1e-6)
+                && near(
+                    result.body.mass_kg * result.body.linear_velocity_enu_mps.north_m
+                        + resolved.mass_kg * resolved.linear_velocity_enu_mps.north_m,
+                    initial_north_momentum, 1e-6),
+            "uncapped finite pair impulses must conserve planar linear momentum");
+    require_not_overlapping(
+        result.body.shape,
+        std::get<simcore_host::ObbPrism>(resolved.shape),
+        "finite NPC and Ego must finish without overlap");
+}
+
+void test_finite_pedestrian_is_pushed_with_bounded_speed()
+{
+    auto pedestrian = make_pedestrian_proxy(
+        "finite-pedestrian", {0.0, 0.0});
+    pedestrian.material = {0.4, 0.0};
+    pedestrian.mass_kg = 80.0;
+    pedestrian.maximum_linear_speed_mps = 15.0;
+    const auto result = simcore_host::CollisionWorld{}.integrate(
+        make_body({-3.0, 0.0}, {40.0, 0.0}), 0.1, {pedestrian});
+
+    require(result.contacts.size() == 1
+                && result.resolved_dynamic_proxies.size() == 1,
+            "finite pedestrian collision must return its authoritative response");
+    const auto& resolved = result.resolved_dynamic_proxies[0];
+    const double pedestrian_speed = std::hypot(
+        resolved.linear_velocity_enu_mps.east_m,
+        resolved.linear_velocity_enu_mps.north_m);
+    require(pedestrian_speed > 0.0 && pedestrian_speed <= 15.0 + 1e-9
+                && result.body.linear_velocity_enu_mps.east_m < 40.0,
+            "light pedestrian must be pushed while its configured speed stays bounded");
+    require(!simcore_host::intersect_obb_vertical_capsule(
+                 result.body.shape,
+                 std::get<simcore_host::VerticalCapsule>(resolved.shape))
+                 .has_value(),
+            "finite pedestrian and Ego must finish without overlap");
+}
+
 void test_rotating_npc_proxy_is_advanced_during_microsteps()
 {
     auto rotating = make_npc_proxy(
@@ -377,6 +444,51 @@ void test_rotating_npc_proxy_is_advanced_during_microsteps()
     require(!result.contacts.empty()
             && result.contacts[0].collider_id == "npc-rotating",
             "angular proxy motion must participate in microstep collision detection");
+}
+
+void test_excess_finite_npc_rotation_does_not_truncate_unrelated_proxy_motion()
+{
+    constexpr double dt_seconds = 1.0 / 60.0;
+    constexpr double pedestrian_speed_mps = 1.35;
+    constexpr double maximum_finite_heading_rate_rad_s =
+        4.0 * std::numbers::pi_v<double>;
+
+    auto discontinuous_npc = make_npc_proxy(
+        "a-discontinuous-npc", {100.0, 100.0}, {}, 0.0, 164.0);
+    discontinuous_npc.mass_kg = 1500.0;
+    discontinuous_npc.yaw_inertia_kg_m2 = 2600.0;
+    discontinuous_npc.maximum_linear_speed_mps = 30.0;
+
+    auto walking_pedestrian = make_pedestrian_proxy(
+        "b-walking-pedestrian", {50.0, 50.0},
+        {pedestrian_speed_mps, 0.0});
+    walking_pedestrian.mass_kg = 80.0;
+    walking_pedestrian.maximum_linear_speed_mps = 15.0;
+
+    const auto result = simcore_host::CollisionWorld{}.integrate(
+        make_body({0.0, 0.0}, {}), dt_seconds,
+        {discontinuous_npc, walking_pedestrian});
+
+    require(!result.motion_clamped,
+            "one finite NPC heading discontinuity must not truncate the shared tick");
+    require(result.resolved_dynamic_proxies.size() == 2,
+            "both unrelated finite proxies must retain resolved states");
+    const auto& resolved_npc = result.resolved_dynamic_proxies[0];
+    const auto& resolved_pedestrian = result.resolved_dynamic_proxies[1];
+    require(resolved_npc.proxy_id == "a-discontinuous-npc"
+                && near(resolved_npc.heading_rate_rad_s,
+                        maximum_finite_heading_rate_rad_s),
+            "finite NPC input heading rate must use the existing solver bound");
+    const auto pedestrian_center = std::get<simcore_host::VerticalCapsule>(
+        resolved_pedestrian.shape).center_enu;
+    require(resolved_pedestrian.proxy_id == "b-walking-pedestrian"
+                && near(pedestrian_center.east_m,
+                        50.0 + pedestrian_speed_mps * dt_seconds)
+                && near(pedestrian_center.north_m, 50.0)
+                && near(
+                    resolved_pedestrian.linear_velocity_enu_mps.east_m,
+                    pedestrian_speed_mps),
+            "unrelated pedestrian must receive its complete nominal tick without speed pollution");
 }
 
 void test_dynamic_proxy_input_order_is_deterministic()
@@ -400,6 +512,25 @@ void test_dynamic_proxy_input_order_is_deterministic()
                 == second.body.linear_velocity_enu_mps.north_m
             && first.contacts.size() == second.contacts.size(),
             "dynamic proxy input order must not affect the solved state");
+    require(first.resolved_dynamic_proxies.size() == 2
+                && second.resolved_dynamic_proxies.size() == 2
+                && first.resolved_dynamic_proxies[0].proxy_id == "a-npc"
+                && first.resolved_dynamic_proxies[1].proxy_id == "b-ped"
+                && second.resolved_dynamic_proxies[0].proxy_id == "a-npc"
+                && second.resolved_dynamic_proxies[1].proxy_id == "b-ped",
+            "resolved proxy states must use stable proxy-ID order");
+    for (std::size_t index = 0;
+         index < first.resolved_dynamic_proxies.size(); ++index) {
+        const auto first_center = std::visit(
+            [](const auto& shape) { return shape.center_enu; },
+            first.resolved_dynamic_proxies[index].shape);
+        const auto second_center = std::visit(
+            [](const auto& shape) { return shape.center_enu; },
+            second.resolved_dynamic_proxies[index].shape);
+        require(first_center.east_m == second_center.east_m
+                    && first_center.north_m == second_center.north_m,
+                "resolved proxy motion must be independent of caller input order");
+    }
     for (std::size_t index = 0; index < first.contacts.size(); ++index) {
         require(first.contacts[index].collider_id
                     == second.contacts[index].collider_id,
@@ -547,6 +678,83 @@ void test_dynamic_proxy_validation_fails_closed()
     require_rejected(
         {invalid_capsule},
         "non-positive capsule radius must be rejected");
+
+    auto finite_without_bound = make_npc_proxy("finite-no-bound", {0.0, 0.0});
+    finite_without_bound.mass_kg = 1500.0;
+    finite_without_bound.yaw_inertia_kg_m2 = 2500.0;
+    require_rejected(
+        {finite_without_bound},
+        "finite proxy without a positive speed bound must be rejected");
+
+    auto finite_obb_without_inertia = make_npc_proxy(
+        "finite-no-inertia", {0.0, 0.0});
+    finite_obb_without_inertia.mass_kg = 1500.0;
+    finite_obb_without_inertia.maximum_linear_speed_mps = 30.0;
+    require_rejected(
+        {finite_obb_without_inertia},
+        "finite OBB proxy without yaw inertia must be rejected");
+}
+
+void test_tire_supported_bypass_is_restricted_to_curb_semantics()
+{
+    auto curb = make_collider("curb", {0.0, 2.0}, 0.0, 0.1, 2.0);
+    curb.semantic = simcore_host::StaticColliderSemantic::Curb;
+    auto wall = make_collider("wall", {0.0, 3.0}, 0.0, 0.1, 2.0);
+    auto barrier = make_collider("barrier", {0.0, 3.0}, 0.0, 0.1, 2.0);
+    barrier.semantic = simcore_host::StaticColliderSemantic::Barrier;
+    const simcore_host::CollisionWorld curb_only_world({curb});
+    const auto body = make_body({0.0, 0.0}, {0.0, 20.0});
+    const auto ordinary = curb_only_world.integrate(body, 0.1);
+    require(ordinary.contacts.size() == 1
+                && ordinary.contacts[0].collider_id == "curb",
+            "ordinary integration must physically block a Curb");
+    const auto empty_bypass = curb_only_world.integrate_with_tire_supported_curbs(
+        body, 0.1, {}, {});
+    require(empty_bypass.contacts.size() == 1
+                && empty_bypass.contacts[0].collider_id == "curb",
+            "an empty tire-supported set must still block a Curb");
+    const auto bypassed = curb_only_world.integrate_with_tire_supported_curbs(
+        body, 0.1, {}, {"curb"});
+    require(bypassed.contacts.empty(),
+            "an explicitly tire-supported curb may be omitted for one step");
+
+    const simcore_host::CollisionWorld wall_world({curb, wall});
+    const auto wall_preserved = wall_world.integrate_with_tire_supported_curbs(
+        body, 0.1, {}, {"curb"});
+    require(std::any_of(
+                wall_preserved.contacts.begin(), wall_preserved.contacts.end(),
+                [](const auto& contact) { return contact.collider_id == "wall"; }),
+            "bypassing a Curb must preserve a same-tick Wall contact");
+    const simcore_host::CollisionWorld barrier_world({curb, barrier});
+    const auto barrier_preserved =
+        barrier_world.integrate_with_tire_supported_curbs(
+            body, 0.1, {}, {"curb"});
+    require(std::any_of(
+                barrier_preserved.contacts.begin(),
+                barrier_preserved.contacts.end(),
+                [](const auto& contact) {
+                    return contact.collider_id == "barrier";
+                }),
+            "bypassing a Curb must preserve a same-tick Barrier contact");
+
+    const simcore_host::CollisionWorld validation_world({curb, wall, barrier});
+    const auto require_id_rejected = [&](const std::string& id,
+                                         const char* message) {
+        bool rejected = false;
+        try {
+            (void)validation_world.integrate_with_tire_supported_curbs(
+                body, 0.1, {}, {id});
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        require(rejected, message);
+    };
+    require_id_rejected(
+        "wall", "the tire-supported API must reject Wall IDs");
+    require_id_rejected(
+        "barrier", "the tire-supported API must reject Barrier IDs");
+    require_id_rejected(
+        "unknown", "the tire-supported API must reject unknown IDs");
 }
 
 } // namespace
@@ -565,12 +773,16 @@ int main()
         test_stationary_npc_obb_prevents_ego_penetration();
         test_stationary_pedestrian_capsule_prevents_ego_penetration();
         test_approaching_kinematic_proxy_pushes_ego_with_relative_velocity();
+        test_finite_npc_receives_equal_opposite_normal_and_tangent_impulse();
+        test_finite_pedestrian_is_pushed_with_bounded_speed();
         test_rotating_npc_proxy_is_advanced_during_microsteps();
+        test_excess_finite_npc_rotation_does_not_truncate_unrelated_proxy_motion();
         test_dynamic_proxy_input_order_is_deterministic();
         test_uniform_grid_matches_brute_force_and_reduces_candidates();
         test_large_static_and_dynamic_colliders_use_safe_fallback();
         test_grid_boundary_contact_and_duplicate_candidate_removal();
         test_dynamic_proxy_validation_fails_closed();
+        test_tire_supported_bypass_is_restricted_to_curb_semantics();
         std::cout << "collision_world_tests: all tests passed\n";
         return 0;
     } catch (const std::exception& error) {

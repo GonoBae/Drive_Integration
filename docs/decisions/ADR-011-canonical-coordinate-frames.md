@@ -4,7 +4,7 @@
 
 - 결정: 채택
 - 결정일: 2026-08-19
-- 구현 상태: schema v2 scalar/vector 부호와 C++·Unreal 경계 소스 및 Windows UE 5.6 Editor build 완료, 실제 PIE 좌표 시각·Cesium/quaternion·센서 검증은 후속
+- 구현 상태: schema v2 scalar/vector 부호, C++ `GeoTransformAdapter`, Unreal polar/axial·quaternion 경계와 양방향 `Hello` gate 적용. UE 5.6 headless GeoTransform Automation 1/1 `Success`; 실제 PIE 좌표 시각·로컬 원점 metadata·센서 frame 검증은 후속; Cesium geodetic 통합은 ADR-013에 따라 Future
 - 적용 범위: 현재 C++ SimCore·공통 Protobuf·Unreal, 향후 Python AutonomyServer·MapPackage·SensorRig·Recorder
 
 ## 배경
@@ -70,26 +70,61 @@ yaw_rate = omega_body_z
 
 ### 3. Unreal 경계 변환
 
-`base_link`의 polar vector를 Unreal Actor 로컬 좌표로 표현할 때 축 변환은 다음과 같다.
+현재 prototype Unreal world는 `X=North, Y=East, Z=Up`이고 map origin에 해당하는
+presentation offset `o_ue_cm`를 가진다. `map_enu` polar vector를 Unreal world에
+표현하는 basis는 다음과 같이 하나로 고정한다.
 
 ```text
-position_or_linear_vector_ue_cm = 100 * (x_flu, -y_flu, z_flu)
+A = [0 1 0; 1 0 0; 0 0 1], det(A) = -1
+position_ue_cm = 100 A position_enu_m + o_ue_cm
+velocity_ue_cmps = 100 A velocity_enu_mps
+acceleration_ue_cmps2 = 100 A acceleration_enu_mps2
+omega_ue_radps = det(A) A omega_enu_radps = -A omega_enu_radps
 ```
 
-방향은 성분별 quaternion 부호를 추측하지 않고 basis matrix `B=diag(1,-1,1)`를 이용해 `R_ue = B * R_flu * B^-1`로 변환한 뒤 Unreal quaternion을 만든다. angular velocity는 axial vector이므로 polar vector와 같은 방식으로 처리하지 않으며, 같은 basis에서 `(wx, wy, wz)_ue = (-wx, wy, -wz)_flu`가 된다.
+위치는 offset을 포함하지만 displacement·direction·속도·가속도는 포함하지 않는다.
+각속도는 axial vector이므로 reflection인 `A`를 polar vector처럼 적용하지 않는다.
+역변환은 `A^-1=A`와 동일한 단위 역변환을 사용한다.
 
-ENU↔Unreal world 변환은 Cesium Georeference와 원점까지 포함하므로 `GeoTransformAdapter`가 전담한다. 코드 곳곳에서 Y 부호나 meter↔centimeter를 개별 보정하지 않는다.
+`base_link` FLU에서 Unreal Actor FRU 로컬 좌표로 가는 polar basis는
+`B=diag(1,-1,1)`, `det(B)=-1`이다. 따라서 local polar vector는
+`(x,y,z)_actor=(x,-y,z)_flu`, axial angular velocity는
+`(wx,wy,wz)_actor=(-wx,wy,-wz)_flu`다.
+
+schema-v2 Euler 자세를 proper RH rotation으로 나타낼 때 quaternion은 scalar-last
+`(x,y,z,w)`인 `R_map_enu_from_base_link`이며 다음 식으로 만든다.
+
+```text
+enu_yaw_ccw = pi/2 - heading_clockwise
+R_map_enu_from_base_link = Rz(enu_yaw_ccw) Ry(-pitch_nose_up) Rx(roll_left_up)
+R_unreal_world_from_actor = A R_map_enu_from_base_link B^-1
+```
+
+두 reflection이 상쇄되므로 마지막 행렬은 proper rotation이다. quaternion 성분 부호를
+개별 추측하지 않고 행렬 basis change 뒤 quaternion을 생성하며 `q`와 `-q`는 같은
+자세로 비교한다. wire payload는 계속 기존 heading/pitch/roll과 vector 필드를 사용하고
+quaternion을 새 필드로 추가하지 않는다.
+
+현 단계의 `GeoTransformAdapter`는 prototype local map origin과 위 basis/단위를
+전담한다. 이후 Cesium Georeference가 들어와도 geodetic origin 계산만 adapter 내부에
+추가하고 polar/axial·quaternion 계약은 바꾸지 않는다. 코드 곳곳에서 축 교환, Y 부호,
+meter↔centimeter를 개별 보정하지 않는다.
 
 ## 현재 구현과 남은 이행 작업
+
+2026-08-31 [ADR-013](./ADR-013-small-virtual-city-course.md)에 따라 R1은 작은 가상
+도심으로 전환됐다. 이 ADR의 FLU·ENU·polar/axial·quaternion 계약은 유지하지만
+Cesium/geodetic 통합은 Future로 분리한다. R1 잔여 좌표 gate는 로컬 코스 원점 metadata,
+SensorRig frame과 실제 PIE 표시이며, 실제 지도 정렬을 기다리지 않는다.
 
 | ID | 상태 | 작업 | 목표 게이트 |
 |---|---|---|---|
 | COORD-001 | 완료 | 공개 body 선·각속도와 wheel lateral 값의 FLU/Y-left 계약 및 C++ 회귀 유지 | D7 적용·검증 |
 | COORD-002 | 완료 | `yaw_rate`를 좌회전 양수 true FLU body-Z로 정리하고 compound 자세의 navigation Euler yaw 복원을 분리 | schema v2·C++ 회귀 통과 |
-| COORD-003 | 소스 적용 | `steering_angle`과 `ControlCommand.steering`을 좌조향 양수로 통일하고 Unreal 입력에서 한 번만 변환 | C++·Proto 통과, Windows UE 검증 대기 |
-| COORD-004 | 부분 완료 | R1 WebSocket의 C++·Unreal v2 exact version 검사로 구 계약 차단; `Hello` handshake는 후속 | packet gate 완료, application handshake D9 |
-| COORD-005 | 부분 완료 | C++ `BodyFrameAdapter`와 Unreal scalar 경계 helper 적용; 완전한 ENU↔Cesium·quaternion adapter는 후속 | C++ 완료, Unreal D9 / M3 |
-| COORD-006 | 부분 완료 | C++ steering/yaw/heading·wheel force/load·reverse·protocol 시험 완료; vector basis·단위축·quaternion·Unreal automation은 후속 | scalar Mac 자동 시험 통과, Unreal D9 / M3 |
+| COORD-003 | 자동 범위 완료 | `steering_angle`과 `ControlCommand.steering`을 좌조향 양수로 통일하고 Unreal 입력에서 한 번만 변환 | C++·Proto·UE Editor/Game build 통과; 실제 PIE는 COORD-008 |
+| COORD-004 | 완료 | C++·Unreal v2 exact version 검사와 양방향 `Hello`의 source/build/schema/map checksum/capability 검증으로 구 계약을 ordinary state/reset/control 전에 차단 | server/client handshake 자동 회귀·C++ 14/14 통과 |
+| COORD-005 | 자동 범위 완료 | C++ `BodyFrameAdapter`와 `GeoTransformAdapter`, Unreal polar/axial·위치/속도/가속도·quaternion 경계 helper 적용; 로컬 원점 metadata 통합은 후속, Cesium geodetic origin은 ADR-013에 따라 Future | C++ 정밀 시험·UE headless Automation 1/1 통과 |
+| COORD-006 | 완료 | C++ steering/yaw/heading·vector basis·단위·quaternion golden/round-trip과 Unreal Automation 실행 | C++ 정밀 시험 및 UE `GeoTransformContract` 1/1 `Success` |
 | COORD-007 | 해야 함 | SensorRig frame tree·optical frame과 Recorder/MapPackage의 frame convention version 기록 | D11 / M5 |
 | COORD-008 | 해야 함 | 목표 Windows UE에서 좌·우 조향, 회전 방향, wheel pose, ENU 위치를 시각·수치로 재검증 | D9 / M3 |
 
@@ -98,10 +133,12 @@ ENU↔Unreal world 변환은 Cesium Georeference와 원점까지 포함하므로
 Unreal 소스는 v1 WorldState를 incompatible 상태로 처리한다. Python relay와 ZMQ는
 현재 개발 대상이 아니므로 기본 OFF로 동결했다. opt-in observer는 버전 없는 구
 `EntityStatePacket`을 사용하므로 schema-v2 호환성 증거가 아니며, 향후 Python을
-    재개할 때 이 ADR의 canonical 부호와 version handshake를 새 경계에 적용한다. 다만
-    Protobuf `Hello`는 아직 정의만 있으므로 이를 application handshake 완료로 기록하지
-    않는다. 최신 Unreal 변경의 Windows UE 5.6 Editor build는 통과했고 실제 PIE 좌표
-    시각 검증은 남아 있다.
+재개할 때 이 ADR의 canonical 부호와 version handshake를 새 경계에 적용한다. Protobuf
+`Hello`는 server/client 양쪽에서 source/build/schema/map checksum과 필수 capability를
+검증하며 성공 전 ordinary payload를 fail-closed한다. 최신 Windows UE 5.6 Editor/Game
+build와 headless `DriveIntegration.Coordinates.GeoTransformContract` Automation 1/1이
+통과했고, 실제 PIE 좌표 시각·로컬 원점 metadata·SensorRig frame 검증은 남아 있다.
+Cesium 연동은 8/31 이후 R1 인수의 선행 조건이 아니다.
 
 ## 완료 기준
 
@@ -109,6 +146,7 @@ Unreal 소스는 v1 WorldState를 incompatible 상태로 처리한다. Python re
 - 좌회전에서 body yaw rate, steering state, steering command, lateral force의 부호가 계약과 일치한다.
 - 같은 회전에서 `heading` 증가 방향과 `angular_velocity_body`에서 복원한 navigation Euler yaw rate가 위 관계식으로 일치하며, scalar `yaw_rate`는 body-Z와 일치한다.
 - quaternion/basis 왕복과 angular velocity axial-vector 시험이 통과한다.
+- local ENU 위치 왕복은 `1e-8m` 이하, quaternion 왕복은 `1e-7°`보다 작은 자동 시험 기준을 사용해 `5cm/0.5°` 표시 허용치보다 충분히 엄격하게 유지한다.
 - Unreal에서 좌·우 조향 및 회전이 C++ 기준 상태와 반대로 보이지 않는다.
 - 센서 메시지와 기록 데이터가 `frame_id`와 frame convention version을 가진다.
 

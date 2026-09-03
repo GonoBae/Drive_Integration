@@ -1,0 +1,21 @@
+{
+  "format_version": 1,
+  "sensors": [
+    {
+      "id": "front_camera",
+      "type": "camera",
+      "child_frame": "camera_front_optical",
+      "position_flu_m": [1.8, 0.0, 0.8],
+      "rotation_flu_deg": [0.0, -5.0, 0.0],
+      "rate_hz": 10.0
+    },
+    {
+      "id": "roof_lidar",
+      "type": "lidar",
+      "child_frame": "lidar_roof",
+      "position_flu_m": [0.2, 0.0, 1.5],
+      "rotation_flu_deg": [0.0, 0.0, 0.0],
+      "rate_hz": 20.0
+    }
+  ]
+}

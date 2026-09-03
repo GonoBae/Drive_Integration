@@ -95,6 +95,32 @@ LoadedVehicleParameters load_vehicle_parameters(const std::filesystem::path& pat
         }
     }
 
+    // Check the schema version before its keys so a complete legacy file receives
+    // the migration instruction instead of an unrelated unknown-key error.
+    const auto version_entry = values.find("format_version");
+    if (version_entry == values.end()) {
+        throw std::runtime_error("Missing vehicle parameter 'format_version'");
+    }
+    const std::string expected_version =
+        std::to_string(kVehicleConfigFormatVersion);
+    if (version_entry->second != expected_version) {
+        std::string message =
+            "Unsupported vehicle configuration format_version: "
+            + version_entry->second + "; expected "
+            + expected_version;
+        if (version_entry->second == "5" || version_entry->second == "6") {
+            message += ". To migrate, replace tire_corner_stiffness_n_rad with "
+                "front_tire_corner_stiffness_n_rad and rear_tire_corner_stiffness_n_rad, "
+                "copying the old per-tire value unchanged into both fields";
+            if (version_entry->second == "5") {
+                message += "; remove comfortable_lateral_accel_mps2 "
+                    "for speed-independent steering";
+            }
+            message += "; set format_version=7";
+        }
+        throw std::runtime_error(message);
+    }
+
     const std::unordered_set<std::string> expected_keys{
         "format_version",
         "mass_kg",
@@ -102,7 +128,6 @@ LoadedVehicleParameters load_vehicle_parameters(const std::filesystem::path& pat
         "max_steering_angle_rad",
         "steering_rate_rad_s",
         "steering_return_rate_rad_s",
-        "comfortable_lateral_accel_mps2",
         "max_drive_force_n",
         "max_reverse_force_n",
         "max_drive_power_w",
@@ -135,9 +160,14 @@ LoadedVehicleParameters load_vehicle_parameters(const std::filesystem::path& pat
         "roll_inertia_kg_m2",
         "attitude_spring_n_m_rad",
         "attitude_damping_n_m_s_rad",
-        "tire_corner_stiffness_n_rad",
+        "front_tire_corner_stiffness_n_rad",
+        "rear_tire_corner_stiffness_n_rad",
         "tire_longitudinal_stiffness_n",
         "tire_friction",
+        "surface_default_friction_scale",
+        "surface_asphalt_friction_scale",
+        "surface_low_friction_scale",
+        "surface_rough_friction_scale",
         "lateral_grip_priority",
         "traction_control_slip_target",
         "traction_control_full_cut_slip",
@@ -163,14 +193,6 @@ LoadedVehicleParameters load_vehicle_parameters(const std::filesystem::path& pat
         }
     }
 
-    const float format_version = parse_finite_float(
-        "format_version", values.at("format_version"));
-    if (format_version != static_cast<float>(kVehicleConfigFormatVersion)) {
-        throw std::runtime_error(
-            "Unsupported vehicle configuration format_version: "
-            + values.at("format_version"));
-    }
-
     VehicleParameters parameters;
 #define SIMCORE_LOAD_PARAMETER(field) \
     parameters.field = parse_finite_float(#field, values.at(#field))
@@ -179,7 +201,6 @@ LoadedVehicleParameters load_vehicle_parameters(const std::filesystem::path& pat
     SIMCORE_LOAD_PARAMETER(max_steering_angle_rad);
     SIMCORE_LOAD_PARAMETER(steering_rate_rad_s);
     SIMCORE_LOAD_PARAMETER(steering_return_rate_rad_s);
-    SIMCORE_LOAD_PARAMETER(comfortable_lateral_accel_mps2);
     SIMCORE_LOAD_PARAMETER(max_drive_force_n);
     SIMCORE_LOAD_PARAMETER(max_reverse_force_n);
     SIMCORE_LOAD_PARAMETER(max_drive_power_w);
@@ -212,9 +233,14 @@ LoadedVehicleParameters load_vehicle_parameters(const std::filesystem::path& pat
     SIMCORE_LOAD_PARAMETER(roll_inertia_kg_m2);
     SIMCORE_LOAD_PARAMETER(attitude_spring_n_m_rad);
     SIMCORE_LOAD_PARAMETER(attitude_damping_n_m_s_rad);
-    SIMCORE_LOAD_PARAMETER(tire_corner_stiffness_n_rad);
+    SIMCORE_LOAD_PARAMETER(front_tire_corner_stiffness_n_rad);
+    SIMCORE_LOAD_PARAMETER(rear_tire_corner_stiffness_n_rad);
     SIMCORE_LOAD_PARAMETER(tire_longitudinal_stiffness_n);
     SIMCORE_LOAD_PARAMETER(tire_friction);
+    SIMCORE_LOAD_PARAMETER(surface_default_friction_scale);
+    SIMCORE_LOAD_PARAMETER(surface_asphalt_friction_scale);
+    SIMCORE_LOAD_PARAMETER(surface_low_friction_scale);
+    SIMCORE_LOAD_PARAMETER(surface_rough_friction_scale);
     SIMCORE_LOAD_PARAMETER(lateral_grip_priority);
     SIMCORE_LOAD_PARAMETER(traction_control_slip_target);
     SIMCORE_LOAD_PARAMETER(traction_control_full_cut_slip);

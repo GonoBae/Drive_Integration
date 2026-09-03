@@ -14,7 +14,10 @@ public class DriveIntegration : ModuleRules
 			"CoreUObject",
 			"Engine",
 			"InputCore",
+			"AudioMixer",
+			"PhysicsCore",
 			"WebSockets"
 		});
+		PrivateDependencyModuleNames.Add("Json");
 	}
 }

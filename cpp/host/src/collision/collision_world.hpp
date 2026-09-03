@@ -49,6 +49,15 @@ public:
         double dt_seconds,
         std::vector<KinematicCollisionProxy> dynamic_proxies) const;
 
+    // Omit only named static objects whose stored semantic is Curb. The caller
+    // must have independently established continuous wheel support; passing a
+    // wall/barrier ID is rejected rather than becoming a generic bypass.
+    [[nodiscard]] CollisionStepResult integrate_with_tire_supported_curbs(
+        PlanarRigidBody body,
+        double dt_seconds,
+        std::vector<KinematicCollisionProxy> dynamic_proxies,
+        std::vector<std::string> tire_supported_curb_ids) const;
+
     [[nodiscard]] std::size_t static_collider_count() const {
         return static_colliders_.size();
     }

@@ -1,0 +1,10 @@
+# Collision identities hash exact payload bytes. Do not let autocrlf change
+# exported CSVs on checkout (including existing Landscape/legacy fixtures).
+map_packages/**/ground_surface.csv -text
+map_packages/**/static_colliders.csv -text
+map_packages/**/ground_heightfield.bin -text
+map_packages/**/traffic_network.json -text
+
+# Unreal packages are serialized binary assets, never line-normalized.
+*.umap -text
+*.uasset -text

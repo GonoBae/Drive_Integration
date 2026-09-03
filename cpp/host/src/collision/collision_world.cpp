@@ -26,6 +26,12 @@ constexpr std::size_t kSolverIterations = 8;
 constexpr double kBroadPhaseCellSizeM = 8.0;
 constexpr std::size_t kMaximumGridCellsPerObject = 4096;
 constexpr std::size_t kMaximumGridCellsPerQuery = 4096;
+constexpr double kMinimumFiniteProxyMassKg = 1.0;
+constexpr double kMaximumFiniteProxyMassKg = 100'000.0;
+constexpr double kMinimumFiniteProxyYawInertiaKgM2 = 1.0;
+constexpr double kMaximumFiniteProxyYawInertiaKgM2 = 100'000'000.0;
+constexpr double kMaximumFiniteProxyHeadingRateRadS =
+    4.0 * std::numbers::pi_v<double>;
 
 struct HorizontalAabb {
     double minimum_east_m = 0.0;
@@ -364,6 +370,65 @@ CollisionVector2 kinematic_contact_velocity(
             + angular_velocity_ccw * contact_offset.east_m};
 }
 
+CollisionVector2 proxy_center(const KinematicCollisionProxy& proxy)
+{
+    return std::visit(
+        [](const auto& shape) { return shape.center_enu; }, proxy.shape);
+}
+
+void translate_proxy(
+    KinematicCollisionProxy& proxy, const CollisionVector2& translation)
+{
+    std::visit(
+        [&](auto& shape) { shape.center_enu = add(shape.center_enu, translation); },
+        proxy.shape);
+}
+
+double proxy_inverse_yaw_inertia(const KinematicCollisionProxy& proxy)
+{
+    return std::holds_alternative<ObbPrism>(proxy.shape)
+            && proxy.yaw_inertia_kg_m2 > 0.0
+        ? 1.0 / proxy.yaw_inertia_kg_m2
+        : 0.0;
+}
+
+void apply_proxy_impulse(
+    KinematicCollisionProxy& proxy,
+    const CollisionVector2& impulse,
+    const CollisionVector2& contact_offset)
+{
+    if (proxy.mass_kg <= 0.0) {
+        return;
+    }
+    const double inverse_mass = 1.0 / proxy.mass_kg;
+    proxy.linear_velocity_enu_mps = add(
+        proxy.linear_velocity_enu_mps, multiply(impulse, inverse_mass));
+    const double inverse_yaw_inertia = proxy_inverse_yaw_inertia(proxy);
+    if (inverse_yaw_inertia > 0.0) {
+        const double angular_velocity_ccw = -proxy.heading_rate_rad_s
+            + cross(contact_offset, impulse) * inverse_yaw_inertia;
+        proxy.heading_rate_rad_s = std::clamp(
+            -angular_velocity_ccw,
+            -kMaximumFiniteProxyHeadingRateRadS,
+            kMaximumFiniteProxyHeadingRateRadS);
+    }
+}
+
+void clamp_finite_proxy_speed(KinematicCollisionProxy& proxy)
+{
+    if (proxy.mass_kg <= 0.0 || proxy.maximum_linear_speed_mps <= 0.0) {
+        return;
+    }
+    const double speed = std::hypot(
+        proxy.linear_velocity_enu_mps.east_m,
+        proxy.linear_velocity_enu_mps.north_m);
+    if (speed > proxy.maximum_linear_speed_mps) {
+        proxy.linear_velocity_enu_mps = multiply(
+            proxy.linear_velocity_enu_mps,
+            proxy.maximum_linear_speed_mps / speed);
+    }
+}
+
 void advance_proxy(KinematicCollisionProxy& proxy, double dt_seconds)
 {
     std::visit(
@@ -475,6 +540,101 @@ double resolve_contact(
     return normal_impulse;
 }
 
+double resolve_finite_proxy_contact(
+    PlanarRigidBody& body,
+    KinematicCollisionProxy& proxy,
+    const CollisionManifold& manifold)
+{
+    const double body_inverse_mass = 1.0 / body.mass_kg;
+    const double proxy_inverse_mass = 1.0 / proxy.mass_kg;
+    const double inverse_mass_sum = body_inverse_mass + proxy_inverse_mass;
+    const double separation = manifold.penetration_m + kSeparationSlopM;
+    body.shape.center_enu = add(
+        body.shape.center_enu,
+        multiply(manifold.normal_enu,
+                 separation * body_inverse_mass / inverse_mass_sum));
+    translate_proxy(
+        proxy,
+        multiply(manifold.normal_enu,
+                 -separation * proxy_inverse_mass / inverse_mass_sum));
+
+    const CollisionVector2 body_contact_offset = subtract(
+        manifold.contact_point_enu, body.shape.center_enu);
+    const CollisionVector2 proxy_contact_offset = subtract(
+        manifold.contact_point_enu, proxy_center(proxy));
+    const CollisionVector2 relative_contact_velocity = subtract(
+        contact_velocity(body, body_contact_offset),
+        kinematic_contact_velocity(proxy, manifold.contact_point_enu));
+    const double normal_velocity = dot(
+        relative_contact_velocity, manifold.normal_enu);
+    if (normal_velocity >= 0.0) {
+        return 0.0;
+    }
+
+    const double body_normal_arm = cross(
+        body_contact_offset, manifold.normal_enu);
+    const double proxy_normal_arm = cross(
+        proxy_contact_offset, manifold.normal_enu);
+    const double proxy_inverse_inertia = proxy_inverse_yaw_inertia(proxy);
+    const double normal_denominator = body_inverse_mass + proxy_inverse_mass
+        + body_normal_arm * body_normal_arm / body.yaw_inertia_kg_m2
+        + proxy_normal_arm * proxy_normal_arm * proxy_inverse_inertia;
+    const double normal_impulse =
+        -(1.0 + proxy.material.restitution) * normal_velocity
+        / normal_denominator;
+
+    const CollisionVector2 body_normal_impulse = multiply(
+        manifold.normal_enu, normal_impulse);
+    body.linear_velocity_enu_mps = add(
+        body.linear_velocity_enu_mps,
+        multiply(body_normal_impulse, body_inverse_mass));
+    double body_angular_velocity_ccw = -body.heading_rate_rad_s
+        + cross(body_contact_offset, body_normal_impulse)
+            / body.yaw_inertia_kg_m2;
+    apply_proxy_impulse(
+        proxy, multiply(body_normal_impulse, -1.0), proxy_contact_offset);
+
+    const CollisionVector2 tangent{
+        -manifold.normal_enu.north_m,
+        manifold.normal_enu.east_m};
+    const CollisionVector2 body_velocity_after_normal{
+        body.linear_velocity_enu_mps.east_m
+            - body_angular_velocity_ccw * body_contact_offset.north_m,
+        body.linear_velocity_enu_mps.north_m
+            + body_angular_velocity_ccw * body_contact_offset.east_m};
+    const double tangent_velocity = dot(
+        subtract(
+            body_velocity_after_normal,
+            kinematic_contact_velocity(proxy, manifold.contact_point_enu)),
+        tangent);
+    const double body_tangent_arm = cross(body_contact_offset, tangent);
+    const double proxy_tangent_arm = cross(proxy_contact_offset, tangent);
+    const double tangent_denominator = body_inverse_mass + proxy_inverse_mass
+        + body_tangent_arm * body_tangent_arm / body.yaw_inertia_kg_m2
+        + proxy_tangent_arm * proxy_tangent_arm * proxy_inverse_inertia;
+    const double unconstrained_tangent_impulse =
+        -tangent_velocity / tangent_denominator;
+    const double maximum_tangent_impulse =
+        proxy.material.friction * normal_impulse;
+    const double tangent_impulse = std::clamp(
+        unconstrained_tangent_impulse,
+        -maximum_tangent_impulse,
+        maximum_tangent_impulse);
+    const CollisionVector2 body_tangent_impulse = multiply(
+        tangent, tangent_impulse);
+    body.linear_velocity_enu_mps = add(
+        body.linear_velocity_enu_mps,
+        multiply(body_tangent_impulse, body_inverse_mass));
+    body_angular_velocity_ccw +=
+        cross(body_contact_offset, body_tangent_impulse)
+        / body.yaw_inertia_kg_m2;
+    body.heading_rate_rad_s = -body_angular_velocity_ccw;
+    apply_proxy_impulse(
+        proxy, multiply(body_tangent_impulse, -1.0), proxy_contact_offset);
+    clamp_finite_proxy_speed(proxy);
+    return normal_impulse;
+}
+
 bool valid_proxy_shape(const KinematicProxyShape& shape)
 {
     return std::visit(
@@ -511,9 +671,52 @@ void validate_and_sort_dynamic_proxies(
         if (!valid_proxy_shape(proxy.shape)
             || !finite_vector(proxy.linear_velocity_enu_mps)
             || !std::isfinite(proxy.heading_rate_rad_s)
-            || !valid_material(proxy.material)) {
+            || !valid_material(proxy.material)
+            || !std::isfinite(proxy.mass_kg)
+            || !std::isfinite(proxy.yaw_inertia_kg_m2)
+            || !std::isfinite(proxy.maximum_linear_speed_mps)
+            || proxy.mass_kg < 0.0
+            || proxy.yaw_inertia_kg_m2 < 0.0
+            || proxy.maximum_linear_speed_mps < 0.0) {
             throw std::invalid_argument(
                 "Kinematic proxy is invalid: " + proxy.proxy_id);
+        }
+        const bool finite_mass = proxy.mass_kg > 0.0;
+        if ((finite_mass
+                && (proxy.mass_kg < kMinimumFiniteProxyMassKg
+                    || proxy.mass_kg > kMaximumFiniteProxyMassKg
+                    || proxy.maximum_linear_speed_mps <= 0.0))
+            || (!finite_mass
+                && (proxy.yaw_inertia_kg_m2 != 0.0
+                    || proxy.maximum_linear_speed_mps != 0.0))) {
+            throw std::invalid_argument(
+                "Finite proxy mass/speed contract is invalid: "
+                + proxy.proxy_id);
+        }
+        if (std::holds_alternative<ObbPrism>(proxy.shape)) {
+            if ((finite_mass
+                    && (proxy.yaw_inertia_kg_m2
+                            < kMinimumFiniteProxyYawInertiaKgM2
+                        || proxy.yaw_inertia_kg_m2
+                            > kMaximumFiniteProxyYawInertiaKgM2))
+                || (!finite_mass && proxy.yaw_inertia_kg_m2 != 0.0)) {
+                throw std::invalid_argument(
+                    "Finite OBB proxy inertia is invalid: " + proxy.proxy_id);
+            }
+            if (finite_mass) {
+                // A finite body's angular velocity can also arrive from an
+                // authored kinematic discontinuity, not only from an impulse
+                // solved below. Bound that input before it contributes to the
+                // shared substep budget. Otherwise one malformed proxy can
+                // truncate integrated_dt for every unrelated dynamic proxy.
+                proxy.heading_rate_rad_s = std::clamp(
+                    proxy.heading_rate_rad_s,
+                    -kMaximumFiniteProxyHeadingRateRadS,
+                    kMaximumFiniteProxyHeadingRateRadS);
+            }
+        } else if (proxy.yaw_inertia_kg_m2 != 0.0) {
+            throw std::invalid_argument(
+                "Capsule proxy cannot have yaw inertia: " + proxy.proxy_id);
         }
         if (auto* obb = std::get_if<ObbPrism>(&proxy.shape)) {
             obb->heading_rad = normalize_heading(obb->heading_rad);
@@ -811,6 +1014,16 @@ CollisionStepResult CollisionWorld::integrate(
     double dt_seconds,
     std::vector<KinematicCollisionProxy> dynamic_proxies) const
 {
+    return integrate_with_tire_supported_curbs(
+        std::move(body), dt_seconds, std::move(dynamic_proxies), {});
+}
+
+CollisionStepResult CollisionWorld::integrate_with_tire_supported_curbs(
+    PlanarRigidBody body,
+    double dt_seconds,
+    std::vector<KinematicCollisionProxy> dynamic_proxies,
+    std::vector<std::string> tire_supported_curb_ids) const
+{
     if (body.body_id.empty() || !valid_shape(body.shape)
         || !finite_vector(body.linear_velocity_enu_mps)
         || !std::isfinite(body.heading_rate_rad_s)
@@ -823,6 +1036,23 @@ CollisionStepResult CollisionWorld::integrate(
     }
 
     body.shape.heading_rad = normalize_heading(body.shape.heading_rad);
+    std::sort(tire_supported_curb_ids.begin(), tire_supported_curb_ids.end());
+    tire_supported_curb_ids.erase(std::unique(
+        tire_supported_curb_ids.begin(), tire_supported_curb_ids.end()),
+        tire_supported_curb_ids.end());
+    for (const auto& id : tire_supported_curb_ids) {
+        const auto collider = std::lower_bound(
+            static_colliders_.begin(), static_colliders_.end(), id,
+            [](const StaticObbCollider& value, const std::string& key) {
+                return value.collider_id < key;
+            });
+        if (collider == static_colliders_.end()
+            || collider->collider_id != id
+            || collider->semantic != StaticColliderSemantic::Curb) {
+            throw std::invalid_argument(
+                "Tire-supported collision bypass requires a Curb ID: " + id);
+        }
+    }
     validate_and_sort_dynamic_proxies(
         dynamic_proxies, static_colliders_, body.body_id);
     const double requested_translation = std::hypot(
@@ -898,6 +1128,12 @@ CollisionStepResult CollisionWorld::integrate(
             }
             for (const std::size_t collider_index : static_candidates) {
                 const auto& collider = static_colliders_[collider_index];
+                if (std::binary_search(
+                        tire_supported_curb_ids.begin(),
+                        tire_supported_curb_ids.end(),
+                        collider.collider_id)) {
+                    continue;
+                }
                 const auto manifold = intersect_obb_prisms(
                     body.shape,
                     collider.shape,
@@ -927,20 +1163,20 @@ CollisionStepResult CollisionWorld::integrate(
                     dynamic_candidates.size();
             }
             for (const std::size_t proxy_index : dynamic_candidates) {
-                const auto& proxy = dynamic_proxies[proxy_index];
+                auto& proxy = dynamic_proxies[proxy_index];
                 const auto manifold = intersect_dynamic_proxy(body, proxy);
                 if (!manifold) {
                     continue;
                 }
                 overlap_found = true;
-                const CollisionVector2 proxy_contact_velocity =
-                    kinematic_contact_velocity(
-                        proxy, manifold->contact_point_enu);
-                const double impulse = resolve_contact(
-                    body,
-                    proxy.material,
-                    proxy_contact_velocity,
-                    *manifold);
+                const double impulse = proxy.mass_kg > 0.0
+                    ? resolve_finite_proxy_contact(body, proxy, *manifold)
+                    : resolve_contact(
+                        body,
+                        proxy.material,
+                        kinematic_contact_velocity(
+                            proxy, manifold->contact_point_enu),
+                        *manifold);
                 record_contact(
                     result.contacts,
                     proxy.proxy_id,
@@ -954,6 +1190,7 @@ CollisionStepResult CollisionWorld::integrate(
     }
 
     result.body = std::move(body);
+    result.resolved_dynamic_proxies = std::move(dynamic_proxies);
     return result;
 }
 

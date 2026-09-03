@@ -4,7 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
-#include <limits>
+#include <map>
 #include <numbers>
 #include <stdexcept>
 #include <type_traits>
@@ -22,14 +22,19 @@ simcore::VehicleGear to_proto_gear(VehicleGear gear)
     return simcore::VEHICLE_GEAR_NEUTRAL;
 }
 
-VehicleGear to_host_gear(simcore::VehicleGear gear)
+simcore::VehicleDamageZone to_proto_damage_zone(VehicleDamageZone zone)
 {
-    switch (gear) {
-    case simcore::VEHICLE_GEAR_NEUTRAL: return VehicleGear::Neutral;
-    case simcore::VEHICLE_GEAR_DRIVE:   return VehicleGear::Drive;
-    case simcore::VEHICLE_GEAR_REVERSE: return VehicleGear::Reverse;
-    default:                            return VehicleGear::Neutral;
+    switch (zone) {
+    case VehicleDamageZone::None: return simcore::VEHICLE_DAMAGE_ZONE_NONE;
+    case VehicleDamageZone::Front: return simcore::VEHICLE_DAMAGE_ZONE_FRONT;
+    case VehicleDamageZone::Rear: return simcore::VEHICLE_DAMAGE_ZONE_REAR;
+    case VehicleDamageZone::Left: return simcore::VEHICLE_DAMAGE_ZONE_LEFT;
+    case VehicleDamageZone::Right: return simcore::VEHICLE_DAMAGE_ZONE_RIGHT;
+    case VehicleDamageZone::Roof: return simcore::VEHICLE_DAMAGE_ZONE_ROOF;
+    case VehicleDamageZone::Underbody:
+        return simcore::VEHICLE_DAMAGE_ZONE_UNDERBODY;
     }
+    return simcore::VEHICLE_DAMAGE_ZONE_NONE;
 }
 
 void fill_entity_state(simcore::EntityState& entity, const VehicleState& state)
@@ -52,6 +57,14 @@ void fill_entity_state(simcore::EntityState& entity, const VehicleState& state)
     entity.set_steering_angle(state.steering_angle);
     entity.set_gear(to_proto_gear(state.gear));
     entity.set_entity_kind(simcore::ENTITY_KIND_EGO_VEHICLE);
+
+    entity.set_damage_percent(state.damage_percent);
+    entity.set_last_impact_impulse_n_s(state.last_impact_impulse_n_s);
+    entity.set_damage_zone(to_proto_damage_zone(state.damage_zone));
+    entity.set_collision_event_sequence(state.collision_event_sequence);
+    entity.set_collision_half_length(state.collision_half_length_m);
+    entity.set_collision_half_width(state.collision_half_width_m);
+    entity.set_collision_half_height(state.collision_half_height_m);
 
     auto fill_vector = [](simcore::Vector3d* target, const Vector3State& source) {
         target->set_x(source.x);
@@ -97,6 +110,30 @@ void fill_envelope(simcore::Envelope& envelope, const EnvelopeMetadata& metadata
     envelope.set_source_id(std::string(metadata.source_id));
     envelope.set_map_package_checksum(std::string(metadata.map_package_checksum));
     envelope.set_play_session_id(std::string(metadata.play_session_id));
+    envelope.set_session_id(std::string(metadata.session_id));
+}
+
+const char* health_status_name(HealthStatus status)
+{
+    switch (status) {
+    case HealthStatus::AwaitingReset: return "awaiting_reset";
+    case HealthStatus::AwaitingControl: return "awaiting_control";
+    case HealthStatus::Active: return "active";
+    case HealthStatus::SafeStop: return "safe_stop";
+    case HealthStatus::ReconnectRequired: return "reconnect_required";
+    case HealthStatus::EstopLatched: return "estop_latched";
+    }
+    throw std::invalid_argument("unrecognized authoritative Health status");
+}
+
+void fill_health(simcore::Health& health, const HealthSnapshot& snapshot)
+{
+    health.set_status(health_status_name(snapshot.status));
+    health.set_tick_overrun_count(snapshot.tick_overrun_count);
+    health.set_last_command_age_ns(
+        snapshot.has_control_command ? snapshot.last_command_age_ns : 0);
+    health.set_message(std::string(snapshot.message));
+    health.set_has_control_command(snapshot.has_control_command);
 }
 
 simcore::EntityKind to_proto_kind(RuntimeEntityKind kind)
@@ -198,13 +235,6 @@ void fill_runtime_entity_state(simcore::EntityState& entity,
     body_angular_velocity->set_z(-proxy.heading_rate_rad_s);
 }
 
-void set_error(std::string* error, std::string_view message)
-{
-    if (error) {
-        *error = std::string(message);
-    }
-}
-
 } // namespace
 
 std::string serialize_entity_state_packet(const VehicleState& state)
@@ -215,20 +245,96 @@ std::string serialize_entity_state_packet(const VehicleState& state)
 }
 
 std::string serialize_world_state_envelope(const VehicleState& state,
-                                           const EnvelopeMetadata& metadata)
+                                           const EnvelopeMetadata& metadata,
+                                           std::optional<HealthSnapshot> health)
 {
-    return serialize_world_state_envelope(state, {}, metadata);
+    return serialize_world_state_envelope(state, {}, metadata, health);
 }
 
 std::string serialize_world_state_envelope(
     const VehicleState& state,
     const std::vector<RuntimeEntityState>& runtime_entities,
-    const EnvelopeMetadata& metadata)
+    const EnvelopeMetadata& metadata,
+    std::optional<HealthSnapshot> health,
+    const std::vector<TrafficSignalSnapshot>& traffic_signals,
+    std::string_view traffic_network_checksum)
 {
     simcore::Envelope envelope;
     fill_envelope(envelope, metadata);
     auto* world_state = envelope.mutable_world_state();
     fill_entity_state(*world_state->add_entities(), state);
+    if (health) {
+        fill_health(*world_state->mutable_health(), *health);
+    }
+    if (!traffic_signals.empty()) {
+        if (traffic_signals.size() > 32 || traffic_network_checksum.size() != 24
+            || !traffic_network_checksum.starts_with("fnv1a64:")
+            || !std::all_of(traffic_network_checksum.begin() + 8,
+                            traffic_network_checksum.end(), [](char c) {
+                                return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+                            })) {
+            throw std::invalid_argument("traffic snapshot needs <=32 heads and verified checksum");
+        }
+        world_state->set_traffic_network_checksum(std::string(traffic_network_checksum));
+        std::vector<std::uint32_t> ids;
+        std::map<std::uint32_t, std::uint32_t> permitted_groups_by_controller;
+        std::map<std::pair<std::uint32_t, std::uint32_t>,
+                 std::pair<std::uint32_t, double>> group_states;
+        for (const auto& signal : traffic_signals) {
+            const auto aspect = static_cast<std::uint32_t>(signal.aspect);
+            const auto signal_kind = static_cast<std::uint32_t>(signal.kind);
+            if (signal.id == 0 || signal.group_id < 1 || signal.group_id > 4096
+                || signal.controller_id < 1 || signal.controller_id > 64
+                || aspect > 3 || signal_kind < 1 || signal_kind > 2
+                || !std::isfinite(signal.heading_deg)
+                || signal.heading_deg < 0 || signal.heading_deg >= 360
+                || !std::isfinite(signal.remaining_seconds)
+                || signal.remaining_seconds < 0
+                || signal.remaining_seconds > kMaxTrafficSignalCountdownSeconds
+                || !std::isfinite(signal.position_enu.east_m)
+                || !std::isfinite(signal.position_enu.north_m)
+                || !std::isfinite(signal.position_enu.up_m)
+                || std::abs(signal.position_enu.east_m) > 1e6
+                || std::abs(signal.position_enu.north_m) > 1e6
+                || std::abs(signal.position_enu.up_m) > 1e6
+                || std::find(ids.begin(), ids.end(), signal.id) != ids.end()) {
+                throw std::invalid_argument("invalid or duplicate traffic signal snapshot");
+            }
+            ids.push_back(signal.id);
+            if (aspect == 2 || aspect == 3) {
+                auto& permitted_group = permitted_groups_by_controller[signal.controller_id];
+                if (permitted_group != 0 && permitted_group != signal.group_id) {
+                    throw std::invalid_argument("conflicting traffic groups must never proceed together");
+                }
+                permitted_group = signal.group_id;
+            }
+            const auto group_key = std::pair{signal.controller_id, signal.group_id};
+            const auto existing_group = group_states.find(group_key);
+            if (existing_group != group_states.end()
+                && (existing_group->second.first != aspect
+                    || std::abs(existing_group->second.second
+                                - signal.remaining_seconds) > .001)) {
+                throw std::invalid_argument("signal heads in one group must agree");
+            }
+            group_states[group_key] = {aspect, signal.remaining_seconds};
+            auto* target = world_state->add_traffic_signals();
+            target->set_signal_id(signal.id);
+            target->set_group_id(signal.group_id);
+            target->set_aspect(static_cast<simcore::TrafficSignalAspect>(aspect));
+            target->mutable_position_enu()->set_x(signal.position_enu.east_m);
+            target->mutable_position_enu()->set_y(signal.position_enu.north_m);
+            target->mutable_position_enu()->set_z(signal.position_enu.up_m);
+            // A valid double just below 360 may round up in the float wire
+            // field. Keep the receiver's [0, 360) contract across conversion.
+            const float wire_heading = static_cast<float>(signal.heading_deg);
+            target->set_heading_deg(wire_heading >= 360.f ? 0.f : wire_heading);
+            target->set_remaining_seconds(static_cast<float>(signal.remaining_seconds));
+            target->set_controller_id(signal.controller_id);
+            target->set_signal_kind(static_cast<simcore::TrafficSignalKind>(signal.kind));
+        }
+    } else if (!traffic_network_checksum.empty()) {
+        throw std::invalid_argument("traffic checksum without signal heads");
+    }
 
     std::vector<const RuntimeEntityState*> ordered_entities;
     ordered_entities.reserve(runtime_entities.size());
@@ -258,91 +364,32 @@ std::string serialize_world_state_envelope(
     return envelope.SerializeAsString();
 }
 
-std::optional<ParsedClientMessage> parse_client_message_envelope(
-    std::string_view data,
-    std::string* error)
+std::string serialize_hello_envelope(
+    const EnvelopeMetadata& metadata,
+    std::string_view build,
+    const std::vector<std::string>& capabilities)
 {
-    if (data.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-        set_error(error, "client packet is too large");
-        return std::nullopt;
+    if (build.empty() || build.size() > 128) {
+        throw std::invalid_argument("Hello build must contain 1 to 128 bytes");
+    }
+    if (capabilities.empty() || capabilities.size() > 32) {
+        throw std::invalid_argument(
+            "Hello must advertise between 1 and 32 capabilities");
     }
 
     simcore::Envelope envelope;
-    if (!envelope.ParseFromArray(data.data(), static_cast<int>(data.size()))) {
-        set_error(error, "failed to parse protobuf Envelope");
-        return std::nullopt;
-    }
-
-    if (envelope.schema_version() != kProtocolSchemaVersion) {
-        const std::string message =
-            "unsupported protobuf schema version: expected "
-            + std::to_string(kProtocolSchemaVersion)
-            + ", got " + std::to_string(envelope.schema_version());
-        set_error(error, message);
-        return std::nullopt;
-    }
-
-    if (envelope.has_control_command()) {
-        const auto& command = envelope.control_command();
-
-        ParsedControlCommand parsed;
-        parsed.sequence = envelope.sequence();
-        parsed.source_id = envelope.source_id();
-        parsed.session_id = envelope.session_id();
-        parsed.map_package_checksum = envelope.map_package_checksum();
-        parsed.client_time_ns = command.client_time_ns();
-        parsed.estop = command.estop()
-            || command.mode() == simcore::CONTROL_MODE_ESTOP;
-        VehicleInput& input = parsed.input;
-        if (parsed.estop) {
-            input.throttle = 0.f;
-            input.brake = 1.f;
-            input.steering = 0.f;
-            input.handbrake = true;
-            input.gear = VehicleGear::Drive;
-            return ParsedClientMessage{std::move(parsed)};
+    fill_envelope(envelope, metadata);
+    auto* hello = envelope.mutable_hello();
+    hello->set_build(std::string(build));
+    hello->set_schema(std::string(kProtocolSchemaName));
+    for (const auto& capability : capabilities) {
+        if (capability.empty() || capability.size() > 128) {
+            throw std::invalid_argument(
+                "Hello capability must contain 1 to 128 bytes");
         }
-
-        input.throttle = command.throttle();
-        input.brake = command.brake();
-        input.steering = command.steering();
-        input.handbrake = command.handbrake();
-        if (command.has_gear()) {
-            input.gear = to_host_gear(command.gear());
-        }
-
-        return ParsedClientMessage{std::move(parsed)};
+        hello->add_capabilities(capability);
     }
-
-    if (envelope.has_simulation_reset()) {
-        const auto& reset = envelope.simulation_reset();
-        ParsedSimulationReset parsed;
-        parsed.sequence = envelope.sequence();
-        parsed.client_time_ns = reset.client_time_ns();
-        parsed.source_id = envelope.source_id();
-        parsed.session_id = envelope.session_id();
-        parsed.map_package_checksum = envelope.map_package_checksum();
-        parsed.play_session_id = reset.play_session_id();
-        return ParsedClientMessage{std::move(parsed)};
-    }
-
-    set_error(error, "Envelope payload is not a supported client message");
-    return std::nullopt;
-}
-
-std::optional<ParsedControlCommand> parse_control_command_envelope(
-    std::string_view data,
-    std::string* error)
-{
-    auto message = parse_client_message_envelope(data, error);
-    if (!message) {
-        return std::nullopt;
-    }
-    if (auto* command = std::get_if<ParsedControlCommand>(&*message)) {
-        return std::move(*command);
-    }
-    set_error(error, "Envelope payload is not ControlCommand");
-    return std::nullopt;
+    return envelope.SerializeAsString();
 }
 
 } // namespace simcore_host

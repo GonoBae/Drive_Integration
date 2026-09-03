@@ -5,6 +5,7 @@
   "dependencies": [
     "boost-asio",
     "boost-beast",
+    "boost-property-tree",
     "protobuf"
   ],
   "features": {

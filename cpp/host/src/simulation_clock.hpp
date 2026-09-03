@@ -29,6 +29,17 @@ public:
         overrun_count_ = 0;
     }
 
+    // Use at a timer callback boundary when an external authoritative snapshot
+    // replaces the whole simulation. Unlike reset_elapsed(), this deliberately
+    // starts a fresh wall-clock cadence and avoids scheduling an immediate
+    // second callback against the deadline that just fired.
+    void restart(Clock::time_point start = Clock::now())
+    {
+        tick_index_ = 0;
+        overrun_count_ = 0;
+        next_deadline_ = start + period_;
+    }
+
     void advance(Clock::time_point completed_at)
     {
         ++tick_index_;

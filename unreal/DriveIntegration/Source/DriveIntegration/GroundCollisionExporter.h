@@ -9,8 +9,9 @@ class USceneComponent;
 
 /**
  * Editor-only authoring bridge that samples Unreal WorldStatic collision and
- * bakes the upper ground surface and explicit SimCore static-collider markers
- * into a SimCore MapPackage.
+ * measures the upper ground surface into a high-resolution binary heightfield
+ * snapshot and bakes explicit SimCore static-collider markers into a
+ * SimCore MapPackage.
  *
  * The runtime vehicle remains server-authoritative. This actor deliberately
  * performs an offline bake instead of feeding delayed render-world traces back
@@ -25,9 +26,18 @@ public:
 	AGroundCollisionExporter();
 	virtual void OnConstruction(const FTransform& Transform) override;
 
-	/** Replace both collision CSV payloads, then commit manifest.cfg last. */
+	/** Replace heightfield, sentinel, and static collision payloads, then commit manifest.cfg last. */
 	UFUNCTION(CallInEditor, Category="SimCore|Ground Export", meta=(DisplayName="Bake Ground + Static Collision To MapPackage"))
 	void ExportGroundSurface();
+
+	/** Configure a generated authoring scene without reflection or editor UI. */
+	void ConfigureForAuthoring(AActor* InGroundActor,
+		const FString& InMapPackageDirectory, const FVector& InMapOriginWorldCm,
+		const FVector& InSamplingCenterWorldCm, const FVector2D& InHorizontalExtentCm,
+		float InSampleSpacingCm = 100.0f, float InGroundBoundsPaddingCm = 0.0f);
+
+	/** Same production transaction as the editor button; reports failure to automation. */
+	bool ExportGroundSurfaceUnattended();
 
 	/** Move the sampling box XY center to the SimCore ENU spawn origin. */
 	UFUNCTION(CallInEditor, Category="SimCore|Ground Export", meta=(DisplayName="Center Sampling On Map Origin"))
@@ -67,9 +77,22 @@ protected:
 	UPROPERTY(EditAnywhere, Category="SimCore|Ground Export", meta=(ClampMin="0.0", UIMin="0.0"))
 	float GroundBoundsPaddingCm = 100.0f;
 
-	/** Maximum spacing between collision samples in Unreal centimeters. */
+	/**
+	 * Spacing of the Unreal collision measurements stored in the heightfield
+	 * snapshot. This is intentionally a new property: actors baked by the old
+	 * triangle exporter may have persisted its automatically degraded 507 cm
+	 * spacing, while the heightfield format can retain the 100 cm default.
+	 */
 	UPROPERTY(EditAnywhere, Category="SimCore|Ground Export", meta=(ClampMin="25.0", UIMin="25.0"))
-	float SampleSpacingCm = 100.0f;
+	float HeightfieldSampleSpacingCm = 100.0f;
+
+	/**
+	 * Explicit editor-work bound for one bake. The binary format has a hard
+	 * two-million-sample ceiling; lower this value to fail earlier on a large
+	 * authoring region instead of silently reducing terrain resolution.
+	 */
+	UPROPERTY(EditAnywhere, Category="SimCore|Ground Export", meta=(ClampMin="4", ClampMax="2000000", UIMin="4", UIMax="2000000"))
+	int32 MaxHeightfieldSampleCount = 2000000;
 
 	/** Vertical trace distance above the exporter actor. */
 	UPROPERTY(EditAnywhere, Category="SimCore|Ground Export", meta=(ClampMin="100.0", UIMin="100.0"))
@@ -92,6 +115,29 @@ protected:
 	UPROPERTY(EditAnywhere, Category="SimCore|Ground Export", meta=(ClampMin="0.01", ClampMax="1.0"))
 	float MinimumGroundNormalZ = 0.1f;
 
+	/** Physical Surface assignments used when no SimCore.Surface.* tag overrides the hit. */
+	UPROPERTY(EditAnywhere, Category="SimCore|Ground Export|Materials")
+	TEnumAsByte<EPhysicalSurface> AsphaltPhysicalSurface = SurfaceType1;
+
+	UPROPERTY(EditAnywhere, Category="SimCore|Ground Export|Materials")
+	TEnumAsByte<EPhysicalSurface> LowFrictionPhysicalSurface = SurfaceType2;
+
+	UPROPERTY(EditAnywhere, Category="SimCore|Ground Export|Materials")
+	TEnumAsByte<EPhysicalSurface> RoughPhysicalSurface = SurfaceType3;
+
+	/** Terrain properties baked into SIMGHF2; server vehicle profile scales remain separate. */
+	UPROPERTY(EditAnywhere, Category="SimCore|Ground Export|Materials", meta=(ClampMin="0.05", ClampMax="4.0"))
+	float DefaultFrictionMultiplier = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="SimCore|Ground Export|Materials", meta=(ClampMin="0.05", ClampMax="4.0"))
+	float AsphaltFrictionMultiplier = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="SimCore|Ground Export|Materials", meta=(ClampMin="0.05", ClampMax="4.0"))
+	float LowFrictionFrictionMultiplier = 0.35f;
+
+	UPROPERTY(EditAnywhere, Category="SimCore|Ground Export|Materials", meta=(ClampMin="0.05", ClampMax="4.0"))
+	float RoughFrictionMultiplier = 1.10f;
+
 	/**
 	 * Package directory relative to the Unreal project directory. Export is
 	 * restricted to this repository's map_packages directory.
@@ -108,5 +154,14 @@ protected:
 	FVector MapOriginWorldCm = FVector::ZeroVector;
 
 private:
+	bool bLastExportSucceeded = false;
+	bool bSuppressExportDialogs = false;
 	void UpdateBoundsVisualization();
+
+#if WITH_EDITOR
+	/** Apply the complete colliding-component fit without forcing a modal dialog. */
+	bool FitSamplingBoundsToGroundActorInternal(
+		bool bShowResultDialog,
+		FString& OutResult);
+#endif
 };

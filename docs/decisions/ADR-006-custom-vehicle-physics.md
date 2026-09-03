@@ -90,6 +90,9 @@ RWD 차량이 오르지 못하는 사례가 확인됐다. 외부 차량 SDK를 �
 
 ## 2026-08-27 일반 승용차 조작감 보완
 
+이 절의 수치는 2026-08-27 format-v3 중간 튜닝 기록이다. 2026-08-28 실제 선회 반경
+회귀를 추가하며 아래 “승용차 조향 envelope 재보정” 값으로 대체했다.
+
 PIE 수동 주행에서 차가 마찰 없이 미끄러지고 키보드 조향이 가볍게 튀는 현상을
 확인했다. 마찰계수 하나만 크게 만드는 대신 원인이 된 힘·입력 모델을 다음처럼
 수정했다.
@@ -178,9 +181,14 @@ attitude spring/damper, 세계각 pitch `±6°`·roll `±8°` hard clamp, 그리
   solver가 아니라 planar XY/heading solver가 yaw trajectory를 정하고 sprung-body
   heave/roll/pitch를 푸는 reduced model이다. massless hub, 단순 1D suspension, tire carcass·
   unsprung mass·jump/airborne dynamics 부재와 drivable pitch singularity 제한은 남는다.
-- ground coverage ray 1~3개는 wheel별 partial support로 계속 푼다. fail-closed rollback은
-  별도 centre query가 authored ground를 잃거나 네 wheel ray가 모두 0개일 때만 적용한다.
-  첫 wheel이 sampling box를 벗어났다는 이유만으로 보이지 않는 벽을 만들지 않는다.
+- ground coverage는 suspension contact와 별개로 wheel footprint가 authored surface 안에
+  있는지 판정한다. 단일 missing corner와 대각선 two-wheel coverage는 partial support로
+  계속 푼다. front/rear axle 또는 left/right side의 두 coverage ray가 모두 사라지면
+  ground-bound reduced model이 남은 spring만으로 map 끝에서 tip하지 않도록 이전 지원
+  step으로 fail-close하고 속도를 0으로 만든다. 별도 centre query miss와 0 wheel ray도
+  기존처럼 같은 rollback을 적용한다. 따라서 첫 wheel 하나가 sampling box를 벗어난
+  순간의 보이지 않는 벽은 만들지 않으면서, 완전 axle/side 이탈은 airborne 동작으로
+  잘못 해석하지 않는다.
 - fit한 four-wheel support plane은 reset pose와 진단에만 사용한다. legacy
   `attitude_spring_n_m_rad`, `attitude_damping_n_m_s_rad` key는 v4 호환을 위해 남지만
   validation이 모두 0을 요구하고 solver moment에는 들어가지 않는다. 기존 support-target
@@ -194,19 +202,173 @@ attitude spring/damper, 세계각 pitch `±6°`·roll `±8°` hard clamp, 그리
 회귀 시험은 앞이 높은 지면의 positive pitch, 왼쪽이 높은 지면의 positive roll, 기존
 6°/8° 제한을 넘는 연속 자세, deep one-side hard-stop에서 한 frame flip이 없는 bounded
 attitude, symmetric four-wheel 재접촉에서 wheel-order pitch/roll impulse가 없는 경우를
-포함한다. partial support/centre fail-closed, wheel-local hub velocity·force, inactive
-hard-stop travel, compound angular contract도 함께 검증한다. Windows full Release build,
-CTest 11/11과 `vehicle_physics_tests`·`vehicle_config_tests` 각각 20/20 반복이 통과했고,
-UE 5.6 `DriveIntegrationEditor` build도 `UBT Result: Succeeded`로 통과했다. 최종 문서 감사
-시점의 background server smoke도 성공했으며 PID `17604`가 `0.0.0.0:9000 LISTENING`,
+포함한다. 단일 missing corner·대각선 two-wheel partial support, 완전 axle/side·centre·
+0-ray fail-close, wheel-local hub velocity·force, inactive hard-stop travel, compound angular
+contract도 함께 검증한다. tracked `landscape_local_v1`을 실제 설정으로 로드해 full-throttle
+600 tick 진행하는 회귀는 보완 전 최대 pitch `151.7°`, 최소 z `-0.182m`로 nose-down하는
+실패를 재현했고 terminal footprint gate 적용 후 통과했다. Windows full Release build,
+CTest 13/13과 차량 물리·차량 설정·MapPackage hot reload·ground query·정적/동적 충돌·
+host 핵심 7종 각각 20/20 반복, WebSocket 100/100 반복이
+통과했고, UE 5.6 `DriveIntegrationEditor` build도 `UBT Result: Succeeded`로 통과했다. 2026-08-27
+문서 감사 시점의 historical background server smoke도 성공했으며 PID `17604`가
+`0.0.0.0:9000 LISTENING`,
 `127.0.0.1:9000` 연결 가능 상태임을 확인했다. 이 smoke의 vehicle config는
 `fnv1a64:2759c831f3bc939a`, MapPackage는 `fnv1a64:bc3ae81aa738d339`이고,
 `ground_triangles=2220`, `ground_cells=1872`, `ground_global=0`,
 `ground_max_candidates=8`, `static_colliders=0`이었다. 시작 확인 때 stderr는 0 bytes였고,
 연결 프로브 종료 뒤에는 `gracefully closed at both endpoints` 진단 한 줄만 추가됐다. PID는
-검증 시점의 실행 증거이며 이후 실행에서도 같다는 계약이 아니다. 다만
-`Fit Sampling Bounds To Ground Actor` 적용·재-bake와 실제 PIE 주행은 사용자 수동 검증
+그 시점의 실행 증거일 뿐이다. 같은 날 좁은 30×37m bake 재발을 막기 위해 Ground Actor
+전체-bounds Bake preflight·자동 Fit, 20k 예산 spacing 자동 상향과 exporter/host ENU
+bbox/span 진단을 추가했다. 실제 Bake는 spacing 507cm, 19,208 triangles, 약
+495.88×495.88×22.02m span으로 완료됐고, 같은 PID에서 완전 검증한 새 snapshot을
+tick boundary에 적용하는 hot-reload smoke도 통과했다. 실제 PIE 주행은 사용자 수동 검증
 대기 상태다.
+
+## 2026-08-28 유한 MapPackage terminal footprint 결정
+
+이 모델은 jump·airborne·완전 전복을 푸는 full 6DoF가 아니라 authored ground에 구속된
+reduced-order 차량이다. 유한 CSV 끝에서 한 차축이나 한쪽 측면의 두 ground ray가 동시에
+사라진 뒤에도 남은 두 spring만 적분하면, 실제 Landscape 가장자리를 벗어난 차량 운동이
+아니라 모델 바깥 상태가 큰 pitch·roll로 누적된다. tracked Landscape full-throttle
+600-tick 회귀가 이 경로에서 최대 pitch `151.7°`, 최소 z `-0.182m`를 재현했다.
+
+따라서 surface coverage mask를 다음처럼 판정한다.
+
+- wheel 하나만 miss한 3-corner footprint는 계속 계산한다.
+- 서로 대각선인 두 wheel만 hit한 footprint도 계속 계산한다.
+- front, rear, left, right 중 어느 완전한 axle/side라도 두 ray가 모두 miss하면 이전 지원
+  step으로 fail-close한다.
+- centre query miss 또는 네 wheel ray가 모두 miss하면 기존처럼 fail-close한다.
+
+이 gate는 타이어가 droop 범위 밖에 있어 `in_contact=false`인 정상 suspension 상태와
+다르며, query가 authored triangle을 찾았는지만 사용한다. 수정 후 같은 tracked-package
+600-tick 회귀는 차체가 지면 아래로 내려가거나 뒤집히지 않고 terminal edge에서 정지해
+통과했다. 이 안전 경계는 넓은 Landscape를 대신하지 않는다. 실제 주행 범위의 인공적인
+끝을 제거하려면 Editor에서 Ground Actor를 지정해 다시 Bake한다. Bake가 full bounds를
+자동 Fit하고 실행 중 host가 완전 검증한 snapshot만 tick boundary에 교체한다. 성공 창과
+`[MapReload]` 또는 다음 시작 로그의 ENU bbox/span으로 결과를 확인한다. 새 package를 사용한
+실제 PIE 주행 검증은 아직 대기 상태다.
+
+## 2026-08-28 승용차 조향 envelope 재보정
+
+입력과 네트워크 latency가 정상인데도 실제 승용차보다 덜 도는 원인은
+`comfortable_lateral_accel_mps2=3.2`를 speed-aware 최대 조향 cap으로 재사용하고 rack
+증가 rate를 `0.80rad/s`로 둔 데 있었다. comfort 목표와 물리 한계를 분리하고 다음 generic
+passenger sedan 기본값을 적용한다.
+
+- steering 증가 rate `1.35rad/s`, 복귀 rate `1.80rad/s`
+- speed-aware lateral acceleration cap `5.5m/s²`
+- cap은 `tire friction × lateral grip priority × g` 이하라는 strict validation
+
+full-key 자동 계측은 300ms road-wheel angle `23.6°`, 약 5m/s 선회 반경 `4.52m`, 약
+10m/s 선회 반경 `20.08m`와 yaw rate `0.508rad/s`를 얻었다. 회귀 허용 범위는 각각
+4.0~6.5m, 15~25m이고 bicycle model yaw response 75~115%, Ackermann 안쪽 조향각 우세와
+마찰 한도 비초과를 함께 강제한다. 이는 특정 실차 인증값이 아니라 현재 generic sedan의
+일관된 검증 envelope다.
+
+## 2026-08-28 MapPackage 교체 시 물리 snapshot 원자성
+
+Bake 뒤 프로세스를 재시작해야만 새 ground를 읽는 계약은 반복 튜닝과 안전 lifecycle에
+부적합했다. host는 manifest를 background 감시하되 ground·static collision·checksum 전체가
+유효한 후보만 받아 60Hz tick 시작점에서 한 번에 교체한다. 같은 경계에서 차량·clock·lease·
+runtime entity를 reset하고 이전 socket/session을 fence한다. Unreal은 재연결 때 manifest를
+다시 검증하고 checksum이 달라졌다면 새 PlaySession으로 Reset handshake를 수행한다.
+
+이 결정은 차량 수식을 외부 SDK에 맡기는 변경이 아니다. 자체 물리 solver가 한 tick 안에서
+한 버전의 ground/collision만 관측하도록 데이터 수명주기를 강화한 것이다. invalid 또는 작성
+중인 후보에는 기존 snapshot을 유지하며, 같은 checksum에는 불필요한 reset을 만들지 않는다.
+
+## 2026-08-31 속도 독립 조향 계약으로 변경
+
+위 8/27~8/28 및 8/31 초반의 speed-aware envelope 조정은 과거 보조 입력 매핑이다.
+사용자의 "속도가 높아져도 같은 입력이면 바퀴 각도는 같아야 한다"는 요구에 따라,
+속도로 목표 조향각을 줄이던 식과 `comfortable_lateral_accel_mps2` 필드를 제거했다.
+키보드 보조를 타이어의 물리적 언더스티어로 설명했던 기준을 바로잡는다.
+
+- 명령은 부호 변환 후 `steering × max_steering_angle_rad`를 목표로 한다.
+- 최대 중앙각 35°, rack 증가/복귀 1.80/2.20rad/s와 개별 Ackermann 각도를 유지한다.
+  지면 경계 안전정지 분기도 중앙각으로 앞바퀴 두 개를 덮지 않는다.
+- 타이어 마찰·slip·하중 및 yaw 적분식은 변경하지 않는다. 실제 선회 반경은 목표각과
+  별개 결과이며 고속 full-lock을 무미끄럼으로 만들지 않는다. 선택형 속도 보조는 미구현이다.
+- 차량 설정은 v6이다. v5는 명시 전환 안내로 거부하고, v6에 제거된 key가 남아 있어도
+  unknown key로 거부한다. 기존 파일을 자동 덮어쓰거나 설정을 조용히 무시하지 않는다.
+- 검증은 같은 랙 이력의 속도/기어별 각도 불변성, 유한 응답·복귀, 좌우 Ackermann,
+  실제 ENU 경로, 마찰 원과 고속 포화·에너지 한도를 분리한다. 과거 speed-cap에 맞춘
+  반경·고속 무미끄럼 기준은 새 물리의 합격조건으로 재사용하지 않는다.
+
+실행 결과와 정확한 비교 조건은 [조향 수정 기록](../vehicle_driving_refinement.md),
+[8/31 작업일지](../worklogs/2026-08-31.md)에 기록한다. 외부 물리 SDK 미사용 원칙과
+reduced-order 모델의 한계는 유지하며 특정 실차의 계측 인증을 의미하지 않는다.
+
+## 2026-08-31 후속: 실제 지지력 회계와 앞/뒤 강성 분리
+
+최고속도 180km/h를 실제 페달 입력으로 만들어 검사했다. 같은 중앙 35°가 유지되는
+것과 차체의 실제 선회 응답은 별개였다. 평지 정속 선회에서도 압축 하드스톱이 차체를
+지지하는 실제 velocity-constraint impulse를 타이어 `normal_load`에서 누락한 것을
+확인했다. 50km/h·입력 .15에서 spring/damper 13,422.963N과 하드스톱
+21.4502Ns/1/60s를 합하면 1,500kg 차량 중량 14,709.975N과 일치한다.
+
+- accepted tick의 바퀴별 실제 최종 impulse를 합산한다. 위치 보정 lambda나 solver
+  반복 중간값의 절댓값 합은 쓰지 않는다.
+- 직전 tick의 `J / 그 tick의 dt`를 현재도 접지·압축 한계에 있는 타이어의 힘 예산에만
+  더한다. 이미 차체 속도에 적용한 impulse를 heave/roll/pitch 힘으로 재적용하지 않는다.
+  one-tick 명시적 결합 근사이며 완전한 동시 제약 해법은 아니다.
+- 접지/압축 한계 해제, reset, 환경 교체, coverage rollback에서 과거 반력을 폐기한다.
+  `mu × 실제 normal_load`는 유지하며 하중 합을 mg로 강제 정규화하지 않는다.
+- strict cfg v7은 앞/뒤 바퀴당 고정 코너링 강성을 분리한다. generic sedan은
+  60,000/50,000N/rad로 선택했다. v6 단일 값은 양쪽 필드에 같은 값을 복사해 migration하며
+  이는 자동 튜닝과 다르다. v5라면 옛 speed-cap 필드도 삭제한다.
+- 정상 입력/기어·속도별 rack 계약은 보존하고 Unreal은 비접지 시에도 최신 조향을
+  표시한다. 지면은 여전히 Unreal 측정, 차량 물리는 서버 단일 권한이다.
+
+`C = C_nominal × Fz/Fz_nominal` 선형 하중 의존 후보도 비교했으나 기존 Landscape의
+10초 직진 가속 회귀에서 roll 65.681°로 45° 상한을 넘었다. 후보식만 되돌렸으며
+하중 의존 타이어를 완성한 것으로 기록하지 않는다. 해당 선형 접근은
+[MathWorks의 차량 동역학 공식 식](https://www.mathworks.com/help/vdynblks/ref/vehiclebody3dof.html)을
+참고했지만, 문헌 식의 존재가 현재 reduced-order 결합의 안정성·실차 정확성을 보장하지 않는다.
+최고속 전타각의 큰 slip과 yaw 과도진동은 잔여 검증 항목이다.
+최종 결과/시험 조건/미채택 후보는 [조향 기록](../vehicle_driving_refinement.md)과
+[작업일지](../worklogs/2026-08-31.md)를 따른다.
+
+## 2026-09-01 후속: 연석은 지면 지지로 등판하고 의미 충돌은 보존
+
+가상 도심의 0.24m 연석은 차체를 막는 `Curb` OBB만 있고 휠·서스펜션이 읽을 보도와
+연석 top Ground support가 없었다. 속도나 구동력이 충분해도 서스펜션이 차체를 들어 올릴
+입력이 없었으므로, 임계 속도에서 차체 Z를 직접 올리는 보정이나 모든 `Curb` 충돌 무시는
+채택하지 않았다.
+
+- Unreal 저작에서는 기존 Ground 59개에 보도 116개와 연석 top 215개를 더해 390개를
+  측정하고, 같은 연석의 `Curb` marker는 semantic collision으로 함께 유지한다.
+- C++는 current→predicted swept body footprint가 닿는 유한 marker의 along 구간 전체를
+  `R` 이하 간격으로 검사한다. 각 위치의 near pair(`half-width + 1R`)와 far pair
+  (`half-width + 3R`) 네 support가 모두 유효해야 한다.
+- `abs(near delta)`가 `[0.02m, 0.75R]`, far delta가 near delta와 같은 부호,
+  `abs(collider height - abs(far delta)) <= 0.30R`, collider 높이가 `0.75R` 이하일 때만
+  그 step의 planar body collision에서 해당 `Curb`를 제외한다. `Wall`·`Barrier`, 높은 턱,
+  support 누락과 의미가 불명확한 collider는 계속 fail-closed한다.
+- 50cm heightfield에서 실제 authored Curb marker 중심을 가로지르는 full-body footprint
+  215곳 중 도로와 보도를 잇는 연석 중심 214곳이 이 계약을 만족한다. 옛 1m Bake에 당시
+  absolute marker-top 후보 계약을 적용한 결과는 164/215였고, 현재는 50cm+signed delta다.
+  옛 bytes를 최종 계약으로 재감사하지 않아 개선분을 해상도에만 귀속하지 않는다. 이는 collider 중심 검사이며 연석 전체 길이의 모든
+  위치를 보장하지 않는다. 전체 along-length QA는 210/215 collider 전 길이와 북쪽
+  T-opening 네 끝단·BayEnd의 의도적 gap을 확인했고 support 누락 구간은 fail-closed한다.
+  `Curb_BayEnd` 중심은 near/far delta의 지속 raised-support 계약을 만족하지 않고 뒤에
+  `Barrier_BayEnd`가 있으므로 의도적으로 등판 대상이 아니다.
+- 통과 과정은 기존 휠 ray, spring/damper, hard-stop과 타이어 힘이 Ground support를 읽어
+  앞축과 뒤축을 순서대로 올리는 결과다. pose·수직 속도·충격량을 별도로 주입하지 않는다.
+
+50cm 저장 `virtual_city_v1` 회귀에서는 5.2252m/s로 접근해 near rise 0.1536m, 차축
+support 차이 0.2400m, 차체 상승 0.2119m, 한 step 최대 수직 이동 0.0232m,
+최대 pitch 5.7943°, 최소 접지 3개로 통과했다. 30/50m/s `swept-curb-stress`는 current-only
+후보 누락·tunneling·velocity erasure를 막는 gate 시험이며 180km/h 실차 승차감 검증이 아니다.
+CTest 18/18, UE Automation 35/35, Unreal Game/Editor Development와 맵·교통
+`ValidateOnly`를 통과했다. 이는 외부 SDK를 쓰지 않는 reduced-order 물리의 자동 회귀이며
+타이어 변형이나 실차 인증을 뜻하지 않는다. 사용자가 직접 조작하는 PIE의 진입 각도·속도,
+화면 움직임과 벽·Barrier 비관통 인수는 아직 남아 있다.
+
+저작/서버 경계는 [ADR-012](ADR-012-unreal-ground-measurement-boundary.md), 재현과 해결
+절차는 [연석 등판 문제 해결 사례](../troubleshooting/virtual-city-curb-climb-ground-support.md),
+실행 근거는 [9/1 작업일지](../worklogs/2026-09-01.md)를 따른다.
 
 ## 후보 비교와 판단
 
@@ -238,7 +400,7 @@ Chrono 스파이크는 선택 실패물이 아니라 비교 검증 자료로 유
 2. 렌더링과 분리된 고정 tick 및 30분 실행 중 backlog·NaN·crash 없음
 3. 직진·가속·제동·후진·회전·경사 시험 통과
 4. 타이어·서스펜션·노면 접촉 상태를 telemetry로 확인 가능
-5. 정적 커브·벽과 동적 proxy에 지속 관통 없음
+5. 연속 support가 있는 허용 연석은 서스펜션으로 등판하고, 높은 턱·벽·동적 proxy에는 지속 관통 없음
 6. 같은 빌드·설정·입력 replay가 NFR-007 허용 오차 이내
 7. Unreal이 C++ pose를 임의의 차량 물리로 다시 계산하지 않음
 

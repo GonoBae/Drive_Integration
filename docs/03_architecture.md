@@ -4,11 +4,11 @@
 
 | 항목 | 값 |
 |---|---|
-| 버전 | 2.1 |
+| 버전 | 3.16 |
 | 작성일 | 2026-08-19 |
-| 최종 수정 | 2026-08-27 |
+| 최종 수정 | 2026-09-02 |
 | 대상 | R1 수동운전 및 R2/R3 자율주행 확장 기반 |
-| 관련 문서 | [일정표](./01_schedule.md), [기능표](./02_feature_matrix.md) |
+| 관련 문서 | [일정표](./01_schedule.md), [기능표](./02_feature_matrix.md), [전체 리팩터링 구조](./refactoring.md) |
 
 ## 2. 설계 목표
 
@@ -17,8 +17,14 @@
 3. Python은 향후 FSD 판단만 담당하며 수동운전의 필수 데이터 경로에서 제외한다.
 4. 지도·차선·충돌 데이터를 한 번 생성하여 C++·Unreal·Python이 함께 사용한다.
 5. 수동 입력과 자율주행 명령이 동일한 제어 인터페이스를 사용한다.
-6. Wall/Broad에 종속된 코드는 데이터 패키지로 격리하여 다른 지역과 트랙에 재사용한다.
+6. 작은 가상 도심의 도로·배치·통행 규칙은 데이터 패키지로 격리하여 다른 지역과 트랙에 재사용한다.
 7. 로컬 수동운전은 60Hz 상태 전달의 jitter와 표시 지연을 측정하고 제한된 예측으로 보완한다.
+
+2026-08-31 사용자 승인으로 R1 배경은 Wall/Broad 실재 지역 재현에서 **작은 가상 도심
+코스**로 바뀌었다. 실제 지도 GIS 취득·Cesium/WGS84 통합·NYSE/Federal Hall 에셋은
+R1 요구가 아니다. 로컬 ENU/FLU 계약, Unreal 지면 측정과 C++ 물리 권한, LaneGraph·신호·
+NPC 3~4대·보행자 6~8명, SensorRig·기록/재생 및 1080p 60fps·30분 인수 게이트는 유지한다.
+범위 변경 근거는 [ADR-013](./decisions/ADR-013-small-virtual-city-course.md)을 따른다.
 
 ## 3. 현재 구조와 목표 구조
 
@@ -36,17 +42,66 @@ flowchart LR
 
 - C++ `VehiclePhysics`는 네 바퀴의 독립 tire contact와 1D spring/damper 반력으로 tire load,
   차체 heave·pitch·roll을 계산한다. 경사면 tangent 힘과 ENU XY/yaw도 C++가 소유하며,
-  `MapPackageGroundQuery`는 ENU triangle을 adaptive grid로 조회한다.
-- `CollisionWorld`는 8m deterministic broad phase와 정적 OBB-prism, NPC kinematic OBB, 보행자 vertical capsule의 접촉·projection·상대속도 impulse를 계산한다.
+  `GroundQuery`는 legacy ENU triangle 또는 `SIMGHF1/2` heightfield를 조회한다. v2는 cell
+  material ID·terrain friction multiplier를 차량 설정의 surface scale과 결합한다.
+  surface scale은 차량 설정 v5에서 도입됐으며 현재 소스의 strict 차량 설정 v7에서도 유지한다.
+- chassis shell의 underside·side·roof ground contact가 rollover 관통을 막고, collision impulse에서
+  누적 damage/impact zone을 만든다. Unreal은 이를 6개 차체 구역의 최대 12cm WPO 변형과
+  `F3` overlay로 표시한다. 변형은 시각 효과이며 collision shell을 바꾸지 않는다.
+- `CollisionWorld`는 8m deterministic broad phase와 정적 OBB-prism, NPC OBB, 보행자 vertical
+  capsule의 접촉·projection·상대속도 impulse를 계산한다. 동적 proxy는 질량을 opt-in하면
+  Ego와 질량비에 따른 반대 impulse를 받고, 질량 0은 기존 무한질량 호환 경로를 유지한다.
 - Proto는 루트 `protocol/vehicle.proto`로 통합됐고 R1의 C++·Unreal이 같은 schema-v2 필드 계약을 사용한다. Python 생성물은 같은 원본에서 만들지만 relay 자체는 동결된 선택 기능이다.
 - C++ host는 절대 deadline 60Hz clock, command source/session/sequence/queue-age 검사, 250ms soft SafeStop·1초 hard session retire와 E-stop latch를 적용한다.
 - 개발용 background launcher는 stdout/stderr를 `runtime_logs/`로 redirect하고 tick overrun 요약을 최대 1Hz로 제한해, 단일 `io_context` thread가 소비되지 않는 console pipe에 막히지 않게 한다.
-- WebSocket 세션은 HTTP 101 accept 완료 전 state frame을 쓰지 않으며, 전송 중 state queue는 latest-wins로 제한한다.
-- Unreal client는 입력 변화를 deadzone 처리 후 최신값 우선으로 합쳐 최대 30Hz로 보낸다. W/S는 fresh Ego body state가 정지를 확인한 경우에만 Drive/Reverse를 바꾸며, multi-entity `WorldState`의 Ego pose·body velocity·4개 wheel state와 NPC·보행자 transient 표시 actor를 갱신한다.
-- C++와 Unreal은 strict `manifest.cfg`의 실제 collision checksum을 각각 검증한다. Unreal은 첫 `WorldState` checksum 일치 후에만 `SimulationReset`과 일반 control을 전송하고, host는 reset 전 일반 control을 거부한다.
-- `SimulationHost`는 opt-in `--demo-entities`의 NPC·보행자 authoritative state를 소유하고 tick 진행·새 PIE reset·multi-entity 발행을 수행한다. 최종 LaneGraph, 신호와 Traffic/Pedestrian AI는 후속이다.
-- `Hello` 기반 build/capability 협상과 packet gap HUD는 아직 후속이다. 실제 package의 `static_colliders.csv`는 현재 collider 0개이며, Unreal PIE 벽·동적 entity 충돌은 수동 검증 전이다.
+- WebSocket 세션은 HTTP 101 accept 완료 전 state frame을 쓰지 않고, initial server Hello 뒤
+  첫 client application frame이 유효한 Hello로 승인될 때까지 WorldState broadcast를
+  차단한다. 첫 frame 거부는 1008 policy close, 승인 뒤 ordinary payload 거부는 socket을
+  유지하며 전송 중 state queue는 latest-wins로 제한한다. server-initiated close가 peer
+  handshake나 정체된 write 때문에 완료되지 않으면 250ms deadline 뒤 TCP를 강제 종료한다.
+  기본 listener는 `127.0.0.1` 전용이다.
+- Unreal client는 입력 변화를 deadzone 처리 후 최신값 우선으로 합쳐 최대 30Hz로 보낸다.
+  A/D 키보드 조향은 `DeltaSeconds` 기반 rise/return으로 frame-independent하다. W/S는 fresh
+  Ego body state가 정지를 확인한 경우에만 Drive/Reverse를 바꾼다.
+- C++와 Unreal은 strict `manifest.cfg`의 실제 collision checksum을 각각 검증하고 연결 직후
+  양방향 `Hello`에서 build/source/schema/map checksum과 필수 capability를 교환한다. 양쪽
+  Hello가 유효해지기 전에는 ordinary state/reset/control을 적용하지 않으며 E-stop만 안전
+  예외다. build/schema/map checksum과 정렬한 capability set으로 negotiated Hello fingerprint를
+  만들고, 승인된 connection generation에는 client source/session/highest sequence를 고정한다.
+  같은 sequence는 message kind와 sequence를 제외한 semantic payload가 정확히 같은 재전송일
+  때만 idempotent하게 허용한다. identity 변경·순서 회귀·altered-payload sequence reuse는
+  거부하고, 거부 frame의 높은 sequence는 high-water를 오염시키지 않는다. 그 뒤 Unreal이
+  authoritative checksum 일치 후 `SimulationReset`을 보낸다.
+- `SimulationHost`는 authoritative runtime entity와 signal clock/reset을 소유한다. 8/31
+  `virtual_city_v1` 25lane/차량3head 이력을 보존하며, 현재 `signal_city_v2`는 42lane,
+  차량8+보행8 head, controller2, NPC4·보행자8을 발행한다. map/traffic checksum은
+  `fnv1a64:7446108adad3e25b` / `fnv1a64:dfcb5e4541d71adf`다. 사용자 PIE는 후속이다.
+- `traffic_network.json`은 Unreal이 저장 맵의 실제 도로 충돌과 대조해 별도로 내보내는
+  versioned sidecar다. v1의 고정 schedule과 v2의 controller별 데이터 기반 phase plan/offset을
+  구분하며 각 head의 additive `controller_id`로 소유 controller를 식별한다. C++는
+  schema/topology/지면 폭·높이/source map checksum을 검증한
+  immutable network만 사용한다. worker 250ms 감시→전체 검증→tick-boundary 교체이며
+  새 지면과 불일치하면 신호만 전부 적색으로 전환하고 수동운전/지면 reload는 막지 않는다.
+  `WorldState` field 3/4에 head 상태와 network checksum을 넣어 pose/Health와 같은
+  sequence·map·play identity로 발행한다. plan/offset 평가는 C++ simulation clock만 수행하고
+  Unreal은 `controller_id`를 포함한 결과를 표시할 뿐 phase를 계산하지 않는다.
+  [ADR-014](./decisions/ADR-014-server-clock-traffic-signals.md)
+  및 [차선·신호 계약](./traffic_network_signals.md)을 따른다.
+- UE 경량 diagnostics HUD는 connection/hello/map/control, state rate·sequence,
+  local/server age, max gap·forward missing·duplicate/out-of-order old, checksum과 entity를
+  표시한다. authoritative
+  Health는 8/31 WorldState와 HUD에 연동했다(실제 PIE 확인은 후속). 새 가상 도심의 실제
+  `static_colliders.csv`에는 228 OBB가 있고 기존 Landscape는 0개로 보존했다.
+  Unreal PIE 벽·동적 entity 충돌은 수동 검증 전이다.
 - 기본 CMake 구성은 ZeroMQ를 빌드하거나 5555 포트를 열지 않는다. opt-in observer만 버전 없는 구 `EntityStatePacket`을 발행하며 R1 완료 경로에 포함하지 않는다.
+
+2026-09-02의 동작 보존 리팩터링은 위 책임을 바꾸지 않고 구현 파일의 경계를 좁혔다.
+C++는 runtime options의 cfg/CLI, traffic hot reloader, protocol encoder/decoder를 분리했고,
+Hello·control·reset 처리는 `simulation_host_session.cpp`와 내부 detail로 분리했다. Unreal은
+공통 세단 표시 계약, pure control resolver, client diagnostics, runtime entity/traffic
+presentation과 DriveReplay format/runtime을 분리했다. 세 Windows server wrapper는 공통
+launcher를 사용한다. 공개 계약과 검증 결과는
+[전체 리팩터링 구조](./refactoring.md)에 기록한다.
 
 ### 3.2 목표 구조
 
@@ -85,7 +140,8 @@ runtime과 `Recorder`는 후속이다.
 | `VehicleDynamics` | 자체 강체·조향·구동계·타이어·서스펜션 계산 | 차체·휠·타이어·구동계 상태 |
 | `CollisionWorld` | 정적·동적 충돌 검출과 해결 | collision shapes, contact state |
 | `EntityWorld` | Ego, NPC 차량, 보행자 proxy 생명주기 | authoritative entity state |
-| `MapLoader` | MapPackage 검증과 물리용 데이터 로드 | map checksum, cooked collision |
+| `MapLoader` | Unreal이 측정한 immutable MapPackage를 검증하고 물리 query provider로 로드 | map checksum, ground snapshot, 검증된 정적 collision proxy |
+| `GroundQuery` | triangle 또는 compact heightfield snapshot의 ENU 수직 query·보간 | 검증된 read-only 지면 view |
 | `TransportServer` | 명령 수신, 상태·이벤트 발행, handshake | connection/session state |
 | `Recorder` | 명령·상태·이벤트와 설정 체크섬 기록·재생 | replay stream |
 | `Diagnostics` | tick, latency, collision, queue 로그 | metrics와 structured log |
@@ -95,19 +151,36 @@ C++는 렌더링, 영상 센서 생성, 자율주행 의사결정을 담당하�
 ### 4.2 Unreal
 
 현재 구현은 `SimCoreClientComponent`, `SimCoreProtocol`, `ExternalVehiclePawn`,
-`SimCoreCoordinateFrames`, `SimCorePresentation`, `GroundCollisionExporter`,
-`ASimCoreStaticCollider`와 runtime entity transient 표시다. 아래 표의 나머지 항목은
+`SimCoreCoordinateFrames`, `SimCorePresentation`, 경량 diagnostics HUD, `GroundCollisionExporter`,
+`ASimCoreStaticCollider`와 runtime entity transient 표시다. 가상 도심에는
+`SimCoreVirtualCityLayout` 원본, editor-only `BuildVirtualCity` 저장·Bake commandlet과
+map-local `VirtualCityGameMode`/전용 Pawn을 추가했다. 아래 표의 나머지 항목은
 향후 분리·구현할 목표 모듈이다.
+
+8/31 표시 개선으로 `SimCoreOrbitCamera`의 mouse orbit/zoom/reset과 수평 유지·
+camera probe를 추가했다. 카메라는 server state가 없어도 갱신되며 차량 pose나
+control 값을 쓰지 않는다. Editor의 `BuildSedanVisual`은 자체 차체·휠 StaticMesh와
+material을 `/Game/Vehicles/Sedan`에 저장하고 Pawn의 mesh component가 참조한다.
+메시를 생성하는 코드와 QA 도구는 Editor 모듈에만 있으며 runtime은 저장 에셋을 사용한다.
+unit root·기존 wheel pivot·NoCollision과 C++ 자세/속도 연동 표시를 유지한다.
+후속 실제 Pawn Tick fixture 시험은 접지 상실 뒤 조향 pivot이 이전 각도에 고정되는
+버그를 재현했다. 수정 후에는 지지 위치만 보존하고 최신 서버 조향각을 body-up 기준으로
+적용하며 접지 복구 시 contact plane으로 복귀한다. 재현 FAIL→수정→UE Automation
+26/26·Editor/Game 빌드 통과를 확인했다. 이 fixture는 socket/서버 주행 없이 표시만
+검증하므로 C++ 실제 solver 최고속·선회 시험과 분리한다.
+[조작·생성·검증 경계](./vehicle_driving_refinement.md)를 따른다.
 
 | 모듈 | 책임 | 금지되는 책임 |
 |---|---|---|
 | `SimCoreClient` | handshake, command 전송, WorldState 수신·버퍼링 | 최종 차량 pose 결정 |
 | `ManualInputComponent` | 키보드/게임패드 입력 정규화 | 물리 계산 |
 | `ExternalVehiclePawn` | pose 보간, wheel·steering 시각화 | Ego에 Chaos 힘을 적용해 C++ 상태 수정 |
-| `GeoTransformAdapter` | ENU↔Cesium/Unreal 좌표 변환 | 자체 위·경도 적분 |
+| `SimCoreOrbitCamera` | 외부 추적 카메라의 orbit/zoom/reset 상태와 수평 유지 | 차량 pose·ControlCommand 변경, 센서 측정 좌표 대체 |
+| `GroundCollisionExporter` | Landscape·WorldStatic의 높이·ImpactNormal·유효 cell과 명시적 OBB marker 측정, MapPackage manifest-last commit | suspension·tire·차체 pose 계산 |
+| `GeoTransformAdapter` | 로컬 ENU 원점 metadata와 ENU/FLU↔Unreal 좌표 변환; Cesium/WGS84 통합은 Future | 자체 위·경도 적분 |
 | `MapPackageImporter` | LaneGraph와 로컬 에셋 생성·검증 | 독립된 별도 차선 데이터 유지 |
 | `TrafficDirector` | NPC 차선·속도·신호 intent 생성 | 충돌 후 최종 pose 해결 |
-| `SignalController` | 차량·보행 신호 상태 | C++ 차량 물리 |
+| `SimCoreTrafficSignalActor` | 서버 신호의 비충돌 외형·상태/초수 표시, stale 전부 적색 | 로컬 위상 계산·NPC intent·차량 물리 |
 | `PedestrianDirector` | 단순 경로와 보행 intent, 애니메이션 | 대규모 군중 해석 |
 | `SensorRig` | 카메라 등 센서 생성과 timestamp/frame metadata | AI 판단 |
 | `ReplayPresenter` | 기록 상태 재생과 촬영 카메라 운용 | 기록된 물리 결과 재계산 |
@@ -134,9 +207,10 @@ Python은 차량 동역학과 월드 충돌을 계산하지 않는다. 자율주
 | Ego pose/velocity/wheel | C++ | Unreal과 Python은 읽기 전용 |
 | NPC 물리 pose | C++ | Unreal AI가 intent를 보내고 결과를 표시 |
 | 보행자 collision pose | C++ | Unreal이 경로 intent·animation을 제공하고 결과를 표시 |
-| 신호 상태 | Unreal `SignalController` | tick이 붙은 상태를 C++와 Python에 공유 |
+| 신호 상태 | C++ `TrafficNetwork::signals_at` / `SimulationHost` | 차량과 동일 simulation clock·reset, WorldState 원자 발행; UE는 표시 전용(ADR-014) |
 | LaneGraph·통행 제한 | MapPackage | 세 프로세스가 같은 버전 읽기 |
-| 정적 collision source | MapPackage | C++가 authoritative collision로 cooking |
+| editor scene 지면 측정 | Unreal | 높이·법선·유효 cell을 MapPackage snapshot으로 고정 |
+| runtime 정적 collision snapshot | MapPackage | C++가 검증 후 ground query·collision 계산에 읽기 전용 사용 |
 | 센서 영상 | Unreal | Python이 timestamp와 frame ID로 소비 |
 | 운전 명령 | 선택된 controller | C++ `ControlMux`만 적용 여부 결정 |
 
@@ -162,7 +236,7 @@ EmergencyStop > Active control lease(Manual 또는 Autonomous) > SafeStop
 
 | frame | 좌표계 | 사용처 |
 |---|---|---|
-| WGS84 | longitude/latitude/ellipsoidal height | Cesium 위치, GNSS 출력, 지도 import |
+| WGS84 | longitude/latitude/ellipsoidal height | 기존 runtime 출력 호환; 실제 지리 참조·Cesium·GNSS 통합은 Future |
 | `map_enu` | right-handed, X=East, Y=North, Z=Up | C++ 위치·속도·충돌, MapPackage |
 | `base_link` | right-handed, X=forward, Y=left, Z=up(FLU) | 공통 body 상태, 휠·센서 장착, Python |
 | `unreal_actor` | left-handed, X=forward, Y=right, Z=up(FRU) | Unreal 표시 전용 |
@@ -175,7 +249,10 @@ EmergencyStop > Active control lease(Manual 또는 Autonomous) > SafeStop
 | wheel slip angle·lateral force | wheel-local left |
 | navigation heading | North=0°, 시계 방향; body 회전 vector와 별도 scalar |
 
-- `MapOrigin`은 WGS84 원점과 `map_enu` frame을 정의한다.
+- R1 `MapOrigin`은 가상 코스의 로컬 기준점과 `map_enu` 축·단위·Unreal 기준 transform을
+  versioned metadata로 고정한다. metadata 연동은 후속이며 좌표 왕복 검증은 Must다.
+  기존 runtime의 위·경도 설정과 WGS84 출력은 호환을 위해 보존하지만, 가상 코스가 실제
+  지리 위치를 재현한다고 해석하지 않는다. Cesium/geodetic 원점 통합은 Future다.
 - scalar `yaw_rate`는 true FLU angular velocity의 body-Z 성분이다. 수평 평면 운동에서는
   `heading_rate_clockwise = -yaw_rate_left_positive`지만, compound 자세에서는
   `angular_velocity_body`에서 navigation Euler yaw rate를 복원한 뒤 heading과 비교한다.
@@ -189,9 +266,10 @@ EmergencyStop > Active control lease(Manual 또는 Autonomous) > SafeStop
 - C++ `BodyFrameAdapter`가 공개 FLU와 solver 내부 right-positive steering·lateral·yaw의
   부호 경계를 전담한다. `SimCoreCoordinateFrames`는 평면 ENU 위치, FLU 속도,
   schema-v2 yaw·steering의 Unreal 표시 경계를 모은다.
-- 완전한 `GeoTransformAdapter`, Cesium·quaternion 변환과 Unreal automation 시험은
-  ADR-011 후속 작업이다. 이번 roll·pitch 계약 수정 후 Windows UE 5.6 Editor target build는
-  통과했으며 Cesium·quaternion 왕복·실제 PIE 좌표 시각 검증은 남아 있다.
+- C++ `GeoTransformAdapter`와 UE `SimCoreCoordinateFrames`는 ENU/FLU↔UE FRU position,
+  polar/axial vector와 quaternion basis 변환을 같은 계약으로 구현했다. Windows UE 5.6
+  headless `DriveIntegration.Coordinates.GeoTransformContract` Automation 1/1이 성공했다.
+  로컬 지도 원점 metadata, SensorRig frame과 실제 코스 PIE 좌표 시각 검증은 남아 있다.
 - 위치는 meter, 속도는 m/s, 가속도는 m/s², 질량은 kg, 시간은 second를 사용한다.
 - 물리 내부 각도와 각속도는 radian 기반으로 통일하고 기존 표시용 pose 필드만 degree를 사용한다.
 - 위·경도는 물리 적분에 사용하지 않고 ENU 상태에서 필요할 때 변환한다.
@@ -200,7 +278,9 @@ schema v2의 공개 `linear_velocity_body`, `angular_velocity_body`, scalar `yaw
 `steering_angle`, `ControlCommand.steering`과 wheel lateral 값은 모두 FLU/Y-left 계약을
 사용한다. 항법 heading만 North=0·시계 방향 양수다. 수평 자세에서는 body-Z yaw와 부호가
 반대이고, compound 자세에서는 복원한 navigation Euler yaw와 부호가 반대다.
-남은 자세·센서·Windows 검증은 [ADR-011의 COORD-004~008](./decisions/ADR-011-canonical-coordinate-frames.md#현재-구현과-남은-이행-작업)에서 추적한다.
+남은 로컬 원점·센서 frame·실제 PIE 검증은 [ADR-011의 COORD-004~008](./decisions/ADR-011-canonical-coordinate-frames.md#현재-구현과-남은-이행-작업)에서 추적하되,
+그 중 Cesium/geodetic 통합 요구는 [ADR-013](./decisions/ADR-013-small-virtual-city-course.md)에
+따라 Future로 분리한다. ENU/FLU·Unreal·sensor 기준축과 왕복 시험은 R1에서 유지한다.
 
 ### 6.2 시간 모델
 
@@ -216,36 +296,61 @@ schema v2의 공개 `linear_velocity_body`, `angular_velocity_body`, scalar `yaw
 
 ### 7.1 목적
 
-Cesium의 시각 타일, Unreal spline, C++ 충돌맵을 각각 손으로 관리하면 반드시 어긋난다. 하나의 지도 원본을 전처리하여 모든 런타임 산출물을 생성한다.
+작성 도로 중심선·통행 규칙을 차선과 시각 도로의 공통 원본으로 사용하고, 실제 충돌 지면은
+Unreal에서 측정해 immutable snapshot으로 고정한다. C++가 별도의 지형을 추정하거나
+Unreal scene을 다시 cooking하지 않는다. 아래 그림의 도로 생성·LaneGraph 경로는 목표
+구조이고, 지면 측정→snapshot 검증·조회 경로는 현재 구현돼 있다.
 
 ```mermaid
 flowchart LR
-    SRC["NYC DCM / 허용된 OSM·로컬 에셋"] --> PRE["Offline Map Builder"]
-    PRE --> PKG["MapPackage source"]
-    PKG --> COOK["C++ collision cooking"]
-    PKG --> IMP["Unreal Editor Importer"]
-    PKG --> ROUTE["Python route graph loader"]
-    COOK --> CORE["C++ CollisionWorld"]
-    IMP --> LEVEL["Local road·sidewalk·spline"]
+    SRC["작성 도로 중심선·통행 규칙\nversion/hash·출처"] --> BUILD["Road/LaneGraph Builder\n목표 구조"]
+    BUILD --> LEVEL["Unreal 로컬 도로·보도·소품"]
+    BUILD --> GRAPH["LaneGraph·신호·spawn 데이터"]
+    LEVEL --> MEASURE["Unreal GroundCollisionExporter\nWorldStatic 측정·명시적 OBB marker"]
+    MEASURE --> PKG["Versioned MapPackage\nheightfield·static proxy·checksum"]
+    GRAPH --> PKG
+    PKG --> LOAD["C++ strict MapLoader\n검증·immutable query"]
+    LOAD --> CORE["GroundQuery·CollisionWorld\nC++ 차량 물리"]
+    PKG --> UE["Unreal traffic·표시"]
+    PKG -.-> ROUTE["Python route loader\nR2 이후"]
 ```
 
-NYC Digital City Map의 street centerline은 도로명과 폭을 가진 공식 지도 기반 데이터로 사용할 수 있다. 실제 lane 수, 방향, 회전 연결, 신호, 통행 제한은 별도 속성과 수동 override가 필요하다. Cesium for Unreal은 GeoJSON/SHP를 직접 lane spline으로 변환하지 않으므로 offline builder와 Unreal importer를 둔다.
+R1 중심선은 가상 코스에 맞춰 직접 작성하고 방향·폭·lane 수·회전 연결·신호·통행 제한을
+명시한다. 여기서 차선 offset과 교차로 연결을 생성한 뒤 Editor override로 보정한다.
+GIS/GeoJSON/SHP importer는 R1 선행 조건이 아니다. 자체 작성 원본에도 버전/hash와
+변환 이력을 남기며, 외부 에셋은 별도로 라이선스·attribution을 추적한다.
 
 ### 7.2 현재 R1 runtime 패키지와 장기 소스 패키지
 
 ```text
-map_packages/wall_broad_v1/
+map_packages/<runtime_package>/
   manifest.cfg
-  ground_surface.csv
+  ground_surface.csv       # legacy triangles 또는 새 형식 sentinel
+  ground_heightfield.bin   # 새 Unreal 측정 package에서 선택
   static_colliders.csv
   README.md
 ```
 
+기존 `wall_broad_v1` bootstrap과 실제 Landscape용 `landscape_local_v1`, 사용자 `NewMap`은
+보존한다. 2026-08-31 `/Game/VirtualCity/Maps/L_VirtualCity`와 `virtual_city_v1`을 실제
+생성했고 9월 1일 연석·보도 support를 이행해 50cm로 다시 Bake·저장 검증했다. 새 package는
+`SIMGHF2` 401×481 lattice, 192,881 samples 중 192,079 valid samples와 191,200
+valid·drivable cells, OBB 228개, checksum `fnv1a64:942842ea8d76b7a2`다. 명목 240×200m에서
+cube 끝면 ray hit가 누락된 동·서 각 0.5m를 제외한 valid 지면은 E `[-119.5,119.5]`,
+N `[-20,180]`m의 239×200m다.
+
+`drive_route.csv`는 약 633.1m 루프의 QA checkpoint 364개이며 `east_m,north_m,up_m,heading_deg`
+header를 가진다. collision manifest/checksum과 host collision 입력에 포함하지 않는다.
+제품 LaneGraph·NPC AI·통행 규칙·경로계획을 구현한 파일로 해석하지 않는다.
+
 현재 runtime은 strict `manifest.cfg`에 package ID, `map_enu` 좌표계,
 `collision_files`와 실제 payload checksum을 기록한다. C++와 Unreal은 선언된 collision
 파일의 이름과 raw bytes로 checksum을 다시 계산하며, unknown·duplicate·missing key,
-unsafe filename, 파일 누락·변조를 시작 전에 거부한다. `ground_surface.csv`는 ENU
-triangle, `static_colliders.csv`는 정적 OBB-prism의 공통 충돌 source다.
+unsafe filename, 파일 누락·변조를 시작 전에 거부한다. 새 package는
+`ground_heightfield.bin`을 높이·ImpactNormal·유효 cell source로 사용하고
+`ground_surface.csv`는 header-only sentinel이다. binary가 선언되지 않은 기존 package만
+`ground_surface.csv` ENU triangle을 사용한다. `static_colliders.csv`는 정적 OBB-prism의
+공통 충돌 source다.
 
 아래 `manifest.json` 구조는 LaneGraph·신호·출처와 여러 cooked artifact까지 포함할 장기
 MapPackage 목표 포맷이며 현재 runtime parser가 읽는 형식이 아니다.
@@ -268,10 +373,10 @@ map_packages/<long_term_package>/
 
 - package ID와 semantic version
 - 작성 도구와 schema version
-- WGS84 원점과 축 규약
+- 로컬 ENU 원점·축·단위와 Unreal 기준 transform; WGS84 연계 정보는 Future 선택 항목
 - 각 파일의 SHA-256
-- 원본 데이터의 이름·버전·취득일·라이선스
-- Unreal용 및 C++용 cooked artifact가 참조한 source checksum
+- 자체 작성 원본의 작성 주체·버전/hash·변환 이력, 외부 데이터·에셋의 취득일·라이선스
+- Unreal 생성물과 측정 snapshot·LaneGraph가 참조한 source checksum
 
 ### 7.3 LaneGraph
 
@@ -286,51 +391,137 @@ LaneGraph는 다음 정보를 가진 방향 그래프다.
 - 정지선, 횡단보도, 신호 그룹
 - 수동 보정 provenance
 
-초기 생성은 도로 중심선을 기반으로 하되 lane offset을 자동 생성한다. 개발자는 모든 spline을 직접 깔지 않고 Wall/Broad 핵심 교차로와 통행 제한만 보정한다. 동일 LaneGraph를 Unreal NPC, Python A*, C++ 도로 경계 검증에 사용한다.
+초기 생성은 직접 작성한 가상 코스 도로 중심선을 기반으로 lane offset을 자동 생성한다.
+시각 도로와 어긋난 교차로 연결·정지선·통행 제한을 Editor override로 보정한다. 동일
+LaneGraph를 Unreal NPC, 향후 Python A*, C++ 도로 경계 검증에서 사용하도록 설계한다.
+배경 범위를 줄여도 LaneGraph 생성·신호 교차로 1개·NPC 3~4대·보행자 6~8명은 R1 Must다.
 
 ### 7.4 충돌 일치 절차
 
-1. Unreal `GroundCollisionExporter`에서 `Ground Actor`를 지정한 뒤 `Fit Sampling Bounds To
-   Ground Actor`로 actor 전체 component bounds와 기본 100cm padding을 sampling box에
-   반영한다. 그다음 WorldStatic 지면을 ENU triangle으로 샘플링하고,
-   `ASimCoreStaticCollider` marker를 정적 OBB-prism row로 변환한다.
-2. exporter는 `ground_surface.csv`와 `static_colliders.csv`를 staging·교체한 뒤
+1. Unreal `GroundCollisionExporter`에서 `Ground Actor`를 지정한다. Bake preflight는 actor
+   전체 colliding-component bounds와 기본 100cm padding을 sampling volume이 포함하는지
+   검사하고 부족하면 자동 Fit한다. 수동 Fit 버튼은 결과 box를 미리 볼 때 사용한다.
+   기본 100cm 격자에서 WorldStatic hit 높이·ImpactNormal을 측정하고 missing/discontinuous
+   cell을 구분해 compact `SIMGHF2` heightfield를 만든다. v2 cell에는 stable material ID와
+   terrain friction multiplier가 포함된다. 최대 2,000,000 sample을 넘으면
+   해상도를 몰래 낮추지 않고 명시적으로 거부한다. `ASimCoreStaticCollider` marker는 정적
+   OBB-prism row로 변환한다.
+2. exporter는 header-only legacy sentinel `ground_surface.csv`,
+   `ground_heightfield.bin`, `static_colliders.csv`를 모두 staging·교체한 뒤
    `manifest.cfg`를 마지막에 commit하여 부분 package가 유효하게 보이지 않게 한다.
-3. C++는 manifest와 collision payload의 실제 checksum을 검증한 뒤 adaptive ground grid와
-   8m static broad-phase index를 구성한다.
-4. Unreal도 같은 manifest와 payload checksum을 검증하고, 서버의 첫 `WorldState`
-   `map_package_checksum`이 일치한 뒤 `SimulationReset`과 control을 허용한다.
-5. checksum이 다르거나 reset lifecycle이 열리지 않으면 host는 일반 control을 거부한다.
-6. Ego의 실제 ground·정적·동적 contact solving은 C++만 수행한다.
+3. C++는 시작 시 manifest와 collision payload의 실제 checksum을 검증한다. binary가 선언된
+   package는 O(1) lattice provider를, 기존 package는 adaptive triangle provider를 선택한다.
+   heightfield v1은 default material·1.0 multiplier로 해석하고 v2는 cell material/friction을
+   strict 검증해 contact에 전달하며,
+   static collision에는 8m broad-phase index를 구성한다. 실행 중에는 manifest를 250ms 주기로
+   background 감시하고 같은 전체 검증을 통과한 snapshot만 simulation thread에 전달한다.
+   시작 로그의 `ground_format`·sample/cell 수와 `exported_ground_bbox_enu_m`·
+   `exported_span_m`은 실제 drivable coverage를 표시해 잘못된 Bake를 즉시 드러낸다.
+4. host는 새 snapshot을 고정 tick 시작점에서 ground·static collision·checksum 단위로
+   원자 교체하고 차량·clock·control lifecycle·runtime entity를 reset한 뒤 이전 WebSocket을
+   닫는다. 작성 중이거나 invalid인 후보에는 기존 snapshot을 유지한다.
+5. Unreal은 연결마다 같은 manifest와 payload checksum을 다시 검증한다. 재연결에서 checksum이
+   바뀌었다면 새 PlaySession ID를 만들고 서버의 첫 일치 `WorldState` 뒤
+   `SimulationReset`과 control을 허용한다.
+6. checksum이 다르거나 reset lifecycle이 열리지 않으면 host는 일반 control을 거부한다.
+7. Ego의 실제 ground·정적·동적 contact solving은 C++만 수행한다.
 
-현재 Landscape runtime package는 ground triangle을 로드하지만 exported static collider가
-0개다. 또한 tracked CSV 범위는 아직 `east=-15~15m`, `north=-7~30m`다. 새 fit 버튼은
-source에 구현됐지만 버튼 적용과 재-bake 전에는 package 범위가 넓어지지 않는다. 이번
-차체·좌표 변경의 UE 5.6 build와 tracked package background runtime smoke는 통과했지만,
-fit 적용 재-bake와 실제 PIE 주행은 재검증 전이다.
+tracked Landscape runtime package는 실제 v2 전 단계에 Bake한 `SIMGHF1`, `507×508` lattice,
+`257,556 samples/256,542 cells`, column·row step 길이 1m인 packed heightfield다. checksum
+`fnv1a64:b8b0a6ccd89614de`를 당시 서버 프로세스가 재시작 없이 tick boundary에 적용해 파일
+형식과 책임 분리가 실제 package까지 반영됐다. v2 material/friction 경로는 automated fixture로
+end-to-end 검증했지만 실제 Landscape Physical Material/tag 재Bake는 아직이다. exported
+static collider는 이 기존 Landscape package에서 0개로 보존된다. 별도 가상 도심에는
+실제 v2 재질과 OBB 228개를 Bake해 저장 정렬과 C++ dense route/물리 완주 선행 시험을
+검증했다. 어느 자동 결과도 실제 PIE의 경사·차체 자세·벽 비관통·재연결 인수를 대신하지 않는다.
 
-Cesium 스트리밍 타일의 collision은 타일 LOD와 로딩 상태가 변할 수 있으므로 authoritative 주행 충돌로 사용하지 않는다.
+### 7.5 런타임 MapPackage 교체 수명주기
 
-## 8. Cesium과 로컬 환경의 경계
+```text
+Unreal Bake
+  └─ payload staging/replace
+      └─ manifest.cfg last commit
+          └─ background validate (ground + static + checksum)
+              ├─ invalid/in-progress → reject, keep current snapshot
+              └─ valid latest → queue
+                  └─ next 60Hz tick boundary
+                      ├─ atomic snapshot swap
+                      ├─ vehicle/clock/lease/entities reset
+                      ├─ old socket/session fence
+                      └─ Unreal reconnect → local revalidate
+                          └─ changed checksum → new PlaySession + Reset
+```
 
-### 8.1 Cesium이 담당하는 부분
+manifest-last는 파일 저장의 원자성을 보장하는 commit marker이고, simulation tick boundary는
+런타임 물리 관측의 원자성을 보장한다. 둘을 분리해야 한 tick에서 새 ground와 이전 collision이
+섞이거나, 새 checksum인데 이전 차량 pose가 계속되는 상태를 만들지 않는다. 후보를 읽는 동안
+추가 Bake가 완료되면 latest verified candidate가 우선한다. payload가 동일해 checksum이
+변하지 않은 Bake에는 reset이나 reconnect를 유발하지 않는다.
 
-- Georeference와 WGS84 변환
-- 지도 원점 배치
-- 목표 장비 성능을 통과할 경우 제한된 중·원경 배경
-- 지리 데이터 정렬을 위한 Editor 기준
+향후 Cesium 같은 스트리밍 배경을 추가하더라도 타일 collision을 authoritative 주행 충돌로
+사용하지 않는다. R1은 로컬 Unreal scene 측정과 검증된 snapshot만 사용한다.
 
-### 8.2 로컬 Unreal 환경이 담당하는 부분
+## 8. 가상 도심 환경의 범위와 경계
 
-- 차량이 실제로 닿는 도로 표면
-- 보도, 커브, 정지선, 횡단보도
-- 핵심 촬영 구간의 재질과 소품
-- 고정 충돌 source와 시각적으로 맞는 주행면
-- 주요 랜드마크의 촬영 품질
+### 8.1 R1 제작 범위
 
-Cartographic Polygon의 invert/exclude 기능으로 목표 구역 바깥의 완전한 타일을 제외할 수 있지만, 경계에 걸친 타일은 로딩될 수 있고 시각 클리핑이 물리 충돌을 자동으로 자르지는 않는다. 따라서 이는 배경 최적화 수단이지 물리 데이터 생성 수단이 아니다.
+- 반복 주행 가능한 작은 양방향 도로 루프와 신호 교차로 1개
+- 보도·횡단보도·완만한 경사·정차 공간과 명확한 코스 경계
+- 제한된 모듈형 건물·소품·도로 재질·조명으로 구성한 로컬 배경
+- 첫 blockout은 명목 240×200m, 현재 50cm Bake의 valid 지면 239×200m이며 조작감·성능에 따라 조정 가능
+- 실제 도시·랜드마크 재현, 실제 GIS 취득, Cesium 설치·통합은 R1 범위 밖
 
-Google Photorealistic 3D Tiles는 현재 목표 PC에서 측정된 성능 문제와 데이터 추출·저장 제약 때문에 R1에서 제외한다. 사용자 소유 데이터나 합법적으로 내려받을 수 있는 지리 데이터를 crop하여 로컬 에셋 또는 자체 3D Tiles로 만드는 방식은 허용한다.
+### 8.2 Unreal authoring과 C++ 물리의 경계
+
+현재 생성 원본은 meter 기반 `SimCoreVirtualCityLayout.h/.cpp`다. editor-only
+`BuildVirtualCity`가 도형 594개와 저장형 색상 재질 10개를 만든다. `VirtualCityGround`
+한 actor에는 기본 지면·도로 59개, 보도 116개와 연석 top 215개, 총 390개 component가
+있다. 건물·외곽 벽은 별도 시각 geometry이고, 연석은 휠 Ground support와 semantic
+`Curb` marker를 함께 가진다. 전체 static marker는 228개다. 주행면의
+`SimCore.Surface.Asphalt`/기본 지면의 rough
+tag를 production exporter가 측정해 v2 재질로 전달한다. 임시 runtime MID만 사용하는
+구성이 아니며 외형은 아직 Engine Cube 기반 prototype art다.
+
+C++는 current→predicted swept body footprint가 닿는 Curb along 구간을 `R` 이하 간격으로
+검사한다. 각 위치에서 near(+1R)·far(+3R) pair가 모두 유효하고, `abs(near delta)`가
+`[0.02m,0.75R]`, far delta가 같은 부호, far 높이차와 collider 높이 오차가 `0.30R` 이하,
+collider 높이가 `0.75R` 이하인지 확인한 뒤에만 planar body collision의
+해당 Curb를 제외한다. 50cm heightfield의 authored marker 중심을 가로지르는 full-body
+footprint 215곳 중 도로/보도 연석 중심 214곳이 후보이며,
+`Curb_BayEnd` 중심은 뒤의 Barrier 경계 때문에 의도적으로 제외된다. 이는 marker 중심
+검사 결과이며 전체 연석 길이 보장은 아니다. 옛 1m Bake+absolute marker-top 후보 계약은
+164/215였고 현재는 50cm+signed delta다. 옛 bytes를 최종 계약으로 재감사하지 않아
+개선분을 해상도에만 귀속하지 않는다. one-off 전체 along-length QA는 210/215 collider 전 길이와
+북쪽 T-opening 네 끝단·BayEnd의 의도적 gap을 확인했다. 휠 ray·서스펜션·차체
+자세 계산은 GroundQuery를 계속 사용하고 pose를 직접 올리지 않는다.
+
+생성 commandlet은 기존 대상 맵을 덮어쓰지 않는다. `-SyncGeneratedGround`는 생성 원본과
+정확히 일치하는 연석·보도 actor만 Ground component로 이행하는 제한된 migration이다.
+`-BakeOnly`는 현재 저장 맵을
+그대로 열어 production export만 수행하고, `-ValidateOnly`는 저장 geometry transform,
+marker ID·pose·extent·semantic·활성 상태와 route asphalt·높이·경사를 원본과 비교한다.
+후자는 사용자 배치 변경 이후 원본과 다르면 실패할 수 있다. 실행·수정 절차는
+[가상 도심 빠른 시작](./virtual_city_quickstart.md)을 따른다.
+
+저장 재로드 검증과 C++ dense route/입력만을 주는 실제 물리 완주 선행 시험,
+UE Automation 11/11 및 Editor/Game 빌드는 통과했다. 최종 통합 QA 재실행은 작업일지에서
+관리하고 아래 실제 PIE·시각·성능 경계를 별도로 유지한다.
+
+- Unreal은 도로·보도·건물·소품을 작성하고 WorldStatic 지면과 OBB marker를 측정한다.
+- 시각 주행면과 측정된 heightfield·정적 proxy는 같은 코스와 원점을 사용한다.
+- C++는 검증된 immutable snapshot을 조회해 타이어·서스펜션·차체·접촉을 계산한다.
+- 배경 메시 추가만으로 C++ 충돌이 자동 생성되지 않는다. 주행 관련 장애물은 명시적
+  marker와 재Bake·checksum 검증이 필요하다.
+- 최종 코스는 실제 PIE 비관통·경사 접지·재Bake/reconnect·표시 일치 및 패키지 성능을
+  통과해야 하며 자동 fixture 성공으로 대체하지 않는다.
+
+### 8.3 보존과 Future
+
+기존 `NewMap`과 package는 비교·회귀 자료로 보존했고 별도 코스를 제작했다. Cesium은 현재
+필수 의존성이 아니며 이번 결정은 플러그인을 제거했다는 의미가 아니다. 실제 지리 원점·
+Cesium 중원경·GIS importer는 필요해지는 릴리스에서 별도 결정한다. Google Photorealistic
+3D Tiles 의존도 R1에서는 제외한다. 제작 순서와 자산 출처 정책은
+[배경 제작안](./04_environment_plan.md)을 따른다.
 
 ## 9. 차량 물리 구조
 
@@ -358,11 +549,23 @@ D1에 외부 차량 SDK를 런타임으로 채택하지 않고 현재 C++ 서버
 - 질량과 구동력·제동력으로 종방향 가속도 계산
 - 공기저항과 구름저항
 - Drive, Neutral, Reverse와 단일 기어비 RPM 근사
+- 8/31 후속 승인한 조향 변경은 `clamp(input, -1, 1) × max_steering_angle`을 속도 무관
+  중앙 목표각으로 정하고 유한 rack rate로 접근한 뒤 Ackermann 기하로 앞바퀴에 배분한다.
+  최대 중앙각 35°, 증가 `1.80rad/s`, 복귀 `2.20rad/s`는 유지한다. 속도별 cap과
+  `comfortable_lateral_accel_mps2`는 제거하며 선택형 속도 조향 보조를 추가하지 않는다.
+  v6 단계의 C++/Unreal 자동 검증은 이전 이력이며, 아래 v7·hard-stop 지지력 보완은
+  최종 CTest 16/16·UE 26/26을 통과했다. 극한 과도응답과 사용자 PIE 인수는 남아 있다.
+  목표각은 실제 곡률/횡가속도/yaw를 강제하지 않으며,
+  실제 ENU 궤적은 기존 타이어 힘·normal load·slip·충돌 적분에서 결정한다.
 - `GroundQuery`를 통한 4개 바퀴의 하향 hit point·normal·no-hit 상태
-- `FlatGroundQuery` 또는 MapPackage `ground_surface.csv` ENU triangle의 가장 가까운 vertical hit와 adaptive ground grid candidate 조회
+- `FlatGroundQuery`, legacy `ground_surface.csv` ENU triangle provider 또는 Unreal 측정
+  `ground_heightfield.bin` lattice provider의 가장 가까운 vertical hit·법선 조회
 - 바퀴별 1D spring/damper stroke·normal reaction. 네 독립 반력이 각 tire load와 차체
   z/heave, mount arm을 통한 pitch·roll moment를 결정한다.
 - wheel inertia와 longitudinal slip 기반 종력, slip angle 기반 횡력, friction circle 제한.
+  v7은 앞/뒤 per-tire cornering stiffness를 고정 60,000/50,000N/rad로 분리한다.
+  spring 외 hard-stop 반력을 tire load/마찰 예산에 반영한 수정은 관련 직접 회귀와
+  기존 시험을 통과했다. 하중 비례 강성 후보는 지형 회귀 실패로 되돌렸으며 채택하지 않는다.
   저속 복합 입력에서는 사용 가능한 마찰 한도에서 횡력을 먼저 보존하고 남은 범위에
   종력을 배분해 출발·저속 선회 중 옆미끄럼을 억제한다.
 - 구동력은 유한 rise/fall rate로 적용하고 slip 8~12% traction control을 거친다. 구동축
@@ -392,9 +595,13 @@ D1에 외부 차량 SDK를 런타임으로 채택하지 않고 현재 C++ 서버
   forward/reverse 교대 sweep으로 풀어 대칭 충격의 wheel-order bias를 없앤다. 자세 보정으로
   mount가 다른 Landscape triangle로 이동할 수 있으므로 correction→ground requery→enforce를
   같은 tick에 최대 4회 반복한다.
-- ground coverage ray 1~3개는 실제 partial support로 계속 계산한다. 첫 wheel ray가 Bake
-  밖으로 나갔다는 이유로 rollback하지 않으며, 별도 vehicle-centre coverage가 사라지거나
-  네 ray가 모두 사라질 때만 이전 pose로 fail-closed한다.
+- ground coverage는 suspension contact와 구분한 authored-surface footprint gate다. 단일
+  missing corner와 대각선으로 마주 보는 두 wheel ray만 남은 상태는 실제 partial support로
+  계속 계산한다. 반면 front/rear axle 또는 left/right side 중 하나의 두 coverage ray가
+  모두 사라지면 ground-bound reduced model이 남은 spring만으로 map 끝에서 tip하지 않도록
+  step 시작의 이전 지원 pose로 fail-closed하고 속도를 0으로 만든다. 별도 vehicle-centre
+  coverage miss와 네 ray 모두 miss도 기존처럼 같은 안전 정지를 적용한다. 첫 wheel 하나가
+  Bake 밖으로 나갔다는 이유만으로 rollback하지는 않는다.
 - 경사면 normal에서 만든 fixed ENU tangent basis의 longitudinal/lateral 중력·타이어 힘과 실제 XY 이동의 surface Z projection
 - `CollisionWorld`의 8m deterministic broad phase, 정적 OBB-prism SAT, NPC kinematic OBB와 보행자 vertical capsule 접촉
 - 이동 거리 0.10m·회전 1° 이하 microstep, projection과 normal/restitution/friction impulse, 최대 64 step fail-closed
@@ -405,12 +612,75 @@ D1에 외부 차량 SDK를 런타임으로 채택하지 않고 현재 C++ 서버
 brute-force 동등성, 평지·급경사·전체/부분 no-hit, spring/damper, tangent force,
 오르막·횡경사 자세, 앞이 높은 지면의 positive pitch, 왼쪽이 높은 지면의 positive roll,
 기존 6°/8° 경계를 넘는 연속 자세, deep one-side hard-stop의 bounded attitude와 symmetric
-four-wheel 재접촉의 pitch/roll 무편향, 정적 OBB와 NPC·보행자 proxy의 projection·상대속도·
-결정성을 검증한다. 최신 C++ Release CTest는 11/11, `vehicle_physics_tests`와
-`vehicle_config_tests` 반복은 각각 20/20 통과했다. 차체의 east/north/up과
+four-wheel 재접촉의 pitch/roll 무편향, 단일 missing corner·대각선 2-wheel partial support와
+완전 axle/side·centre·0-ray terminal footprint gate, 정적 OBB와 NPC·보행자 proxy의
+projection·상대속도·결정성을 검증한다. tracked `landscape_local_v1`에서 full-throttle로
+600 tick 주행하는 회귀는 보완 전 최대 pitch `151.7°`, 최소 z `-0.182m`의 nose-down 실패를
+재현했고 terminal footprint gate 적용 후 통과했다. live editor-baked package 회귀는 이후
+범위가 확대돼도 깨지지 않도록 고정 `north<30m` 종료 가정 대신 finite pose·centre coverage·
+비관통·attitude stability를 검사하고, terminal stop은 deterministic finite-boundary 회귀가
+담당한다. 과거 cap 기반 조향 회귀의 약 5m/s 반경 4.0~6.5m, 약 10m/s 반경 15~25m와
+bicycle model 대비 yaw response 75~115%는 이전 모델의 검증 이력으로만 보존한다.
+최신 고정 목표각 구조의 합격 조건으로 재사용하지 않는다. 당시 Ackermann·마찰 한도,
+v1 default friction과 v2 material/multiplier 선택·당시 차량 설정 v5 surface scale 결합도
+검증했다. 2026-08-28 당시 C++ Release build와
+CTest는 14/14, 전체 suite 20회는 280/280(48.35s), 신규 heightfield/reload 반복은 각 50/50,
+선행 WebSocket 회귀는 100/100 통과했다. UE 5.6 Editor/Game build, GeoTransform headless
+Automation 1/1과 실제 WebSocket smoke의 pre-Hello state 차단, invalid Hello 1008,
+same-sequence altered-payload 2회 거부, valid recovery state sequence 5148도 통과했다.
+차체의 east/north/up과
 roll/pitch/yaw 및 충돌 후 pose는 C++가 결정하고 Unreal은 결과를 표시하며 Chaos로 Ego
-pose를 다시 해결하지 않는다. 이번 변경의 UE 5.6 Editor build와 background server smoke는
-통과했으며 실제 PIE 주행 smoke는 재검증 전이다.
+pose를 다시 해결하지 않는다. 같은 날 Unreal exporter에 full-bounds Bake preflight·자동 Fit·
+ENU bbox 결과를 추가했고 UE 5.6 Editor build가 성공했다. 실제 PIE 주행 smoke는 재검증
+전이다.
+
+새 조향 검증은 동일 입력·초기 rack 상태·tick 경과에서 속도와 무관한 목표각과 slew,
+중립 복귀·좌우 Ackermann, 정상/저마찰 지면의 바퀴별 friction budget을 확인한다.
+실제 궤적은 ENU 위치 증분/진행 방향 변화로 측정하고 종방향 계기판 속도
+`longitudinal_kph`와 ENU CG 선속도 `path_kph`, slip·yaw 응답을 구분 기록한다.
+유효 도로 입력 회귀의 CG 반경은 기하학적 CG 참고의 0.85~1.5배 범위인지 확인하되
+90km/h full-lock 한계 시험에는 적용하지 않는다. 고속 full-lock의 slip·understeer·감속을 허용하며 무미끄럼이나 저속과 같은
+반경을 강요하지 않는다. 물리 결과를 목표 경로에 맞춰 덮어쓰지 않는다. **이전 v6 직접 시험**은
+진입 속도 `0/3/10/25/-5m/s`의 동일 입력 이력에서 중앙/개별 wheel 각도의 매 tick 차이
+1e-6rad 미만과 full rack 35° 도달 350ms 이내를 확인했다. 정속 입력 0.15의
+30/40/50km/h 중앙각은 모두 5.25°였으며 실제 ENU 궤적 반경은 각각 약
+30.477/31.292/33.947m였다. 고속 full-lock은 slip·감속을 보였으며 특정 실차 검증이
+아니다. 당시 강화된 반경 기준을 포함한 C++ `ALL_BUILD`·CTest **16/16(5.73초, skip 0)**,
+Unreal Editor/Game Development 빌드·Automation **25/25**(신규 Steering 2개)와 격리
+Health smoke가 통과했다. 기존 TrafficSignals isolated-world cleanup 경고 3개는 남고
+신규 조향 시험은 경고가 없으며 전체 시험 실패는 0개다. 사용자 PIE 감각 인수·NPC·
+패키징·성능·특정 실차 검증을 완료 처리하지 않는다.
+
+현재 소스의 strict 차량 설정 형식은 `format_version=7`이다. 앞/뒤
+`front_tire_corner_stiffness_n_rad`·`rear_tire_corner_stiffness_n_rad`는 각 축 합계가 아닌
+타이어 1개당 N/rad다. 선정값은 앞 60,000/뒤 50,000이며 하중에 비례해 바꾸지 않는다.
+v6는 구 `tire_corner_stiffness_n_rad`를 두 새 항목에 각각 그대로
+복사하고 구 항목을 삭제한 뒤 version7로 올려야 한다. v5는 여기에
+`comfortable_lateral_accel_mps2` 삭제도 필요하다. 구 버전은 migration 안내 오류,
+v7의 legacy key는 unknown 오류로 거부하며 자동 변환·무시하지 않는다. 선택형 속도
+조향 보조는 없고 최대각·rack rate/return과 타이어 힘 파라미터를 분리한다.
+
+최신 정속 50km/h·입력 0.15 진단에서 spring 지지력 합 13,422.963N과 FR hard-stop
+impulse 21.4502003N·s×60Hz를 더하면 1,500kg 중량인 약 14,709.975N을 지지하지만,
+hard-stop 기여가 타이어 마찰 계산에서 빠진 문제를 확인했다. 당시 FR 횡력 이용률은
+약 0.52로 비포화이고 FL은 약 0.95의 횡력 한계에 도달했으므로 이 누락 수정만으로
+50km/h 반경의 큰 개선을 보장하지 않는다. 이 반력을 tire normal-load/힘 예산에
+반영한 수정은 soft spring·`dt` 변경·reset·no-contact·50km/h `ΣFz` 직접 회귀를 통과했다.
+추가 하중 비례 강성 후보는 기존 `landscape_local_v1`의 10초 full-throttle·zero-steer
+회귀에서 최대 roll 65.681°로 기존 45° 한도를 넘어 실패해 되돌렸다. 최신 v7은 앞/뒤
+고정 60k/50k를 사용하고, `μFz`를 임의로 늘리거나 `ΣFz`를 `mg`에 정규화하지 않는다.
+50km/h·입력 0.15 반경은 약 32.48m로 이전 33.947m에서 완만하게 개선됐지만,
+180km/h full-lock의 큰 반경·과도 yaw 진동과 reduced-order 한계는 남는다. 이전 v6
+회귀로 새 수정의 합격을 대신하지 않는다. 최신 physics/config/probe 직접 실행에 이어
+C++ `ALL_BUILD`·**CTest 16/16(4.92초, 실패 0·skip 0)**, UE **Editor/Game 빌드·26/26**,
+격리 Health smoke·서버 적용이 통과했다. 90km/h·입력 0.04는 중앙각 1.4°,
+종방향 계기판 속도 90.0007km/h·CG 궤적 속도 90.0264km/h를 유지하며 ENU 반경이
+145.377m에서 114.520m로 변했다. 신규 0.015 small-signal의 30/90km/h 반경은
+295.610/303.179m였으며 독립 understeer 계수 0.000125rad/(m/s²)를 검증했다.
+이는 UE deadzone 0.02 미만의 solver 진단이지 실제 사용자 입력 시험이 아니다.
+**180km/h full-lock 과도 yaw 진동·사용자 PIE 인수는 미완료**이며 자동 계약 통과와 구분한다.
+미채택 실험의 공식 모델 참고와 상세 사용/검증 경계는
+[조향 문서](./vehicle_driving_refinement.md)를 따른다.
 
 현재 4-corner 모델은 wheel 회전 관성, 독립 spring/damper와 sprung-body heave·pitch·roll을
 결합하지만 hub vertical unsprung mass는 대수적으로 푸는 reduced-order 구조다. roll/pitch는
@@ -419,15 +689,22 @@ planar yaw trajectory를 조건으로 finite-angle 계산하며 planar yaw inert
 singularity를 피하지만 완전한 전복·공중 6DoF나 특정 실차 계측 모델을 뜻하지 않는다.
 
 Unreal에서 제작한 개발용 Landscape·정적 경사면은 `GroundCollisionExporter`가 지정된
-영역의 실제 `WorldStatic` 충돌을 수직 raycast로 샘플링해 MapPackage
-`ground_surface.csv`로 bake한다. `ASimCoreStaticCollider` marker는 ID 순으로
+영역의 실제 `WorldStatic` 충돌을 수직 raycast로 측정해 높이·ImpactNormal·유효 cell과
+surface material/friction을 MapPackage `ground_heightfield.bin`의 `SIMGHF2`로 bake한다.
+서버는 기존 `SIMGHF1`도 호환한다. manifest v1 호환용
+`ground_surface.csv`는 header-only sentinel이며 새 C++ host는 이를 물리 입력으로 사용하지
+않는다. `ASimCoreStaticCollider` marker는 ID 순으로
 `static_colliders.csv`의 Wall/Curb/Barrier OBB와 재질로 export된다. 월드 cm 좌표는
-`east=Y/100`, `north=X/100`, `up=Z/100`으로 변환한다. 두 CSV를 staging·교체한 뒤
-실제 payload checksum을 담은 `manifest.cfg`를 마지막에 commit한다. C++ 서버는 재시작
-시 이 snapshot을 로드해 바퀴별 ground query와 `CollisionWorld` 접촉을 수행하므로
+`east=Y/100`, `north=X/100`, `up=Z/100`으로 변환한다. 세 payload를 staging·교체한 뒤
+실제 payload checksum을 담은 `manifest.cfg`를 마지막에 commit한다. C++ 서버는 시작 시
+binary 선언 여부에 따라 heightfield 또는 legacy triangle provider를 로드하고, 실행 중에는
+완전 검증한 새 snapshot을 tick boundary에서 교체해 바퀴별 ground query와
+`CollisionWorld` 접촉을 수행한다. 따라서
 render pose의 충돌 hit를 네트워크로 되먹이는 순환 지연 없이 단일 권한과 replay
-결정성을 유지한다. 현재 실제 package에는 static collider가 0개라 벽·커브 PIE 확인은
-아직 수동 게이트로 남는다.
+결정성을 유지한다. 상세 책임 경계와 실패 정책은
+[ADR-012](./decisions/ADR-012-unreal-ground-measurement-boundary.md)에 기록한다. 기존
+Landscape는 0 markers, 새 가상 도심은 실제 228 OBB이며 벽·커브 PIE 확인은 자동 검증과
+별개로 수동 게이트다.
 
 ### 9.3 정확도의 정의
 
@@ -446,7 +723,7 @@ R1에서 “정확한 C++ 물리”는 다음을 의미한다.
 
 R1 수동운전의 runtime control/state 통신은 `WebSocket binary + Protobuf`로 확정한다. C++ host의 현행 JSON 입력 파서는 제거됐으며, UDP는 초기값이 아니라 측정 결과가 나쁠 때 재검토하는 대안이다. Python relay와 그 JSON WebSocket은 동결된 과거 observer/debug 도구이며 기본 빌드와 R1 검증에서 제외한다.
 
-현재 R1 구현은 하나의 WebSocket 연결에서 `ControlCommand`, `SimulationReset`,
+현재 R1 구현은 하나의 WebSocket 연결에서 `Hello`, `ControlCommand`, `SimulationReset`,
 `WorldState`를 교환한다. 아래 신뢰성/실시간 채널 분리는 센서·생명주기 메시지가 추가될 때의
 논리 목표이며, 별도 transport로 아직 구현된 것은 아니다.
 
@@ -460,16 +737,24 @@ R1 수동운전의 runtime control/state 통신은 `WebSocket binary + Protobuf`
 
 ### 10.2 메시지 계층
 
-R1 기본 runtime에서 처리하는 payload는 `ControlCommand`, `WorldState`,
-`SimulationReset`이다. `Hello`와 `Health`는 Proto 정의만 존재하며,
+R1 기본 runtime에서 처리하는 payload는 `Hello`, `ControlCommand`, `WorldState`,
+`SimulationReset`이다. `Health`는 8/31부터 `WorldState.health`로 함께 발행하며,
 `AgentIntent`, `SignalState`, 범용 `LifecycleCommand`, `SensorMetadata`는 목표
 메시지다. 현재 reset은 범용 생명주기 명령이 아니라 additive schema-v2
 `SimulationReset`으로 명시한다.
 
-C++는 tick마다 schema v2 `Envelope{WorldState}`를 직렬화해 Unreal WebSocket에
-전달한다. C++와 Unreal의 exact version gate 및 실제 MapPackage checksum gate는
-구 부호 계약과 충돌 source 불일치를 막지만, build·capability를 협상하는 Protobuf
-`Hello` application handshake는 아직 후속이다.
+C++는 연결 직후 server `Envelope{Hello}`를 보내고 UE도 client `Hello`를 보낸다. 양쪽은
+source/build identity, exact schema version, 실제 MapPackage checksum, 빈 값·중복이 없는
+capability 집합을 strict 검증한다. 서버가 요구하는 `world-state.v2`, `control.v2`,
+`simulation-reset.v1`, `map-package-checksum.v1`을 모두 확인하기 전에는 ordinary
+reset/control을 거부하고, transport도 client Hello 승인 전 state broadcast를 내보내지
+않으며 UE는 server Hello 전 state를 적용하지 않는다. server는 capability 순서를 정규화해
+build/schema/map checksum/sorted capabilities의 negotiated fingerprint를 만들고, accepted
+generation별 source/session/highest sequence와 마지막 message kind·semantic fingerprint를
+보관한다. 같은 sequence의 재전송은 kind와 sequence를 제외한 semantic payload가 정확히
+같을 때만 허용하며, 다른 payload 재사용은 socket 상태를 바꾸지 않고 거부한다. printable
+ASCII identity만 로그 경계로 허용한다. E-stop만 초기화 전 안전 예외다. handshake 뒤 C++는
+tick마다 schema v2 `Envelope{WorldState}`를 직렬화한다.
 
 `SIMCORE_ENABLE_ZMQ_OBSERVER=OFF`가 기본값이다. 명시적으로
 `release-zmq-observer` preset을 선택한 경우에만 C++가 별도의 버전 없는
@@ -488,6 +773,7 @@ Envelope
   session_id
   play_session_id
   payload (oneof)
+    hello
     control_command
     world_state
     simulation_reset
@@ -501,14 +787,14 @@ schema-v2 `EntityState`의 기존 1~21번 필드 의미는 유지한다. runtime
 
 | 메시지 | 방향 | 핵심 필드 |
 |---|---|---|
-| `Hello/Handshake` (목표) | 양방향 | build, schema, map checksum, capabilities |
+| `Hello/Handshake` | 양방향 | source/build, schema, map checksum, capabilities; ordinary payload 이전 fail-closed gate |
 | `ControlCommand` | Controller→C++ | mode, throttle, brake, steering, handbrake, gear |
 | `AgentIntent` | Unreal→C++ | entity, target lane, target speed, stop/continue |
 | `WorldState` | C++→소비자 | Ego와 runtime entity의 ID 순 pose, velocity, collision metadata; Ego wheel/contact |
 | `SignalState` | Unreal→C++/Python | signal group, phase, effective tick |
 | `SimulationReset` | Unreal→C++ | play session ID, client time; 새 PIE의 configured spawn·clock·lease 초기화 |
 | `LifecycleCommand` (목표) | Unreal→C++ | spawn, despawn, map load 등 향후 범용 생명주기 명령 |
-| `Health` | 양방향 | tick overrun, packet age, queue depth, errors |
+| `Health` | C++→Unreal (`WorldState` 내부) | authoritative safety status, tick overrun count, 마지막 승인 command age, command 존재 여부, reason; queue depth는 아직 없음 |
 | `SensorMetadata` | Unreal→Python/Recorder | sensor, frame, pose, sim time, payload reference |
 
 ### 10.3 상태 표시
@@ -522,9 +808,25 @@ schema-v2 `EntityState`의 기존 1~21번 필드 의미는 유지한다. runtime
   slip spike를 그대로 mesh 회전에 노출하지 않는다.
 - 외삽은 `MaxExtrapolationSeconds=0.05`로 제한하며, 50ms를 넘으면 마지막 제한 pose를 유지한다.
 - 기존 `VInterpTo/RInterpTo` 추종 보간은 설정값상 약 80~100ms의 추가 추종 지연을 만들 수 있어 제거했다.
-- D11에서 packet gap 경고, reconnect 후 full snapshot, 필요 시 짧은 interpolation buffer를 추가한다.
+- 경량 diagnostics HUD는 connection, hello, map, control, state rate, sequence, local/server
+  age, max gap, forward sequence missing, duplicate/out-of-order old, 짧은 checksum과 controlled
+  entity를 기본 4Hz로 표시한다.
+  8/31부터 같은 snapshot의 authoritative Health(status·reason·command age·overrun)를
+  함께 표시한다. Health 누락/unknown·100ms stale·연결/handshake 실패는 Active로
+  표시하지 않으며 fresh control 송신은 계속 허용해 soft SafeStop 복구를 막지 않는다.
+  wire/compatibility 결정은
+  [ADR-005](./decisions/ADR-005-realtime-transport-protocol.md)에 기록한다.
+- 코드 기반 운전 계기판은 diagnostics HUD와 별개의 `AHUD` presentation이다. 기본 GameMode가
+  자동 설치하며 fresh·connected snapshot의 속도·RPM·기어·연료만 표시한다. stale·reconnect·
+  offline에서는 이전 값을 지운다. `SIDE BRAKE`는 `EntityState`에 확인 필드가 없으므로
+  `PendingControl`의 로컬 command intent만 표시하며 authoritative 적용 상태로 해석하지 않는다.
+- 배기가스 component와 procedural audio synth도 같은 snapshot을 읽는 **단방향 소비자**다.
+  RPM·종가속도는 sprite 배출량, RPM·차속·휠 접지·published slip은 엔진/타이어음을 구동한다.
+  unavailable/stale state에서 emission은 0으로 감쇠하고 audio는 silence로 전환한다.
+  이 경로는 `ControlCommand`, `VehiclePhysics`, collision, map package 또는 wire schema에
+  피드백하지 않는다.
 - Unreal collision response가 Ego transform을 변경하지 않는다.
-- 시각 오차는 C++ pose와 보간 기준 pose를 함께 HUD에 표시하여 측정한다.
+- 시각 오차의 C++ pose↔보간 기준 pose 비교 표시는 후속 디버그 overlay에서 측정한다.
 
 ### 10.4 로컬 저지연 경로와 측정
 
@@ -538,7 +840,8 @@ schema-v2 `EntityState`의 기존 1~21번 필드 의미는 유지한다. runtime
   아직 상태가 없거나 stale이면 현재 기어를 유지하고 반대 방향 페달을 제동으로만 처리한다.
 - 입력 유지 중에는 20Hz heartbeat로 250ms timeout lease를 갱신한다. 물리와 WorldState는 60Hz를 유지한다.
 - 각 연결은 고유 `session_id`와 독립 sequence를 사용한다. 서버는 100ms를 초과해 송신 큐에 머문 것으로 추정되는 command를 폐기하여 SafeStop을 해제하지 못하게 한다.
-- Unreal은 `BeginPlay`마다 새 `play_session_id`를 만들고 WebSocket 연결 직후
+- Unreal은 `BeginPlay`마다 새 `play_session_id`를 만들고 WebSocket 연결 직후 client
+  `Hello`를 보낸다. server `Hello`의 schema/map checksum/capability gate가 통과한 뒤에만
   `SimulationReset`을 첫 `ControlCommand`보다 먼저 전송한다. 새 ID는 차량 pose와
   runtime NPC·보행자, simulation clock을 configured spawn으로 되돌리고 control lease를
   SafeStop에서 다시 시작한다.
@@ -557,6 +860,9 @@ schema-v2 `EntityState`의 기존 1~21번 필드 의미는 유지한다. runtime
   프로세스를 다시 시작해야 한다.
 - 250ms command 공백에서는 즉시 throttle을 해제하고 full brake·handbrake SafeStop을 적용하되 session과 socket은 유지한다. 100ms queue-age를 통과한 같은 session의 fresh command가 오면 즉시 다시 arm한다.
 - command 공백이 1초를 넘을 때만 해당 session을 영구 폐기하고 1008로 연결을 닫으며, Unreal은 기본 0.5초 후 새 session으로 자동 재연결한다.
+- 위 250ms command SafeStop과 별개로, WebSocket server-initiated close에는 250ms transport
+  grace deadline이 있다. peer close reply가 없거나 진행 중 write가 정체돼 graceful close가
+  끝나지 않으면 deadline에서 TCP shutdown을 강제해 generation 정리를 보장한다.
 - Windows UE 5.6 client는 libWebSockets event-loop service를 사용한다. polling fallback은 240Hz이며, producer가 consumer보다 빨라지는 무제한 command FIFO를 허용하지 않는다.
 - Editor PIE에서는 background CPU throttling을 꺼 frame hitch가 command timeout을 반복시키지 않게 한다.
 - Windows host 실행 중 1ms timer resolution을 요청하고 종료 시 반드시 반환한다.
@@ -584,11 +890,17 @@ schema-v2 `EntityState`의 기존 1~21번 필드 의미는 유지한다. runtime
 
 ## 11. Traffic과 보행자
 
-규칙 기반 AI와 물리를 분리한다.
+규칙 기반 AI와 물리를 분리한다. 아래 Director/AgentIntent는 후속 통합 목표다.
+현재 신호 시간은 [ADR-014](./decisions/ADR-014-server-clock-traffic-signals.md)에 따라
+C++ `TrafficNetwork`가 simulation clock에서 계산한다. `virtual_city_v1`의 단일 교차로
+고정 schedule은 호환 이력으로 남고, 현재 `signal_city_v2`는 방향 차선 42개·차량/보행
+head 각8개·독립 controller 2개와 sidecar의 데이터 기반 phase plan/offset을 사용한다. 각 head의
+additive `controller_id`까지 차량·Health와 같은
+`WorldState`에 담는다. Unreal은 받아서 표시하며 자체 phase timer를 돌리지 않는다.
 
 ```mermaid
 sequenceDiagram
-    participant Signal as SignalController
+    participant Signal as C++ TrafficNetwork
     participant AI as Traffic/Pedestrian Director
     participant Core as C++ SimCore
     participant IG as Unreal IG
@@ -600,12 +912,37 @@ sequenceDiagram
 ```
 
 - TrafficDirector는 LaneGraph, 신호, 선행 차량을 보고 target lane과 target speed를 정한다.
-- 현재 `SimulationHost`는 opt-in `--demo-entities`에서 NPC 1대와 보행자 1명의 deterministic ID·spawn·kinematic state를 소유한다. tick마다 같은 proxy state를 Ego collision과 multi-entity `WorldState`에 사용하고, 새 PIE `SimulationReset`에서 spawn으로 복원한다.
-- C++는 NPC 차량을 R1용 제한된 kinematic OBB로 진행시키고 충돌 상태를 확정한다.
+- 현재 `signal_city_v2`에서 NPC4대·보행자8명의 deterministic ID·spawn·runtime state를
+  소유한다. 같은 proxy를 collision과 `WorldState`에 사용하고 새 PIE reset에서 복원한다.
+- C++는 NPC 차량을 R1용 제한된 route follower+유한질량 OBB로 진행시키고 충돌 상태를
+  확정한다. Ego 충돌의 equal-and-opposite impulse로 NPC·보행자 위치와 속도가 변하며,
+  짧은 reaction hold와 감쇠를 적용해 다음 follower tick에서 즉시 원위치로 snapback하지 않는다.
 - PedestrianDirector는 경로와 대기/횡단 intent를 정한다.
 - C++는 보행자의 capsule pose를 tick에 맞춰 진행시켜 Ego 충돌과 화면 위치가 같은 상태를 참조하게 한다.
-- 현재 demo entity에는 LaneGraph route, 신호 준수, 최종 TrafficDirector/PedestrianDirector AI가 없으며 이 동작 계층은 후속이다.
-- 복잡한 군중 회피, 충돌 파손, 교통 수요 모델은 R1에 포함하지 않는다.
+- NPC는 고정 route/차량 신호, 보행자는 지정 crosswalk/보행 신호를 따른다. 일반 경로 탐색,
+  복잡한 군중 회피와 교통 수요 모델은 R1에 포함하지 않는다.
+- impulse 기반 damage와 전/후/좌/우/roof/underbody Unreal 국부 WPO 변형은 구현했지만,
+  collision shape 변형·파편·부품 분리·fracture는 포함하지 않는다.
+
+### 11.1 NPC runtime 구현(2026-08-31, 2026-09-02 후속)
+
+`simulation_host_npc.cpp`가 검증된 lane route·signal snapshot·불변 GroundQuery를
+`NpcLaneFollower`에 공급한다. 제어기는 경로 거리·속도·정지 이유를 계산하고, 호스트는
+전방 OBB 표본으로 Ego/static/runtime 장애물을 검사한다. 이 NPC는 Ego의 네 타이어·
+서스펜션 동역학을 실행하지 않는 route follower다. 다만 collision solve에서는 NPC 1500kg,
+보행자 80kg의 유한질량 proxy로 참여해 Ego와 반대 방향의 normal/tangent impulse를 받고,
+속도·yaw 한도와 18-tick reaction hold 안에서 authoritative pose를 갱신한다. NPC pitch/roll·
+전복, NPC끼리의 완전한 차량 동역학, 보행자 ragdoll은 아직 없다.
+
+tick 시작 pose→accepted end pose의 속도를 collision proxy에 설정해 Ego 충돌을 계산한 뒤
+정확히 같은 end pose를 WorldState로 발행한다. 별도 `advance_runtime_entities()`에서
+lane NPC를 중복 적분하지 않는다. NPC ID1001/proxy `lane-npc-1001`과 wire slot은 생성/
+map reload 양쪽에서 예약한다. 새 Play/lease/map·traffic reload와 ground lifetime 경계는
+[NPC 계약](./npc_lane_following.md)을 따른다.
+
+Unreal은 수신 NPC에 자체 세단/휠을 표시하고 tick별 bounded extrapolation을 적용한다.
+외형 actor는 NoCollision이며 local stale/reset/disconnect에서 정리한다. 서버의 신호
+상태·진행이나 물리를 Unreal AI가 독립적으로 재계산하지 않는다.
 
 ## 12. 센서 확장 구조
 
@@ -633,6 +970,9 @@ SensorMount
 
 R1은 SensorRig, mount config, timestamp/frame metadata와 선택적인 저주기 RGB smoke test까지만 수행한다.
 
+현재 구현은 `base_link` FLU 기준 front camera10Hz·roof LiDAR20Hz config와 authoritative
+`SimulationTimeNs` metadata cadence다. 실제 image/point cloud payload는 캡처하지 않는다.
+
 ## 13. 기록·재생·촬영
 
 ### 13.1 기록 대상
@@ -655,15 +995,20 @@ R1은 SensorRig, mount config, timestamp/frame metadata와 선택적인 저주�
 
 영상은 실시간 플레이 캡처보다 State replay를 우선 사용한다. 동일한 주행에 카메라와 품질 설정을 바꿔 Movie Render Queue로 촬영할 수 있고, 녹화 부하가 물리 결과에 영향을 주지 않는다.
 
+현재 Unreal `F5`는 authoritative snapshot CSV를
+`Saved/DriveReplays/last_drive.csv`에 저장하고 `F6`는 collision-free visual ghost로 재생한다.
+이는 Input replay/command-event deterministic physics re-simulation이 아니므로 REC-002·AT-07은
+미완료다.
+
 ## 14. 실패 처리
 
 | 실패 | C++ 동작 | Unreal 표시 |
 |---|---|---|
-| command timeout | throttle 해제, 안전 제동 | timeout 경고와 command age |
+| command timeout | throttle 해제, 안전 제동 | 같은 WorldState의 authoritative SafeStop·reason·command age; stale이면 Unknown |
 | map checksum 불일치 | simulation start 거부 | 양쪽 checksum과 해결 방법 표시 |
 | state packet gap | 계속 시뮬레이션, gap 계측 | 제한된 보간 후 freeze·경고 |
 | Unreal 연결 종료 | 설정에 따라 안전 정지 또는 headless 지속 | 재연결 후 full snapshot 요청 |
-| tick overrun | 누적 wall time 보정으로 dt를 키우지 않고 overrun 기록 | 성능 HUD 표시 |
+| tick overrun | 누적 wall time 보정으로 dt를 키우지 않고 overrun 기록 | 서버 로그와 WorldState Health/HUD 누적 count |
 | invalid numeric state | 해당 tick 적용 중단, snapshot 보존, 치명 로그 | 시뮬레이션 중지 안내 |
 
 ## 15. 시험 구조
@@ -689,6 +1034,22 @@ R1은 SensorRig, mount config, timestamp/frame metadata와 선택적인 저주�
 - TrafficDirector 신호 준수
 - SensorMount transform과 timestamp
 
+2026-08-28 현재 C++ Windows Release 전체 build와 CTest 14/14·전체 suite 20회
+280/280(48.35s),
+UE 5.6 Editor/Game build, headless `DriveIntegration.Coordinates.GeoTransformContract`
+Automation 1/1과 실제 WebSocket smoke의 invalid Hello 1008·pre-Hello state 차단·동일
+sequence altered payload 2회 거부·valid recovery state sequence 5148이 통과했다. 실제
+Landscape PIE와 `static_colliders>0` marker 충돌은 자동 시험 결과와 별개의 수동 gate다.
+
+2026-09-02 최종 자동 통합은 실제 `signal_city_course` 5개 검증군, C++ Release 전체 build와
+CTest **20/20**, UE Editor/Game Development build와 전체 Automation **47/47**, Windows
+launcher self-test 3 profiles, Python generated Proto **1/1**과 smoke helper **10/10**을
+통과했다. Signal City WebSocket도 엄격한 순항속도·경로 경계를 유지한 채 **2,280 states**와
+SafeStop/reset을 다시 통과했다.
+당시 테스트 인계용 background 실행에서 port9000 listener와 시작 로그를 확인했다. 이는
+일시 실행 증거이며 현재 서버 상태를 보장하지 않는다. 실제 PIE 조작감·HUD 가독성·60fps·
+30분 안정성은 미완료다.
+
 ### 15.3 성능 시험
 
 - 목표 Windows PC의 패키지 빌드에서 수행
@@ -697,7 +1058,7 @@ R1은 SensorRig, mount config, timestamp/frame metadata와 선택적인 저주�
 - command age, state arrival interval·age, sequence gap, 입력→첫 상태 변화의 p50/p95/max 기록
 - loopback과 LAN을 구분하고 timer resolution·서버 build·Unreal FPS를 결과에 함께 기록
 - NPC 수, 보행자 수, 센서 활성 상태를 결과에 함께 기록
-- Cesium 배경 on/off를 별도 측정해 R1 포함 여부 결정
+- 모듈형 건물·소품 밀도와 조명 품질별 비용을 측정하고, 가상 코스 전체에서 동일 성능 기준 적용
 
 ## 16. 배포 구성
 
@@ -706,11 +1067,12 @@ release/
   SimCore.exe
   DriveIG/
   config/
-    runtime.json
-    vehicle.json
+    runtime_server.cfg
+    vehicle_sedan.cfg
     sensors.json
   maps/
-    wall_broad/
+    virtual_city_v1/       # 실제 blockout package 존재; 최종 배포 인수는 후속
+    signal_city_v2/        # 비직사각 도심망·2 controller 후속 package; 사용자 PIE 인수는 후속
   proto/
     schema_version.txt
   logs/
@@ -718,6 +1080,14 @@ release/
   THIRD_PARTY_NOTICES.md
   RUNBOOK.md
 ```
+
+C++ runtime 설정은 `runtime_server.cfg`와 CLI가 담당한다. 적용 우선순위는 built-in defaults
+&lt; cfg &lt; CLI다. cfg에 적은 상대 vehicle/map 경로는 cfg 파일 위치를 기준으로 해석한다.
+WebSocket port, physics Hz, origin latitude/longitude/altitude, spawn heading,
+command timeout·maximum queue age·hard timeout, source ID, demo entities와 vehicle/map 경로를
+외부화한다. unknown/duplicate key, missing value, non-finite/range 오류와 timeout 상호 관계
+오류는 시작 전에 fail-closed하고 `--help`로 지원 키와 우선순위를 안내한다. Unreal packaged
+client의 외부 server address 배포 구성은 별도 후속이다.
 
 목표 배포 실행 순서는 다음과 같다.
 
@@ -728,43 +1098,49 @@ release/
 5. Unreal이 IG, traffic intent, sensor, recording을 시작한다.
 6. 종료 시 replay와 성능·오류 로그를 flush한다.
 
-현재 프로토타입은 strict MapPackage를 검증한 뒤 `WsServer`와 물리 tick을 시작하고,
-연결 시 검증된 checksum을 담은 초기 `WorldState`를 전송한다. Unreal은 로컬
-`manifest.cfg`와 payload를 먼저 검증하고 서버 checksum이 일치한 뒤
-`SimulationReset`을 보낸다. host는 reset 전 일반 control을 거부하고 reset을 승인한
-connection generation·session에만 lease 진입을 허용한다. 따라서 map identity와
-SimulationReset lifecycle gate는 구현됐으며, 목표 순서의 `Hello` build/capability 협상과
-사용자 선택형 Manual/Autonomous `ControlMux`가 후속이다.
+현재 프로토타입은 strict runtime cfg와 MapPackage를 검증한 뒤 `WsServer`와 물리 tick을
+시작하고, 연결 시 server `Hello`를 전송한다. Unreal은 로컬 `manifest.cfg`와 payload를 먼저
+검증해 client `Hello`를 보내며, 양쪽 schema/build/source/capability/map checksum gate가
+통과한 뒤 `SimulationReset`을 보낸다. host는 reset 전 일반 control을 거부하고 reset을
+승인한 connection generation·session에만 lease 진입을 허용한다. 따라서 Hello, map identity와
+SimulationReset lifecycle gate는 구현됐으며, 사용자 선택형 Manual/Autonomous `ControlMux`가
+후속이다.
 
 ## 17. 아키텍처 결정 기록
 
 | ADR | 상태 | 결정 | 이유 |
 |---|---|---|---|
-| ADR-001 | 확정 | Cesium+로컬 에셋 하이브리드 | 실제 좌표를 유지하면서 주행면 품질·성능·고정 충돌 확보 |
+| ADR-001 | R1 범위 대체·이력 보존 | 과거 Cesium+로컬 에셋 하이브리드 | 배경·지리 통합 요구는 2026-08-31 ADR-013으로 대체; 고정 주행면·충돌 원칙 유지 |
 | ADR-002 | 확정 | C++가 단일 물리 권한 | C++/Unreal 충돌 보정 경쟁 제거와 headless 확장 |
 | ADR-003 | 확정 | Python을 수동운전 필수 경로에서 제거 | 지연·장애 지점 감소, Python을 FSD 역할로 한정 |
 | ADR-004 | 확정 | MapPackage를 지도 single source of truth로 사용 | 차선·충돌·경로 데이터 불일치 방지 |
 | ADR-005 | 확정 | R1은 WebSocket binary + Protobuf | JSON 혼용을 제거하고, UDP는 측정 결과로 재검토 |
 | ADR-006 | 확정 | 현재 C++ 서버에 자체 차량 물리 구현 | 차량 수식·상태·오차를 직접 설명하고 수정하는 학습·포트폴리오 목표 |
 | ADR-007 | 확정 | R1은 수동운전, 학습은 연기 | 8월 품질과 기반 구조에 집중 |
-| ADR-008 | 확정 | 핵심부 보행 중심, 주변 도로 주행 | Wall/Broad의 실제 공간 특성과 사용자 요구 반영 |
+| ADR-008 | R1 범위 대체·이력 보존 | 과거 Wall/Broad 핵심부 보행 중심·주변 도로 주행 | 실제 지역 조건은 ADR-013으로 대체; 보행 구역·차량 경로 분리 원칙 유지 |
 | ADR-009 | 확정 | 센서 payload를 제어 채널과 분리 | 이미지 readback이 physics/control 지연을 만들지 않도록 함 |
 | ADR-010 | 확정 | Windows 60Hz timer 안정화 + 입력 latest-wins/coalescing + 최대 50ms dead reckoning | loopback jitter와 송신 FIFO·추종 보간 지연을 줄이면서 C++ 물리 권한 유지 |
 | ADR-011 | 확정·이행 중 | 공통 공개 좌표는 ROS 호환 FLU, Unreal FRU와 solver 내부 좌표는 adapter에서 변환 | Python·센서·향후 ROS 확장에 하나의 right-handed 계약 제공 |
+| ADR-012 | 확정·이행 중 | Unreal이 지면을 측정해 versioned heightfield를 만들고 C++가 query·차량 물리만 계산 | World collision 측정과 권한 물리를 분리하고 결정적 hot reload·replay 유지 |
+| ADR-013 | 확정·blockout 구현 | 작은 가상 도심 코스로 R1 배경 전환 | 실제 지역·GIS·Cesium 작업은 제외하고 Unreal 코스 완성도에 집중; 실제 별도 맵/충돌 package 생성, 교통·센서·기록/재생·수동 인수 게이트 유지 |
+| ADR-014 | 확정·v2 확장 구현 | 차량 신호 시간 권한은 C++ simulation clock, Unreal은 표시 전용 | v1 고정 schedule 호환을 보존하면서 v2의 controller별 데이터 기반 plan/offset과 additive `controller_id`를 결정적으로 발행 |
 
 ## 18. 결정 대기 사항
 
 | 항목 | 현재안 | 기한 |
 |---|---|---|
-| Unreal/Cesium 버전 | Unreal Engine 5.6.1 확정, Cesium 호환 버전은 설치 시 고정 | D1 |
+| Unreal/Cesium 버전 | Unreal Engine 5.6 계열 유지; Cesium 통합·버전 선택은 Future | Cesium R1 제외 확정 2026-08-31 |
 | 자체 물리 Windows 게이트 | MSVC Release 빌드와 동일 입력 회귀 시험 | D5 전 |
 | UDP 전환 기준 | WebSocket binary + Protobuf 측정값이 ADR-005 기준을 넘으면 재검토 | D3 전 |
 | 기준 차량 | 확보한 차량 에셋과 제원이 일치하는 일반 승용차 | D3 |
-| 지도 경계 | NYSE·Federal Hall과 주변 차량 루프를 포함하는 4~6블록 | D8 전 |
-| 배경 방식 | 로컬 핵심부 + 성능 통과 시 제한된 Cesium 중·원경 | D16 프로파일링 후 최종 |
+| 코스 경계·배치 | 방향 승인 후 명목 240×200m/현재 50cm valid 239×200m, 약 633.1m 시험 루프 구현 | 실제 PIE 조작감·성능 확인 후 상세 배치 조정 |
+| 배경 방식 | 별도 VirtualCity 기본 도형·자체 색상 재질·낮 조명 blockout 구현 | 최종 외형·외부 에셋 검토·프로파일링은 후속 |
 | 라이선스 에셋 | 기존 구매·보유 에셋 목록 확인 필요 | D8 전 |
 
 ## 19. 참고 자료
+
+Cesium·NYC·Google 자료는 이전 지리 기반 배경안의 이력 및 Future 검토용으로 보존하며
+R1 구현 의존성이나 필수 작업을 의미하지 않는다.
 
 - [Cesium for Unreal clipping](https://cesium.com/learn/unreal/unreal-clipping/)
 - [Cesium for Unreal FAQ: 데이터 형식·다운로드·오프라인](https://cesium.com/learn/unreal/unreal-faq/)
@@ -781,6 +1157,30 @@ SimulationReset lifecycle gate는 구현됐으며, 목표 순서의 `Hello` buil
 
 | 버전 | 날짜 | 변경 내용 |
 |---|---|---|
+| 3.16 | 2026-09-02 | `SimulationHost`의 Hello·control·reset session/detail과 Unreal runtime entity/traffic presentation 분리를 추가. 유한질량 OBB 입력 각속도 상한으로 partial-tick 전파를 차단하고 C++ build·CTest20/20, UE Editor/Game·Automation47/47, launcher 3 profiles, Python Proto1/1·helper10/10·Signal City 2,280-state 최종 통합 결과를 기록 |
+| 3.15 | 2026-09-02 | 동작 보존 전체 리팩터링의 runtime options cfg/CLI, traffic hot reloader, protocol encoder/decoder, Unreal sedan/control/diagnostics/replay format-runtime, 공통 Windows launcher 경계를 기록하고 별도 문서에 연결. 최종 통합 수치는 후속 검증 전 추정하지 않음 |
+| 3.14 | 2026-09-02 | 키보드 미세 조향 제곱 응답, rear mechanical side brake의 종방향 우선 마찰 배분, Ego↔NPC/보행자 유한질량 반작용과 reaction hold, 6구역 국부 WPO dent를 반영. CTest20/20·UE46/46·Editor/Game 빌드 통과; PIE 조작감·ragdoll·collision-shape 변형은 수동/후속 유지 |
+| 3.13 | 2026-09-02 | frame-independent 조향·F3 overlay·full-body rollover contact·damage/deformation, Signal City 42lane/16head/2controller/NPC4/보행자8, SensorRig metadata와 F5 CSV/F6 ghost, CTest20/20·UE45/45·2,280-state smoke를 반영. 결정적 input replay·PIE/성능/안정성은 미완료 유지 |
+| 3.12 | 2026-09-02 | `virtual_city_v1` 단일 교차로 이력을 보존하면서 `signal_city_v2`의 방향 차선 42개·차량 head 8개·독립 controller 2개, 데이터 기반 phase plan/offset과 additive `controller_id`, Unreal 표시 전용 경계를 현재 상태에 반영. 다중 NPC/보행자와 사용자 PIE 인수는 미완료로 유지 |
+| 3.11 | 2026-09-02 | 저장 보도 support를 16→24cm로 연석 top과 정렬하고, 50cm raster near 허용치를 far plateau·collider 높이로 제한 검증하는 계약과 새 checksum·전체 회귀 결과를 기록 |
+| 3.10 | 2026-09-01 | 코드 기반 계기판·배기가스·procedural 차량음을 Unreal presentation-only 단방향 소비자로 추가. fresh authoritative 표시, stale fail-closed, 로컬 주차 브레이크 intent 경계와 물리·제어·schema 비개입을 명시 |
+| 3.9 | 2026-09-01 | 가상 도심 50cm SIMGHF2와 새 checksum, current→predicted swept-body along≤R signed near/far delta 계약, center full-footprint 214/215·전체 along-length 210/215+의도적 opening/BayEnd gap, 30/50m/s gate stress를 반영. 사용자 PIE 인수는 대기 |
+| 3.8 | 2026-09-01 | 가상 도심 Ground를 59+보도116+연석215=390개로 이행하고 semantic Curb 이중 저작·조건부 planar collision 제외·suspension 기반 등판 경계를 기록. 새 collision/traffic checksum, 실제 package 연석 계측, CTest18/18·UE29/29·두 ValidateOnly와 PIE 수동 인수 대기를 구분 |
+| 3.7 | 2026-08-31 | C++ NpcLaneFollower 1대와 tick-start 충돌 proxy/accepted-end 발행·reset/reload/ground lifetime, UE 세단/휠·stale 정리 책임 명시. C++18/18·UE28/28·120초 NPC smoke 통과, kinematic 모델과 미완료 다중 traffic 경계 유지 |
+| 3.6 | 2026-08-31 | v7 고정 강성 60k/50k·migration·hard-stop 반력·접지 상실 표시 수정의 CTest 16/16(4.92초)·UE 26/26·Editor/Game·Health smoke·서버 적용과 실제 solver 계측을 기록. 하중 비례 후보는 지형 회귀 실패로 미채택이며 v6·25/25는 이전 이력. 최고속 full-lock 과도 yaw·PIE는 미완료 |
+| 3.5 | 2026-08-31 | 속도 무관 input×max-angle·유한 rack·Ackermann 조향, speed cap/legacy knob 제거·strict cfg v6 migration과 최종 CTest 16/16·UE 25/25·Editor/Game 빌드·Health smoke 통과를 기록. 실제 궤적은 기존 타이어 힘·부하에서 결정하며 이전 cap 회귀는 이력으로 보존; 사용자 PIE·전체 R1 인수는 대기 |
+| 3.3 | 2026-08-31 | 조향 generic profile 보완, 물리와 분리된 orbit 카메라와 자체 저장형 세단 메시/재질을 반영. 카메라 입력은 pose/control 불변, 시각 메시 NoCollision·unit root·wheel pivot 유지, Editor 생성/검증과 runtime 참조를 분리 |
+| 3.2 | 2026-08-31 | SimCoreVirtualCityLayout→editor commandlet→별도 저장 맵→production SIMGHF2/228 marker Bake와 검증 경계를 기록. 실제 valid 238×200m, QA 전용 route와 prototype art, map-local GameMode를 반영하며 LaneGraph·traffic·수동·성능 인수는 완료 처리하지 않음 |
+| 3.1 | 2026-08-31 | 사용자 승인으로 R1 배경을 작은 가상 도심으로 전환. 로컬 원점·작성 중심선 LaneGraph·UE 지면 측정/C++ 검증·물리 경계를 반영하고 잘못 남은 C++ collision cooking 목표도를 정정. 실제 GIS/Cesium 통합은 Future, 기존 맵·패키지는 보존하며 ADR-001/008의 지역 관련 요구는 ADR-013으로 대체 |
+| 3.0 | 2026-08-31 | Health를 WorldState 내부 atomic snapshot으로 추가하고 선택 capability·없는 command age·HUD freshness·전역 EStop 진단을 명시. 별도 Health frame/queue 간섭을 방지하고 pose/play fence 유지 |
+| 2.9 | 2026-08-28 | negotiated Hello fingerprint(build/schema/map checksum/sorted capabilities), accepted generation의 source/session/highest-sequence binding, semantic exact retransmission만 허용하는 동일 sequence 규칙과 250ms forced-close deadline을 반영. 최종 CTest 14/14·20회 280/280(48.35s), pre-Hello 차단·invalid 1008·altered-payload 2회 거부·recovery seq 5148 smoke 통과 |
+| 2.8 | 2026-08-28 | client Hello 승인 전 WorldState 차단·첫 frame 1008 close, generation별 source/session/sequence binding과 non-poisoning high-water, log-safe identity, localhost-only listener 및 HUD missing/old 분리를 반영. 전체 CTest 20회 280/280와 실제 negative/positive WebSocket smoke 통과 |
+| 2.7 | 2026-08-28 | `SIMGHF2` surface material/friction과 v1 호환·vehicle cfg v5, C++/UE GeoTransform/quaternion+Automation 1/1, 양방향 Hello capability/schema/map checksum gate, 경량 diagnostics HUD, strict runtime cfg&lt;CLI를 현재 구조로 반영. 최종 C++ 14/14·UE Editor/Game build를 기록하되 실제 v2 Landscape/PIE, authoritative SafeStop/Health, static marker gate는 후속 유지 |
+| 2.6 | 2026-08-28 | 실제 100cm Bake(257,556 samples/256,542 cells, checksum `b8b0…`)와 실행 중 서버의 same-process tick-boundary 적용을 runtime MapPackage 현황에 반영하고 남은 PIE·static marker gate를 구분 |
+| 2.5 | 2026-08-28 | Unreal의 100cm 높이·ImpactNormal·valid-cell 측정과 C++ `GroundQuery` 물리 계산 책임을 `SIMGHF1`로 분리하고 legacy v1 sentinel 호환, 2M sample fail-closed, C++ 13/13·신규 100/100·UE Editor/Game build 및 실제 새 Bake 수동 gate를 반영 |
+| 2.4 | 2026-08-28 | 실제 19,208-triangle full-bounds package, manifest 250ms 감시·전체 payload 검증·latest-wins·tick-boundary atomic swap, 차량/clock/lifecycle reset과 UE 새 PlaySession 자동 재연결 수명주기, generic sedan 조향 rate/cap·선회 envelope 및 최종 C++/UE/반복 smoke를 반영 |
+| 2.3 | 2026-08-28 | Ground Actor full-bounds Bake preflight·자동 Fit, 20k 예산 spacing 자동 상향, exporter/host ENU bbox/span 관측과 live package 회귀의 확대 bake 불변 조건을 충돌 authoring·검증 경계에 반영 |
+| 2.2 | 2026-08-28 | 유한 MapPackage 끝의 terminal footprint policy를 단일 missing corner·대각선 two-wheel 허용, 완전 axle/side·centre·0-ray fail-close로 정교화하고 tracked Landscape 600-tick nose-down 회귀를 반영 |
 | 2.1 | 2026-08-27 | wheel별 tangent slip projection, finite-angle generalized roll/pitch와 gyro/yaw coupling, active-corner LCP, triangle requery outer solve, partial-ray·centre coverage 경계와 FLU body-Z yaw 계약을 반영 |
 | 2.0 | 2026-08-27 | wheel별 contact-normal tangent force, compound attitude true RH-FLU angular velocity, hard-stop 0.15m/2° trust-region position solve·잔차 pure-Z fallback·32회 교대-sweep accumulated-impulse LCP와 deep one-side/symmetric-four 회귀를 반영 |
 | 1.9 | 2026-08-27 | 네 독립 spring/damper 반력 기반 tire load·heave·pitch/roll, `q={z,roll,pitch}` unilateral hard-stop, 자세 hard clamp·support-plane 인공 K/C 제거, RH FLU pitch omega와 UE roll 부호 수정, Ground Actor 전체 범위 fit 절차를 반영 |

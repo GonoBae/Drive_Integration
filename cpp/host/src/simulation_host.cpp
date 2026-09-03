@@ -1,11 +1,14 @@
 #include "simulation_host.hpp"
 
+#include "simulation_host_session_detail.hpp"
+
 #include <boost/asio/error.hpp>
 
 #include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <numbers>
+#include <set>
 #include <stdexcept>
 #include <type_traits>
 #include <unordered_set>
@@ -13,13 +16,57 @@
 
 namespace {
 
-constexpr std::size_t kMaxLifecycleIdentifierBytes = 256;
-constexpr std::size_t kMaxTrackedPlaySessions = 4096;
+using simcore_host::simulation_host_session_detail::
+    is_log_safe_identifier;
+using simcore_host::simulation_host_session_detail::
+    kMaxLifecycleIdentifierBytes;
+
 constexpr std::size_t kMaxRuntimeEntities = 255;
+constexpr std::uint32_t kRuntimeReactionHoldTicks = 18;
+constexpr double kNpcMaximumReactionSpeedMps = 30.0;
+constexpr double kPedestrianMaximumReactionSpeedMps = 15.0;
+constexpr double kNpcMaximumReactionOffsetM = 8.0;
+constexpr double kPedestrianMaximumReactionOffsetM = 6.0;
 
 bool finite_vector(const simcore_host::CollisionVector2& vector)
 {
     return std::isfinite(vector.east_m) && std::isfinite(vector.north_m);
+}
+
+std::size_t pedestrian_entity_count(
+    const std::shared_ptr<const simcore_host::TrafficNetwork>& network)
+{
+    if (!network) return 0;
+    std::set<std::pair<std::uint32_t, std::uint32_t>> groups;
+    for (const auto& signal : network->signals) {
+        if (signal.kind == simcore_host::TrafficSignalKind::Pedestrian) {
+            groups.emplace(signal.controller_id, signal.group_id);
+        }
+    }
+    return groups.size() * 2;
+}
+
+void validate_managed_runtime_slots(
+    const std::vector<simcore_host::RuntimeEntityState>& entities,
+    std::uint32_t npc_count,
+    const std::shared_ptr<const simcore_host::TrafficNetwork>& network)
+{
+    const auto pedestrian_count = pedestrian_entity_count(network);
+    if (entities.size() + npc_count + pedestrian_count > kMaxRuntimeEntities) {
+        throw std::invalid_argument("managed traffic agents exceed the runtime entity wire limit");
+    }
+    for (const auto& entity : entities) {
+        const bool reserved_npc = entity.entity_id >= 1001
+            && entity.entity_id < 1001 + npc_count;
+        const bool reserved_pedestrian = entity.entity_id >= 2001
+            && entity.entity_id < 2001 + pedestrian_count;
+        if (reserved_npc || reserved_pedestrian
+            || entity.collision_proxy.proxy_id.starts_with("lane-npc-")
+            || entity.collision_proxy.proxy_id.starts_with("pedestrian-")) {
+            throw std::invalid_argument(
+                "managed traffic agents require free 1001+/2001+ IDs and proxy identities");
+        }
+    }
 }
 
 double normalize_heading(double heading_rad)
@@ -62,9 +109,21 @@ void validate_and_order_runtime_entities(
             || !std::isfinite(proxy.heading_rate_rad_s)
             || !std::isfinite(proxy.material.friction)
             || !std::isfinite(proxy.material.restitution)
+            || !std::isfinite(proxy.mass_kg)
+            || !std::isfinite(proxy.yaw_inertia_kg_m2)
+            || !std::isfinite(proxy.maximum_linear_speed_mps)
             || proxy.material.friction < 0.0
             || proxy.material.restitution < 0.0
-            || proxy.material.restitution > 1.0) {
+            || proxy.material.restitution > 1.0
+            || proxy.mass_kg < 0.0
+            || proxy.yaw_inertia_kg_m2 < 0.0
+            || proxy.maximum_linear_speed_mps < 0.0
+            || (proxy.mass_kg == 0.0
+                && (proxy.yaw_inertia_kg_m2 != 0.0
+                    || proxy.maximum_linear_speed_mps != 0.0))
+            || (proxy.mass_kg > 0.0
+                && (proxy.mass_kg < 1.0 || proxy.mass_kg > 100'000.0
+                    || proxy.maximum_linear_speed_mps <= 0.0))) {
             throw std::invalid_argument(
                 "runtime collision proxy contains invalid motion or material");
         }
@@ -86,7 +145,10 @@ void validate_and_order_runtime_entities(
                         || !std::isfinite(shape.half_height_m)
                         || shape.half_length_m <= 0.0
                         || shape.half_width_m <= 0.0
-                        || shape.half_height_m <= 0.0) {
+                        || shape.half_height_m <= 0.0
+                        || (proxy.mass_kg > 0.0
+                            && (proxy.yaw_inertia_kg_m2 < 1.0
+                                || proxy.yaw_inertia_kg_m2 > 100'000'000.0))) {
                         throw std::invalid_argument(
                             "NPC runtime entity requires a valid OBB prism");
                     }
@@ -96,7 +158,8 @@ void validate_and_order_runtime_entities(
                         || !std::isfinite(shape.radius_m)
                         || !std::isfinite(shape.half_height_m)
                         || shape.radius_m <= 0.0
-                        || shape.half_height_m < shape.radius_m) {
+                        || shape.half_height_m < shape.radius_m
+                        || proxy.yaw_inertia_kg_m2 != 0.0) {
                         throw std::invalid_argument(
                             "pedestrian runtime entity requires a valid vertical capsule");
                     }
@@ -122,14 +185,26 @@ SimulationHost::SimulationHost(boost::asio::io_context& ioc,
                      config_.hard_command_timeout)
     , timer_(ioc)
 {
-    if (config_.map_package_checksum.empty()
+    if (!is_log_safe_identifier(
+            config_.source_id, kMaxLifecycleIdentifierBytes)
+        || !is_log_safe_identifier(
+            config_.map_package_checksum, kMaxLifecycleIdentifierBytes)
+        || config_.map_package_checksum.empty()
         || config_.map_package_checksum == "unset") {
         throw std::invalid_argument(
-            "SimulationHost requires a verified map package checksum");
+            "SimulationHost requires printable source and verified map identities");
     }
     validate_and_order_runtime_entities(config_.runtime_entities);
+    validate_managed_runtime_slots(config_.runtime_entities,
+        config_.npc_route.empty() ? 0U : config_.npc_count, config_.traffic_network);
+    if (config_.traffic_network
+        && config_.traffic_network->source_map_checksum != config_.map_package_checksum) {
+        throw std::invalid_argument("traffic network must match the verified map");
+    }
     initial_runtime_entities_ = config_.runtime_entities;
     runtime_entities_ = initial_runtime_entities_;
+    rebuild_lane_npc();
+    rebuild_pedestrians();
     last_logged_input_ = make_safe_stop_input();
     physics_.set_input(last_logged_input_);
 }
@@ -163,269 +238,49 @@ void SimulationHost::stop()
     }
 }
 
-ClientMessageResult SimulationHost::handle_client_message(
-    std::string_view message,
-    std::uint64_t connection_generation,
-    Clock::time_point received_at)
-{
-    std::string error;
-    auto parsed = simcore_host::parse_client_message_envelope(message, &error);
-    if (!parsed) {
-        std::cerr << "[Input] " << error << "\n";
-        return ClientMessageResult::Rejected;
-    }
-
-    if (const auto* command =
-            std::get_if<simcore_host::ParsedControlCommand>(&*parsed)) {
-        return handle_control_command(
-            *command, received_at, connection_generation);
-    }
-    return handle_simulation_reset(
-        std::get<simcore_host::ParsedSimulationReset>(*parsed),
-        connection_generation);
-}
-
-ClientMessageResult SimulationHost::handle_control_command(
-    const simcore_host::ParsedControlCommand& command,
-    Clock::time_point received_at,
-    std::uint64_t connection_generation)
-{
-    if (command.map_package_checksum != config_.map_package_checksum) {
-        std::cerr << "[Input] map package checksum mismatch expected="
-                  << config_.map_package_checksum << " received="
-                  << command.map_package_checksum << "\n";
-        return ClientMessageResult::Rejected;
-    }
-    if (command.source_id.size() > kMaxLifecycleIdentifierBytes
-        || command.session_id.size() > kMaxLifecycleIdentifierBytes) {
-        std::cerr << "[Input] rejected: identifier exceeds 256 bytes\n";
-        return ClientMessageResult::Rejected;
-    }
-    // E-stop outranks lifecycle ownership. A valid emergency request remains
-    // effective even if it arrives from a socket that no longer owns motion.
-    if (command.estop) {
-        estop_latched_ = true;
-        last_logged_input_ = make_safe_stop_input();
-        physics_.set_input(last_logged_input_);
-        std::cerr << "[Safety] E-stop latched by source="
-                  << command.source_id << " session=" << command.session_id << "\n";
-        return ClientMessageResult::EmergencyStopLatched;
-    }
-    // A checksum-valid SimulationReset is the lifecycle handshake that binds a
-    // controller connection to the authoritative play session. Ordinary motion
-    // input must never acquire a lease before that handshake; E-stop remains the
-    // sole pre-reset exception above so an uninitialized client can still stop.
-    if (!lifecycle_active_) {
-        std::cerr << "[Input] rejected command before simulation reset"
-                  << " source=" << command.source_id
-                  << " session=" << command.session_id
-                  << " generation=" << connection_generation << "\n";
-        return ClientMessageResult::Rejected;
-    }
-    if (command.source_id != active_controller_source_id_
-        || command.session_id != active_connection_session_id_
-        || (active_connection_generation_ != 0
-            && connection_generation != active_connection_generation_)) {
-        std::cerr << "[Input] rejected command outside active lifecycle connection"
-                  << " source=" << command.source_id
-                  << " session=" << command.session_id
-                  << " generation=" << connection_generation << "\n";
-        return ClientMessageResult::Rejected;
-    }
-    if (estop_latched_) {
-        std::cerr << "[Safety] E-stop is latched; restart is required to reset\n";
-        return ClientMessageResult::Rejected;
-    }
-
-    const bool was_safe_stopped = control_lease_.safe_stop_active();
-    const auto decision = control_lease_.accept(
-        {command.source_id, command.session_id, command.sequence,
-         command.client_time_ns},
-        received_at);
-    if (decision != ControlLeaseDecision::Accepted) {
-        std::cerr << "[Input] rejected source=" << command.source_id
-                  << " session=" << command.session_id
-                  << " sequence=" << command.sequence << ": "
-                  << control_lease_decision_message(decision) << "\n";
-        return ClientMessageResult::Rejected;
-    }
-    if (was_safe_stopped) {
-        std::cout << "[Safety] control lease armed source="
-                  << command.source_id << " session=" << command.session_id << "\n";
-    }
-
-    physics_.set_input(command.input);
-    const bool changed = std::abs(last_logged_input_.throttle - command.input.throttle) > 0.001f
-        || std::abs(last_logged_input_.brake - command.input.brake) > 0.001f
-        || std::abs(last_logged_input_.steering - command.input.steering) > 0.001f
-        || last_logged_input_.handbrake != command.input.handbrake
-        || last_logged_input_.gear != command.input.gear;
-    if (changed) {
-        last_logged_input_ = command.input;
-        last_control_change_time_ = received_at;
-        ++control_change_revision_;
-        std::cout << "[Input] change revision=" << control_change_revision_
-                  << " sequence=" << command.sequence
-                  << " throttle=" << command.input.throttle
-                  << " brake=" << command.input.brake
-                  << " steering=" << command.input.steering
-                  << " handbrake=" << command.input.handbrake << "\n";
-    }
-    return ClientMessageResult::ControlAccepted;
-}
-
-ClientMessageResult SimulationHost::handle_simulation_reset(
-    const simcore_host::ParsedSimulationReset& reset,
-    std::uint64_t connection_generation)
-{
-    if (reset.map_package_checksum != config_.map_package_checksum) {
-        std::cerr << "[Lifecycle] reset rejected: map package checksum mismatch"
-                  << " expected=" << config_.map_package_checksum
-                  << " received=" << reset.map_package_checksum << "\n";
-        return ClientMessageResult::Rejected;
-    }
-    if (reset.source_id.empty() || reset.session_id.empty()
-        || reset.play_session_id.empty() || reset.sequence == 0
-        || reset.client_time_ns == 0) {
-        std::cerr << "[Lifecycle] reset rejected: missing source, connection session, "
-                     "play session, sequence, or client time\n";
-        return ClientMessageResult::Rejected;
-    }
-    if (reset.source_id.size() > kMaxLifecycleIdentifierBytes
-        || reset.session_id.size() > kMaxLifecycleIdentifierBytes
-        || reset.play_session_id.size() > kMaxLifecycleIdentifierBytes) {
-        std::cerr << "[Lifecycle] reset rejected: identifier exceeds 256 bytes\n";
-        return ClientMessageResult::Rejected;
-    }
-    if (estop_latched_) {
-        std::cerr << "[Safety] E-stop is latched; simulation reset rejected and "
-                     "server restart is required\n";
-        return ClientMessageResult::Rejected;
-    }
-
-    const std::string play_key = make_play_session_key(
-        reset.source_id, reset.play_session_id);
-
-    // WebSocket connection generations are issued by the server at accept.
-    // They provide ordering that random session GUIDs cannot: once a newer
-    // socket owns lifecycle state, no frame from an older socket may mutate it.
-    if (lifecycle_active_ && connection_generation != 0
-        && active_connection_generation_ != 0) {
-        if (connection_generation < active_connection_generation_) {
-            std::cerr << "[Lifecycle] stale connection generation rejected source="
-                      << reset.source_id << " generation="
-                      << connection_generation << " active_generation="
-                      << active_connection_generation_ << "\n";
-            return ClientMessageResult::Rejected;
-        }
-        if (connection_generation == active_connection_generation_) {
-            const bool same_identity =
-                reset.source_id == active_controller_source_id_
-                && reset.session_id == active_connection_session_id_
-                && reset.play_session_id == active_play_session_id_;
-            if (!same_identity) {
-                std::cerr << "[Lifecycle] identity changed within one connection generation\n";
-                return ClientMessageResult::Rejected;
-            }
-            if (reset.sequence < lifecycle_highest_sequence_
-                || reset.client_time_ns < lifecycle_last_client_time_ns_) {
-                std::cerr << "[Lifecycle] reset ordering regressed within active connection\n";
-                return ClientMessageResult::Rejected;
-            }
-            if (reset.sequence == lifecycle_highest_sequence_) {
-                return ClientMessageResult::DuplicateSimulationReset;
-            }
-
-            lifecycle_highest_sequence_ = reset.sequence;
-            lifecycle_last_client_time_ns_ = reset.client_time_ns;
-            return ClientMessageResult::DuplicateSimulationReset;
-        }
-        if (reset.session_id == active_connection_session_id_) {
-            std::cerr << "[Lifecycle] a newer socket reused the active session_id\n";
-            return ClientMessageResult::Rejected;
-        }
-    }
-
-    const bool was_seen = seen_play_sessions_.contains(play_key);
-    if (was_seen) {
-        if (play_key != active_play_session_key_) {
-            std::cerr << "[Lifecycle] stale play-session reset rejected source="
-                      << reset.source_id << " play_session="
-                      << reset.play_session_id << "\n";
-            return ClientMessageResult::Rejected;
-        }
-
-        const auto reconnect = control_lease_.reset_for_reconnect(
-            reset.source_id, reset.session_id);
-        if (reconnect == ControlLeaseResetDecision::RetiredSession) {
-            std::cerr << "[Lifecycle] reset from retired connection rejected source="
-                      << reset.source_id << " session=" << reset.session_id << "\n";
-            return ClientMessageResult::Rejected;
-        }
-        if (reconnect == ControlLeaseResetDecision::Ready) {
-            last_logged_input_ = make_safe_stop_input();
-            physics_.set_input(last_logged_input_);
-            std::cout << "[Lifecycle] PIE reconnect accepted without physics reset source="
-                      << reset.source_id << " play_session="
-                      << reset.play_session_id << " session="
-                      << reset.session_id << " generation="
-                      << connection_generation << "\n";
-        }
-        lifecycle_active_ = true;
-        active_controller_source_id_ = reset.source_id;
-        active_connection_session_id_ = reset.session_id;
-        active_connection_generation_ = connection_generation;
-        active_play_session_id_ = reset.play_session_id;
-        lifecycle_highest_sequence_ = reset.sequence;
-        lifecycle_last_client_time_ns_ = reset.client_time_ns;
-        return ClientMessageResult::DuplicateSimulationReset;
-    }
-
-    if (seen_play_sessions_.size() >= kMaxTrackedPlaySessions) {
-        std::cerr << "[Lifecycle] reset rejected: play-session history limit reached; "
-                     "restart the server\n";
-        return ClientMessageResult::Rejected;
-    }
-
-    const auto reset_session = control_lease_.begin_new_simulation(
-        reset.source_id, reset.session_id);
-    if (reset_session == ControlLeaseResetDecision::RetiredSession) {
-        std::cerr << "[Lifecycle] new play session used a retired connection\n";
-        return ClientMessageResult::Rejected;
-    }
-
-    physics_.reset();
-    runtime_entities_ = initial_runtime_entities_;
-    last_logged_input_ = make_safe_stop_input();
-    physics_.set_input(last_logged_input_);
-    simulation_clock_.reset_elapsed();
-    last_reported_overrun_count_ = 0;
-    last_overrun_log_time_ = Clock::time_point::min();
-    last_control_change_time_ = Clock::time_point::min();
-    control_change_revision_ = 0;
-    reported_control_change_revision_ = 0;
-    seen_play_sessions_.insert(play_key);
-    active_play_session_key_ = play_key;
-    active_play_session_id_ = reset.play_session_id;
-    active_controller_source_id_ = reset.source_id;
-    active_connection_session_id_ = reset.session_id;
-    active_connection_generation_ = connection_generation;
-    lifecycle_highest_sequence_ = reset.sequence;
-    lifecycle_last_client_time_ns_ = reset.client_time_ns;
-    lifecycle_active_ = true;
-
-    std::cout << "[Lifecycle] simulation reset source=" << reset.source_id
-              << " play_session=" << reset.play_session_id
-              << " session=" << reset.session_id << " generation="
-              << connection_generation << "\n";
-    publish_current_state();
-    return ClientMessageResult::SimulationReset;
-}
-
 std::string SimulationHost::make_initial_world_state()
 {
+    return serialize_current_world_state(Clock::now());
+}
+
+std::string SimulationHost::serialize_current_world_state(Clock::time_point now)
+{
+    const auto health = make_health_snapshot(now);
+    const auto& network = config_.traffic_network;
+    const bool traffic_enabled = network && lifecycle_active_ && !estop_latched_
+        && network->source_map_checksum == config_.map_package_checksum
+        && health.status == simcore_host::HealthStatus::Active;
     return simcore_host::serialize_world_state_envelope(
-        physics_.get_state(), runtime_entities_, make_metadata());
+        physics_.get_state(), runtime_entities_, make_metadata(), health,
+        network ? network->signals_at(simulation_clock_.simulation_time_ns(), traffic_enabled)
+                : std::vector<simcore_host::TrafficSignalSnapshot>{},
+        network && !network->signals.empty()
+            ? std::string_view(network->checksum) : std::string_view{});
+}
+
+void SimulationHost::queue_traffic_network_reload(
+    std::shared_ptr<const simcore_host::TrafficNetwork> network)
+{
+    if (!network) return;
+    std::lock_guard lock(pending_traffic_mutex_);
+    pending_traffic_network_ = std::move(network);
+}
+
+void SimulationHost::apply_pending_traffic_network_reload()
+{
+    std::lock_guard lock(pending_traffic_mutex_);
+    if (!pending_traffic_network_
+        || pending_traffic_network_->source_map_checksum != config_.map_package_checksum) return;
+    if (!config_.traffic_network
+        || config_.traffic_network->checksum != pending_traffic_network_->checksum) {
+        config_.traffic_network = std::move(pending_traffic_network_);
+        rebuild_lane_npc();
+        rebuild_pedestrians();
+        std::cout << "[Traffic] applied verified network checksum="
+                  << config_.traffic_network->checksum << " lanes="
+                  << config_.traffic_network->lanes.size() << "\n";
+    }
+    pending_traffic_network_.reset();
 }
 
 VehicleInput SimulationHost::make_safe_stop_input()
@@ -436,16 +291,33 @@ VehicleInput SimulationHost::make_safe_stop_input()
     return input;
 }
 
-std::string SimulationHost::make_play_session_key(
-    std::string_view source_id,
-    std::string_view play_session_id)
+void SimulationHost::queue_map_package_reload(
+    simcore_host::RuntimeMapPackage package,
+    std::optional<std::vector<simcore_host::RuntimeEntityState>>
+        replacement_runtime_entities)
 {
-    std::string key;
-    key.reserve(source_id.size() + play_session_id.size() + 1);
-    key.append(source_id);
-    key.push_back('\0');
-    key.append(play_session_id);
-    return key;
+    if (package.collision_checksum.empty()
+        || !package.ground_query || !package.collision_world) {
+        throw std::invalid_argument(
+            "Queued MapPackage reload must be completely verified");
+    }
+    if (!is_log_safe_identifier(package.map_id, 128)
+        || !is_log_safe_identifier(
+            package.collision_checksum, kMaxLifecycleIdentifierBytes)) {
+        throw std::invalid_argument(
+            "MapPackage reload identities must be printable ASCII and bounded");
+    }
+    if (replacement_runtime_entities) {
+        validate_and_order_runtime_entities(*replacement_runtime_entities);
+        validate_managed_runtime_slots(*replacement_runtime_entities,
+            config_.npc_route.empty() ? 0U : config_.npc_count, config_.traffic_network);
+    }
+    std::lock_guard lock(pending_map_package_mutex_);
+    // Latest verified manifest wins if multiple editor bakes complete before
+    // the next fixed tick consumes the queue.
+    pending_map_package_ = PendingMapPackageReload{
+        std::move(package),
+        std::move(replacement_runtime_entities)};
 }
 
 void SimulationHost::publish_current_state()
@@ -453,8 +325,7 @@ void SimulationHost::publish_current_state()
     const auto state = physics_.get_state();
     if (callbacks_.broadcast_world_state) {
         callbacks_.broadcast_world_state(
-            simcore_host::serialize_world_state_envelope(
-                state, runtime_entities_, make_metadata()));
+            serialize_current_world_state(Clock::now()));
     }
     if (callbacks_.publish_observer_state) {
         callbacks_.publish_observer_state(
@@ -475,8 +346,118 @@ SimulationHost::make_runtime_collision_snapshot() const
 
 void SimulationHost::advance_runtime_entities(double dt_seconds)
 {
+    const auto& resolved_proxies = physics_.get_last_resolved_dynamic_proxies();
+    const auto& contacts = physics_.get_last_collision_contacts();
+    const auto resolved_proxy = [&](std::string_view proxy_id) {
+        return std::lower_bound(
+            resolved_proxies.begin(), resolved_proxies.end(), proxy_id,
+            [](const auto& proxy, std::string_view searched_id) {
+                return proxy.proxy_id < searched_id;
+            });
+    };
+    const auto contacted = [&](std::string_view proxy_id) {
+        return std::any_of(contacts.begin(), contacts.end(), [&](const auto& contact) {
+            return contact.collider_id == proxy_id;
+        });
+    };
+    const auto clamp_vector = [](simcore_host::CollisionVector2& value,
+                                 double maximum) {
+        const double magnitude = std::hypot(value.east_m, value.north_m);
+        if (magnitude > maximum) {
+            value.east_m *= maximum / magnitude;
+            value.north_m *= maximum / magnitude;
+        }
+    };
+    const auto proxy_center = [](const simcore_host::KinematicProxyShape& shape) {
+        return std::visit(
+            [](const auto& value) { return value.center_enu; }, shape);
+    };
+
     for (auto& entity : runtime_entities_) {
+        const auto lane_npc = std::find_if(lane_npcs_.begin(), lane_npcs_.end(),
+            [&](const LaneNpcRuntime& candidate) {
+                return candidate.entity_id == entity.entity_id;
+            });
+        if (lane_npc != lane_npcs_.end()) {
+            if (lane_npc->pending) {
+                entity = *lane_npc->pending;
+                const auto resolved = resolved_proxy(entity.collision_proxy.proxy_id);
+                if (resolved != resolved_proxies.end()
+                    && resolved->proxy_id == entity.collision_proxy.proxy_id) {
+                    entity.collision_proxy = *resolved;
+                }
+                if (lane_npc->nominal_pending) {
+                    const auto& nominal = std::get<simcore_host::ObbPrism>(
+                        lane_npc->nominal_pending->collision_proxy.shape);
+                    auto& actual = std::get<simcore_host::ObbPrism>(
+                        entity.collision_proxy.shape);
+                    lane_npc->reaction.offset_enu_m = {
+                        actual.center_enu.east_m - nominal.center_enu.east_m,
+                        actual.center_enu.north_m - nominal.center_enu.north_m};
+                    lane_npc->reaction.velocity_enu_mps = {
+                        entity.collision_proxy.linear_velocity_enu_mps.east_m
+                            - lane_npc->reaction.nominal_velocity_enu_mps.east_m,
+                        entity.collision_proxy.linear_velocity_enu_mps.north_m
+                            - lane_npc->reaction.nominal_velocity_enu_mps.north_m};
+                    lane_npc->reaction.heading_offset_rad = std::remainder(
+                        actual.heading_rad - nominal.heading_rad,
+                        2.0 * std::numbers::pi);
+                    lane_npc->reaction.heading_rate_rad_s =
+                        entity.collision_proxy.heading_rate_rad_s
+                        - lane_npc->reaction.nominal_heading_rate_rad_s;
+                    clamp_vector(lane_npc->reaction.offset_enu_m,
+                                 kNpcMaximumReactionOffsetM);
+                    clamp_vector(lane_npc->reaction.velocity_enu_mps,
+                                 kNpcMaximumReactionSpeedMps);
+                }
+                if (contacted(entity.collision_proxy.proxy_id)) {
+                    lane_npc->reaction.hold_ticks = kRuntimeReactionHoldTicks;
+                }
+            }
+            continue;
+        }
+        const auto pedestrian = std::find_if(pedestrians_.begin(), pedestrians_.end(),
+            [&](const PedestrianRuntime& candidate) {
+                return candidate.entity_id == entity.entity_id;
+            });
+        if (pedestrian != pedestrians_.end()) {
+            if (pedestrian->pending) {
+                entity = *pedestrian->pending;
+                const auto resolved = resolved_proxy(entity.collision_proxy.proxy_id);
+                if (resolved != resolved_proxies.end()
+                    && resolved->proxy_id == entity.collision_proxy.proxy_id) {
+                    entity.collision_proxy = *resolved;
+                }
+                if (pedestrian->nominal_pending) {
+                    const auto nominal = proxy_center(
+                        pedestrian->nominal_pending->collision_proxy.shape);
+                    const auto actual = proxy_center(entity.collision_proxy.shape);
+                    pedestrian->reaction.offset_enu_m = {
+                        actual.east_m - nominal.east_m,
+                        actual.north_m - nominal.north_m};
+                    pedestrian->reaction.velocity_enu_mps = {
+                        entity.collision_proxy.linear_velocity_enu_mps.east_m
+                            - pedestrian->reaction.nominal_velocity_enu_mps.east_m,
+                        entity.collision_proxy.linear_velocity_enu_mps.north_m
+                            - pedestrian->reaction.nominal_velocity_enu_mps.north_m};
+                    clamp_vector(pedestrian->reaction.offset_enu_m,
+                                 kPedestrianMaximumReactionOffsetM);
+                    clamp_vector(pedestrian->reaction.velocity_enu_mps,
+                                 kPedestrianMaximumReactionSpeedMps);
+                }
+                if (contacted(entity.collision_proxy.proxy_id)) {
+                    pedestrian->reaction.hold_ticks = kRuntimeReactionHoldTicks;
+                }
+            }
+            continue;
+        }
         auto& proxy = entity.collision_proxy;
+        const auto resolved = resolved_proxy(proxy.proxy_id);
+        if (resolved != resolved_proxies.end()
+            && resolved->proxy_id == proxy.proxy_id) {
+            proxy = *resolved;
+            continue;
+        }
         std::visit(
             [&](auto& shape) {
                 shape.center_enu.east_m +=
@@ -505,6 +486,44 @@ simcore_host::EnvelopeMetadata SimulationHost::make_metadata()
     };
 }
 
+simcore_host::HealthSnapshot SimulationHost::make_health_snapshot(
+    Clock::time_point now) const
+{
+    using simcore_host::HealthStatus;
+    simcore_host::HealthSnapshot snapshot;
+    snapshot.tick_overrun_count = simulation_clock_.overrun_count();
+    snapshot.has_control_command = control_lease_.has_control_command();
+    if (snapshot.has_control_command) {
+        snapshot.last_command_age_ns = static_cast<std::uint64_t>(
+            std::max(std::chrono::nanoseconds::zero(),
+                     control_lease_.command_age(now)).count());
+    }
+
+    // Status follows already-applied control authority, not elapsed time alone.
+    // In particular, receipt after the soft deadline can recover immediately;
+    // the HUD must never inhibit the fresh command needed for that recovery.
+    if (estop_latched_) {
+        snapshot.status = HealthStatus::EstopLatched;
+        snapshot.message = "Emergency stop latched; server restart required";
+    } else if (!lifecycle_active_) {
+        snapshot.status = HealthStatus::AwaitingReset;
+        snapshot.message = "SafeStop applied; waiting for simulation reset";
+    } else if (control_lease_.requires_reconnect()) {
+        snapshot.status = HealthStatus::ReconnectRequired;
+        snapshot.message = "SafeStop applied; control lease retired; reconnect required";
+    } else if (!snapshot.has_control_command) {
+        snapshot.status = HealthStatus::AwaitingControl;
+        snapshot.message = "SafeStop applied; waiting for first control command";
+    } else if (control_lease_.safe_stop_active()) {
+        snapshot.status = HealthStatus::SafeStop;
+        snapshot.message = "Command timeout; fresh ordered control can recover";
+    } else {
+        snapshot.status = HealthStatus::Active;
+        snapshot.message = "Control lease active";
+    }
+    return snapshot;
+}
+
 void SimulationHost::schedule_tick()
 {
     timer_.expires_at(simulation_clock_.next_deadline());
@@ -529,6 +548,10 @@ void SimulationHost::schedule_tick()
 void SimulationHost::run_tick()
 {
     const auto started_at = Clock::now();
+    if (apply_pending_map_package_reload(started_at)) {
+        return;
+    }
+    apply_pending_traffic_network_reload();
     if (control_lease_.update_timeout(started_at)) {
         const auto command_age = control_lease_.command_age(started_at);
         const auto command_age_ms = std::chrono::duration<double, std::milli>(
@@ -555,6 +578,8 @@ void SimulationHost::run_tick()
     }
 
     const double dt_seconds = 1.0 / config_.physics_frequency_hz;
+    prepare_lane_npc(dt_seconds, started_at);
+    prepare_pedestrians(dt_seconds, started_at);
     const auto state = physics_.update(
         dt_seconds, make_runtime_collision_snapshot());
     advance_runtime_entities(dt_seconds);
@@ -585,11 +610,92 @@ void SimulationHost::run_tick()
 
     if (callbacks_.broadcast_world_state) {
         callbacks_.broadcast_world_state(
-            simcore_host::serialize_world_state_envelope(
-                state, runtime_entities_, make_metadata()));
+            serialize_current_world_state(started_at));
     }
     if (callbacks_.publish_observer_state) {
         callbacks_.publish_observer_state(
             simcore_host::serialize_entity_state_packet(state));
     }
+}
+
+bool SimulationHost::apply_pending_map_package_reload(
+    Clock::time_point tick_started_at)
+{
+    std::optional<PendingMapPackageReload> pending;
+    {
+        std::lock_guard lock(pending_map_package_mutex_);
+        pending.swap(pending_map_package_);
+    }
+    if (!pending
+        || pending->package.collision_checksum == config_.map_package_checksum) {
+        return false;
+    }
+
+    const std::string previous_checksum = config_.map_package_checksum;
+    // The follower's ground pointer must be retired before releasing the map.
+    lane_npcs_.clear();
+    pedestrians_.clear();
+    physics_.replace_environment(
+        pending->package.ground_query,
+        pending->package.collision_world);
+    config_.ground_query = std::move(pending->package.ground_query);
+    config_.collision_world = std::move(pending->package.collision_world);
+    config_.map_package_checksum =
+        std::move(pending->package.collision_checksum);
+
+    if (pending->replacement_runtime_entities) {
+        initial_runtime_entities_ =
+            std::move(*pending->replacement_runtime_entities);
+    }
+    runtime_entities_ = initial_runtime_entities_;
+    last_logged_input_ = make_safe_stop_input();
+    physics_.set_input(last_logged_input_);
+    control_lease_.reset_for_new_simulation();
+    simulation_clock_.restart(tick_started_at);
+    last_reported_overrun_count_ = 0;
+    last_overrun_log_time_ = Clock::time_point::min();
+    last_control_change_time_ = Clock::time_point::min();
+    control_change_revision_ = 0;
+    reported_control_change_revision_ = 0;
+
+    // The same PIE identity must be allowed to establish a fresh lifecycle on
+    // its new WebSocket session. The old socket is closed below, so its retired
+    // session cannot re-arm control after this reset.
+    // Keep retired play identities permanently fenced. The client creates a
+    // fresh PlaySessionId when it observes the new local manifest identity.
+    active_play_session_key_.clear();
+    active_play_session_id_.clear();
+    active_controller_source_id_.clear();
+    active_connection_session_id_.clear();
+    active_connection_generation_ = 0;
+    lifecycle_highest_sequence_ = 0;
+    lifecycle_last_client_time_ns_ = 0;
+    lifecycle_active_ = false;
+    hello_connection_states_.clear();
+    rebuild_lane_npc();
+    rebuild_pedestrians();
+
+    std::cout << "[MapReload] applied at tick boundary map_id="
+              << pending->package.map_id << " previous=" << previous_checksum
+              << " current=" << config_.map_package_checksum
+              << " ground_format="
+              << simcore_host::ground_payload_kind_name(
+                     pending->package.ground_diagnostics.payload_kind)
+              << " ground_samples="
+              << pending->package.ground_diagnostics.sample_count
+              << " ground_cells="
+		       << (pending->package.ground_diagnostics.payload_kind
+		                   != simcore_host::GroundPayloadKind::TriangleCsvV1
+                      ? pending->package.ground_diagnostics.cell_count
+                      : pending->package.ground_diagnostics.spatial_cell_count)
+              << "; vehicle and lifecycle reset\n";
+
+    // Do not send a new-checksum frame down an old-checksum lifecycle: the
+    // client intentionally treats that as incompatible. Closing first forces a
+    // new connection session, whose connect snapshot advertises the new map.
+    if (callbacks_.close_control_connections) {
+        callbacks_.close_control_connections(
+            "map package reloaded; reconnect required");
+    }
+    return true;
 }

@@ -1,4 +1,7 @@
 #include "physics/vehicle_physics.hpp"
+#include "physics/vehicle_config.hpp"
+#include "terrain/map_package_ground_query.hpp"
+#include "terrain/map_package_runtime.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -19,10 +22,18 @@ constexpr double kInitialLon = -74.0095;
 
 class PlaneGroundQuery final : public simcore_host::GroundQuery {
 public:
-    PlaneGroundQuery(double east_slope, double north_slope, double intercept)
+    PlaneGroundQuery(
+        double east_slope,
+        double north_slope,
+        double intercept,
+        simcore_host::GroundSurfaceMaterialId material_id =
+            simcore_host::GroundSurfaceMaterialId::Default,
+        double friction_multiplier = 1.0)
         : east_slope_(east_slope)
         , north_slope_(north_slope)
         , intercept_(intercept)
+        , material_id_(material_id)
+        , friction_multiplier_(friction_multiplier)
     {
     }
 
@@ -41,13 +52,92 @@ public:
         return simcore_host::GroundHit{
             {request.origin_enu.east_m, request.origin_enu.north_m, height},
             {-east_slope_, -north_slope_, 1.0},
-            distance};
+            distance,
+            material_id_,
+            friction_multiplier_};
     }
 
 private:
     double east_slope_ = 0.0;
     double north_slope_ = 0.0;
     double intercept_ = 0.0;
+    simcore_host::GroundSurfaceMaterialId material_id_ =
+        simcore_host::GroundSurfaceMaterialId::Default;
+    double friction_multiplier_ = 1.0;
+};
+
+class RampPlateauGroundQuery final : public simcore_host::GroundQuery {
+public:
+    explicit RampPlateauGroundQuery(
+        double rise_m,
+        bool retain_far_plateau = true,
+        bool raise_opposite_far_support = false,
+        double curb_north_m = 5.0,
+        double near_road_raster_undershoot_m = 0.0)
+        : rise_m_(rise_m)
+        , retain_far_plateau_(retain_far_plateau)
+        , raise_opposite_far_support_(raise_opposite_far_support)
+        , curb_north_m_(curb_north_m)
+        , near_road_raster_undershoot_m_(near_road_raster_undershoot_m) {}
+
+    std::optional<simcore_host::GroundHit> query_down(
+        const simcore_host::GroundQueryRequest& request) const override
+    {
+        const double ramp_start_north_m = curb_north_m_ - 0.25;
+        const double ramp_end_north_m = curb_north_m_ + 0.25;
+        const double alpha = std::clamp(
+            (request.origin_enu.north_m - ramp_start_north_m)
+                / (ramp_end_north_m - ramp_start_north_m),
+            0.0, 1.0);
+        double height = rise_m_ * alpha;
+        double slope = request.origin_enu.north_m > ramp_start_north_m
+                && request.origin_enu.north_m < ramp_end_north_m
+            ? rise_m_ / (ramp_end_north_m - ramp_start_north_m)
+            : 0.0;
+        if (!retain_far_plateau_
+            && request.origin_enu.north_m > curb_north_m_ + 0.45) {
+            const double descent_alpha = std::clamp(
+                (request.origin_enu.north_m - (curb_north_m_ + 0.45))
+                    / 0.30,
+                0.0,
+                1.0);
+            height *= 1.0 - descent_alpha;
+            slope = descent_alpha > 0.0 && descent_alpha < 1.0
+                ? -rise_m_ / 0.30
+                : 0.0;
+        }
+        if (raise_opposite_far_support_
+            && std::abs(
+                request.origin_enu.north_m
+                    - (curb_north_m_ - (0.075 + 0.32 * 3.0))) < 1e-6) {
+            // Deliberately expose a probe-only false friend on the side
+            // opposite the near rise. A max(far +/-) implementation would
+            // authorize it; same-side topology must reject it.
+            height = rise_m_;
+            slope = 0.0;
+        }
+        if (near_road_raster_undershoot_m_ > 0.0
+            && std::abs(request.origin_enu.north_m
+                - (curb_north_m_ - (0.075 + 0.32))) < 1e-6) {
+            // Model a 50 cm heightfield cell diagonal whose road-side near
+            // sample is slightly below the true road plane. The far plateau
+            // and semantic collider still carry the authored step height.
+            height -= near_road_raster_undershoot_m_;
+        }
+        const double distance = request.origin_enu.up_m - height;
+        if (distance < 0.0 || distance > request.max_distance_m)
+            return std::nullopt;
+        return simcore_host::GroundHit{
+            {request.origin_enu.east_m, request.origin_enu.north_m, height},
+            {0.0, -slope, 1.0}, distance};
+    }
+
+private:
+    double rise_m_ = 0.0;
+    bool retain_far_plateau_ = true;
+    bool raise_opposite_far_support_ = false;
+    double curb_north_m_ = 5.0;
+    double near_road_raster_undershoot_m_ = 0.0;
 };
 
 class NoGroundQuery final : public simcore_host::GroundQuery {
@@ -168,6 +258,8 @@ public:
         west_half_only_ = west_half_only;
     }
 
+    void set_height(double height_m) { height_m_ = height_m; }
+
     std::optional<simcore_host::GroundHit> query_down(
         const simcore_host::GroundQueryRequest& request) const override
     {
@@ -175,12 +267,12 @@ public:
             || (west_half_only_ && request.origin_enu.east_m >= 0.0)) {
             return std::nullopt;
         }
-        const double distance = request.origin_enu.up_m;
+        const double distance = request.origin_enu.up_m - height_m_;
         if (distance < 0.0 || distance > request.max_distance_m) {
             return std::nullopt;
         }
         return simcore_host::GroundHit{
-            {request.origin_enu.east_m, request.origin_enu.north_m, 0.0},
+            {request.origin_enu.east_m, request.origin_enu.north_m, height_m_},
             {0.0, 0.0, 1.0},
             distance};
     }
@@ -188,6 +280,7 @@ public:
 private:
     bool enabled_ = false;
     bool west_half_only_ = false;
+    double height_m_ = 0.0;
 };
 
 // Starts flat, then raises only the canonical front-left quadrant.  The
@@ -1967,13 +2060,25 @@ void test_baked_surface_boundary_stops_at_last_supported_pose()
                 stopped.wheels.begin(), stopped.wheels.end(),
                 [](const WheelState& wheel) { return wheel.in_contact; }),
             "fail-closed pose must retain at least one supported wheel");
+    require(std::abs(stopped.pitch) < 30.f && std::abs(stopped.roll) < 30.f,
+            "coverage fail-close must not leave the chassis tipped at the edge"
+                "; pitch=" + std::to_string(stopped.pitch)
+                + ", roll=" + std::to_string(stopped.roll));
+    require(std::hypot(
+                stopped.angular_velocity_body.x,
+                stopped.angular_velocity_body.y) < 1e-6,
+            "coverage fail-close must clear residual pitch/roll velocity");
 
     const double held_north = stopped.north;
     const double held_up = stopped.position_enu.z;
+    const float held_pitch = stopped.pitch;
+    const float held_roll = stopped.roll;
     advance(vehicle, 300);
     const auto held = vehicle.get_state();
     require(std::abs(held.north - held_north) < 1e-6
-            && std::abs(held.position_enu.z - held_up) < 0.01,
+            && std::abs(held.position_enu.z - held_up) < 0.01
+            && std::abs(held.pitch - held_pitch) < 1e-5f
+            && std::abs(held.roll - held_roll) < 1e-5f,
             "continued throttle must not accumulate hidden motion or fall time at a map boundary"
                 "; north delta=" + std::to_string(held.north - held_north)
                 + ", up delta="
@@ -2290,6 +2395,56 @@ void test_handbrake_holds_at_low_speed_on_a_slope()
             "a stationary chassis must still align to the slope");
 }
 
+void test_surface_material_multiplier_limits_grade_friction()
+{
+    constexpr double slope = 0.4;
+    VehicleInput input;
+    input.handbrake = true;
+
+    auto asphalt_ground = std::make_shared<PlaneGroundQuery>(
+        0.0,
+        slope,
+        0.0,
+        simcore_host::GroundSurfaceMaterialId::Asphalt,
+        1.0);
+    VehiclePhysics asphalt(
+        kInitialLat,
+        kInitialLon,
+        0.0,
+        0.f,
+        VehicleParameters{},
+        asphalt_ground);
+    asphalt.set_input(input);
+    advance(asphalt, 300);
+
+    VehicleParameters low_friction_parameters;
+    low_friction_parameters.surface_low_friction_scale = 0.5f;
+    auto low_friction_ground = std::make_shared<PlaneGroundQuery>(
+        0.0,
+        slope,
+        0.0,
+        simcore_host::GroundSurfaceMaterialId::LowFriction,
+        0.5);
+    VehiclePhysics low_friction(
+        kInitialLat,
+        kInitialLon,
+        0.0,
+        0.f,
+        low_friction_parameters,
+        low_friction_ground);
+    low_friction.set_input(input);
+    advance(low_friction, 300);
+
+    const auto asphalt_state = asphalt.get_state();
+    const auto low_friction_state = low_friction.get_state();
+    require(std::abs(asphalt_state.north) < 1e-9
+            && asphalt_state.speed == 0.f,
+            "asphalt material must retain enough static friction to hold the grade");
+    require(std::abs(low_friction_state.north) > 0.5
+            && std::abs(low_friction_state.speed) > 0.1f,
+            "terrain multiplier and vehicle material scale must reduce real tire force");
+}
+
 void test_cross_slope_sets_canonical_roll_sign()
 {
     auto ground = std::make_shared<PlaneGroundQuery>(0.04, 0.0, 0.0);
@@ -2412,78 +2567,665 @@ void test_throttle_accelerates_and_input_is_clamped()
             "heading zero must move north in local ENU and WGS84 output");
 }
 
-void test_steering_response_is_rate_limited_and_speed_aware()
+void require_ackermann_angles(const VehicleState& state,
+                              const VehicleParameters& parameters)
 {
-    auto vehicle = make_vehicle();
+    const double centre_angle = state.steering_angle;
+    for (std::size_t index = 0; index < state.wheels.size(); ++index) {
+        double expected = 0.0;
+        if (index < 2 && std::abs(centre_angle) > 1e-6) {
+            const double direction = std::copysign(1.0, centre_angle);
+            const double centre_radius = parameters.wheelbase_m
+                / std::abs(std::tan(centre_angle));
+            const double canonical_left = index == 0
+                ? parameters.front_track_m * .5 : -parameters.front_track_m * .5;
+            expected = direction * std::atan(parameters.wheelbase_m
+                / (centre_radius - direction * canonical_left));
+        }
+        require(std::abs(state.wheels[index].steering_angle - expected) < 1e-6,
+                "each wheel must preserve its Ackermann angle, including at rest");
+    }
+}
+
+void test_steering_rack_is_speed_and_gear_independent()
+{
+    const auto parameters = simcore_host::load_vehicle_parameters(
+        SIMCORE_TEST_VEHICLE_CONFIG_PATH).parameters;
+    // Use only public pedals to establish distinct speeds. No test writes
+    // velocity/pose. The same rack history must be identical at every tick,
+    // independent of the subsequent physical speed/slip/gear response.
+    for (const float entry_speed : {0.f, 3.f, 10.f, 25.f, 50.f, -5.f}) {
+        VehiclePhysics moving(kInitialLat, kInitialLon, 0, 0, parameters);
+        VehiclePhysics stationary(kInitialLat, kInitialLon, 0, 0, parameters);
+        VehicleInput input;
+        input.gear = entry_speed < 0.f ? VehicleGear::Reverse : VehicleGear::Drive;
+        input.throttle = 1.f;
+        moving.set_input(input);
+        auto state = moving.get_state();
+        for (int step = 0; step < 12000 && std::abs(state.speed) < std::abs(entry_speed); ++step) {
+            state = moving.update(kDt);
+        }
+        require(std::abs(state.speed) >= std::abs(entry_speed),
+                "rack test must establish its requested entry speed");
+        input.throttle = 0.f;
+        for (const float fraction : {1.f, .25f, 0.f, -1.f, .5f, 0.f}) {
+            input.steering = fraction;
+            moving.set_input(input);
+            VehicleInput parked_input;
+            parked_input.steering = fraction;
+            stationary.set_input(parked_input);
+            for (int step = 0; step < 60; ++step) {
+                const double before = state.steering_angle;
+                state = moving.update(kDt);
+                const auto parked = stationary.update(kDt);
+                const double target = fraction * parameters.max_steering_angle_rad;
+                const bool returning = before * target <= 0
+                    || std::abs(target) < std::abs(before);
+                const double maximum_step = kDt * (returning
+                    ? parameters.steering_return_rate_rad_s
+                    : parameters.steering_rate_rad_s);
+                const double expected = before
+                    + std::clamp(target - before, -maximum_step, maximum_step);
+                require(std::abs(state.steering_angle - expected) < 1e-6,
+                        "rack must obey the configured finite slew without speed scaling");
+                require(std::abs(state.steering_angle - parked.steering_angle) < 1e-6,
+                        "identical steering history must produce identical rack angles at all speeds/gears");
+                require_ackermann_angles(state, parameters);
+                for (std::size_t wheel = 0; wheel < 4; ++wheel) {
+                    require(std::abs(state.wheels[wheel].steering_angle
+                                - parked.wheels[wheel].steering_angle) < 1e-6,
+                            "speed must not attenuate either front road-wheel angle");
+                }
+                if (fraction == 1.f && step == 20) {
+                    require(std::abs(state.steering_angle
+                                - parameters.max_steering_angle_rad) < 1e-6,
+                            "full lock must be reached within 350 ms, even at 180 km/h entry");
+                    if (entry_speed >= 25.f) {
+                        require(state.speed > entry_speed * .8f,
+                                "high-speed full-lock test must not pass after slowing to parking speed");
+                    }
+                }
+            }
+            require(std::abs(state.steering_angle
+                        - fraction * parameters.max_steering_angle_rad) < 1e-6,
+                    "settled steering angle must equal normalized input times maximum angle");
+        }
+    }
+    std::cout << "steering-contract: entry_mps=0,3,10,25,50,-5"
+        << " fractions=1,.25,0,-1,.5,0; identical rack/per-wheel angles; full_lock_ms<=350\n";
+}
+
+void test_steering_clamp_and_boundary_stop_preserve_ackermann()
+{
+    const VehicleParameters parameters;
+    for (const float input_value : {-2.f, 2.f}) {
+        auto vehicle = make_vehicle();
+        VehicleInput input;
+        input.steering = input_value;
+        vehicle.set_input(input);
+        advance(vehicle, 60);
+        const auto state = vehicle.get_state();
+        require(std::abs(state.steering_angle - std::copysign(
+                    parameters.max_steering_angle_rad, input_value)) < 1e-6,
+                "oversized normalized steering must clamp to the mechanical limit");
+        require_ackermann_angles(state, parameters);
+    }
+
+    auto ground = std::make_shared<NorthBoundedGroundQuery>(5.0);
+    VehiclePhysics vehicle(kInitialLat, kInitialLon, 0, 0, parameters, ground);
     VehicleInput input;
     input.throttle = 1.f;
     vehicle.set_input(input);
-
-    VehicleState state;
-    for (int step = 0; step < 600 && state.speed < 13.5f; ++step) {
-        state = vehicle.update(kDt);
-    }
-    require(state.speed >= 13.5f,
-            "steering response setup must reach at least 13.5 m/s");
-
-    input.throttle = 0.f;
+    advance(vehicle, 300);
+    const auto stopped = vehicle.get_state();
+    require(stopped.speed == 0.f && stopped.north > 2.0,
+            "boundary test must actually reach the finite-map stop");
     input.steering = 1.f;
     vehicle.set_input(input);
-    const float steering_before_step = state.steering_angle;
-    state = vehicle.update(kDt);
+    for (int step = 0; step < 60; ++step) {
+        const auto state = vehicle.update(kDt);
+        require_ackermann_angles(state, parameters);
+    }
+}
 
-    constexpr float maximum_one_tick_steering_change_rad = 0.05f;
-    require(state.steering_angle > steering_before_step,
-            "a positive steering step must begin moving the road wheels left");
-    require(state.steering_angle - steering_before_step
-                <= maximum_one_tick_steering_change_rad,
-            "road-wheel steering must be rate limited; one-tick change="
-                + std::to_string(state.steering_angle - steering_before_step));
+struct ConstantSpeedTurnSample {
+    double speed_mps = 0.0;
+    double minimum_sample_speed_mps = std::numeric_limits<double>::max();
+    double maximum_sample_speed_mps = 0.0;
+    double path_speed_mps = 0.0;
+    double signed_path_turn_rate_rad_s = 0.0;
+    double radius_m = 0.0;
+    double lateral_accel_mps2 = 0.0;
+    double road_wheel_degrees = 0.0;
+    double maximum_body_slip_degrees = 0.0;
+    double maximum_roll_degrees = 0.0;
+    double maximum_tire_slip_degrees = 0.0;
+    double average_normal_load_n = 0.0;
+    double minimum_height_m = std::numeric_limits<double>::max();
+    double maximum_height_m = -std::numeric_limits<double>::max();
+    std::size_t minimum_contact_count = 4;
+};
 
-    // A keyboard command is an instantaneous full-scale step. At road speed it
-    // must represent a bounded lateral-acceleration request rather than parking
-    // lock, otherwise the requested turn exceeds the tire friction circle and
-    // produces a guaranteed slide. Ten degrees is intentionally looser than
-    // the tuned sedan's roughly four-degree limit at 50 km/h.
-    constexpr float maximum_high_speed_steering_angle_rad = 0.18f;
-    for (int step = 1; step < 60; ++step) {
+ConstantSpeedTurnSample measure_constant_speed_turn(
+    const VehicleParameters& parameters, float target_speed_mps,
+    float steering_fraction = 1.f)
+{
+    VehiclePhysics vehicle(kInitialLat, kInitialLon, 0.0, 0.f, parameters);
+    VehicleInput input;
+    double speed_error_integral = 0.0;
+    auto state = vehicle.get_state();
+    const auto tick_cruise = [&]() {
+        const double error = target_speed_mps - state.speed;
+        speed_error_integral = std::clamp(
+            speed_error_integral + error * kDt, -1.0, 4.0);
+        const double requested_pedal = 0.06 + 0.45 * error
+            + 0.20 * speed_error_integral;
+        input.throttle = static_cast<float>(
+            std::clamp(requested_pedal, 0.0, 1.0));
+        input.brake = static_cast<float>(
+            std::clamp(-requested_pedal * 0.20, 0.0, 0.25));
+        vehicle.set_input(input);
         state = vehicle.update(kDt);
-        if (state.speed >= 10.f) {
-            require(std::abs(state.steering_angle)
-                        <= maximum_high_speed_steering_angle_rad,
-                    "full keyboard steering must not apply parking-lock angle"
-                    " at road speed; angle="
-                        + std::to_string(state.steering_angle)
-                        + ", speed=" + std::to_string(state.speed));
+    };
+
+    // The controller only operates the accelerator/brake. It never edits the
+    // vehicle pose or velocity, so measured curvature comes from tire forces.
+    for (int step = 0; step < 1500; ++step) {
+        tick_cruise();
+    }
+    require(std::abs(state.speed - target_speed_mps) < 0.20f,
+            "constant-speed turning diagnostic must establish the entry speed");
+    ConstantSpeedTurnSample result;
+    const auto check_transient_and_steady_stability = [&]() {
+        result.maximum_body_slip_degrees = std::max(
+            result.maximum_body_slip_degrees,
+            std::abs(std::atan2(state.linear_velocity_body.y,
+                               state.linear_velocity_body.x))
+                * 180.0 / std::numbers::pi_v<double>);
+        result.maximum_roll_degrees = std::max(
+            result.maximum_roll_degrees,
+            std::abs(static_cast<double>(state.roll)));
+        result.minimum_contact_count = std::min(
+            result.minimum_contact_count,
+            static_cast<std::size_t>(std::count_if(
+                state.wheels.begin(), state.wheels.end(),
+                [](const WheelState& wheel) { return wheel.in_contact; })));
+        for (const auto& wheel : state.wheels) {
+            result.maximum_tire_slip_degrees = std::max(
+                result.maximum_tire_slip_degrees,
+                std::abs(static_cast<double>(wheel.slip_angle))
+                    * 180.0 / std::numbers::pi_v<double>);
+            const double force_magnitude = std::hypot(
+                wheel.longitudinal_force, wheel.lateral_force);
+            require(force_magnitude <= parameters.tire_friction
+                        * wheel.normal_load * 1.01 + 0.01,
+                    "sharper steering must not bypass the tire friction circle");
+        }
+        require(std::isfinite(state.east) && std::isfinite(state.north)
+                    && std::isfinite(state.yaw_rate),
+                "sustained steering must keep integrated motion finite");
+    };
+
+    input.steering = steering_fraction;
+    double previous_course_rad = 0.0;
+    // Allow the pedal integrator to settle after the added cornering drag.
+    for (int step = 0; step < 720; ++step) {
+        const auto previous = state;
+        tick_cruise();
+        check_transient_and_steady_stability();
+        previous_course_rad = std::atan2(
+            state.east - previous.east, state.north - previous.north);
+    }
+
+    constexpr int sample_count = 180;
+    for (int step = 0; step < sample_count; ++step) {
+        const auto previous = state;
+        tick_cruise();
+        check_transient_and_steady_stability();
+        // Measure the actual ENU CG path, not vx/body-Z angular rate. At low
+        // speed the CG legitimately has a velocity angle relative to the body.
+        const double east_step = state.east - previous.east;
+        const double north_step = state.north - previous.north;
+        const double distance_m = std::hypot(east_step, north_step);
+        const double course_rad = std::atan2(east_step, north_step);
+        const double course_step = std::remainder(
+            course_rad - previous_course_rad, 2.0 * std::numbers::pi_v<double>);
+        previous_course_rad = course_rad;
+        const double path_speed = distance_m / kDt;
+        const double turn_rate = std::abs(course_step) / kDt;
+        result.speed_mps += state.speed;
+        result.minimum_sample_speed_mps = std::min(result.minimum_sample_speed_mps,
+            static_cast<double>(state.speed));
+        result.maximum_sample_speed_mps = std::max(result.maximum_sample_speed_mps,
+            static_cast<double>(state.speed));
+        result.path_speed_mps += path_speed;
+        result.signed_path_turn_rate_rad_s += -course_step / kDt;
+        result.radius_m += distance_m / std::max(2.0 * std::sin(std::abs(course_step) * .5), 1e-9);
+        result.lateral_accel_mps2 += path_speed * turn_rate;
+        result.road_wheel_degrees += std::abs(state.steering_angle)
+            * 180.0 / std::numbers::pi_v<double>;
+        result.minimum_height_m = std::min(result.minimum_height_m, state.position_enu.z);
+        result.maximum_height_m = std::max(result.maximum_height_m, state.position_enu.z);
+        for (const auto& wheel : state.wheels) result.average_normal_load_n += wheel.normal_load;
+    }
+    result.speed_mps /= sample_count;
+    result.path_speed_mps /= sample_count;
+    result.signed_path_turn_rate_rad_s /= sample_count;
+    result.radius_m /= sample_count;
+    result.lateral_accel_mps2 /= sample_count;
+    result.road_wheel_degrees /= sample_count;
+    result.average_normal_load_n /= sample_count;
+    return result;
+}
+
+void print_turn_sample(const ConstantSpeedTurnSample& sample,
+                       float target_speed, float fraction)
+{
+    std::cout << "steering-diagnostic: target_kph=" << target_speed * 3.6f
+        << " input=" << fraction << " longitudinal_kph=" << sample.speed_mps * 3.6
+        << " path_kph=" << sample.path_speed_mps * 3.6
+        << " speed_range_mps=" << sample.minimum_sample_speed_mps
+        << ".." << sample.maximum_sample_speed_mps
+        << " radius_m=" << sample.radius_m << " ay=" << sample.lateral_accel_mps2
+        << " centre_deg=" << sample.road_wheel_degrees
+        << " max_body_slip_deg=" << sample.maximum_body_slip_degrees
+        << " max_tire_slip_deg=" << sample.maximum_tire_slip_degrees
+        << " max_roll_deg=" << sample.maximum_roll_degrees
+        << " mean_normal_load_n=" << sample.average_normal_load_n
+        << " min_contacts=" << sample.minimum_contact_count << '\n';
+}
+
+void test_fixed_angle_turns_are_measured_from_tire_driven_paths()
+{
+    const auto parameters = simcore_host::load_vehicle_parameters(
+        SIMCORE_TEST_VEHICLE_CONFIG_PATH).parameters;
+    struct TurnCase { float speed_mps; float fraction; };
+    // Parking full-lock and modest fixed angles on the road are separate
+    // maneuvers. A 90 km/h full-lock step is NOT a no-slip acceptance test.
+    const TurnCase cases[]{
+        {3.f, 1.f}, {5.f, 1.f},
+        {30.f / 3.6f, .15f}, {40.f / 3.6f, .15f},
+        {50.f / 3.6f, .15f}, {25.f, .04f}};
+    for (const auto& entry : cases) {
+        const auto left = measure_constant_speed_turn(
+            parameters, entry.speed_mps, entry.fraction);
+        const auto right = measure_constant_speed_turn(
+            parameters, entry.speed_mps, -entry.fraction);
+        print_turn_sample(left, entry.speed_mps, entry.fraction);
+        for (const auto& sample : {left, right}) {
+            require(std::abs(sample.speed_mps - entry.speed_mps) < .20
+                        && sample.maximum_sample_speed_mps
+                            - sample.minimum_sample_speed_mps < .50,
+                    "constant-speed path comparison must actually hold its target speed");
+            const double target_degrees = entry.fraction
+                * parameters.max_steering_angle_rad * 180.0 / std::numbers::pi_v<double>;
+            require(std::abs(sample.road_wheel_degrees - target_degrees) < 1e-4,
+                    "steady road-wheel angle must stay fixed, not track speed or grip");
+            require(std::isfinite(sample.radius_m) && sample.radius_m > 0.0
+                        && sample.minimum_contact_count == 4
+                        && sample.maximum_roll_degrees < 8.0,
+                    "modest road steering and parking maneuvers must remain finite and grounded");
+            const double geometric_cg_radius = std::hypot(
+                parameters.wheelbase_m / std::tan(
+                    entry.fraction * parameters.max_steering_angle_rad),
+                parameters.wheelbase_m * parameters.front_static_load_fraction);
+            require(sample.radius_m >= geometric_cg_radius * .85
+                        && sample.radius_m <= geometric_cg_radius * 1.5,
+                    "modest fixed-angle road turns must retain useful physical cornering authority");
+        }
+        require(left.signed_path_turn_rate_rad_s > 0.0
+                    && right.signed_path_turn_rate_rad_s < 0.0
+                    && std::abs(right.radius_m - left.radius_m) < left.radius_m * .02,
+                "left/right physical ENU paths must have opposite curvature and symmetric radii");
+        if (entry.speed_mps <= 5.f) {
+            const double rear_axle_radius = parameters.wheelbase_m
+                / std::tan(parameters.max_steering_angle_rad);
+            const double geometric_cg_radius = std::hypot(rear_axle_radius,
+                parameters.wheelbase_m * parameters.front_static_load_fraction);
+            require(left.radius_m > geometric_cg_radius * .9
+                        && left.radius_m < geometric_cg_radius * 1.25,
+                    "low-speed full lock should approach Ackermann geometry without forced yaw");
         }
     }
-    require(state.speed >= 10.f,
-            "steering limit setup must remain at road speed");
-    require(state.steering_angle > 0.03f
-                && state.steering_angle <= maximum_high_speed_steering_angle_rad,
-            "speed-aware steering must retain a useful, bounded left angle");
+}
 
-    const float steering_before_release = state.steering_angle;
-    input.steering = 0.f;
-    vehicle.set_input(input);
-    state = vehicle.update(kDt);
-    require(state.steering_angle >= 0.f
-                && state.steering_angle < steering_before_release,
-            "released steering must start returning without changing sign");
-    require(steering_before_release - state.steering_angle
-                <= maximum_one_tick_steering_change_rad,
-            "steering return must also be rate limited");
-
-    float previous_angle = state.steering_angle;
-    for (int step = 0; step < 60; ++step) {
-        state = vehicle.update(kDt);
-        require(state.steering_angle >= -1e-5f
-                    && state.steering_angle <= previous_angle + 1e-5f,
-                "released steering must return monotonically without overshoot");
-        previous_angle = state.steering_angle;
+void test_steady_flat_corner_preserves_total_normal_support()
+{
+    const auto parameters = simcore_host::load_vehicle_parameters(
+        SIMCORE_TEST_VEHICLE_CONFIG_PATH).parameters;
+    const double weight_n = parameters.mass_kg * 9.80665;
+    for (const float direction : {-1.f, 1.f}) {
+        const auto sample = measure_constant_speed_turn(parameters, 50.f / 3.6f, direction * .15f);
+        require(sample.minimum_contact_count == 4
+                    && sample.maximum_height_m - sample.minimum_height_m < .003,
+                "support balance requires a settled, flat, four-contact turn, not airborne acceleration");
+        // This is a force-balance assertion, never a runtime normalization to
+        // mg: a flat, vertically settled chassis must expose its whole support
+        // (spring/damper AND the active compression stops) to the tire budget.
+        require(std::abs(sample.average_normal_load_n - weight_n) < weight_n * .02,
+                "steady flat turning must not lose compression-stop support from tire normal loads; used="
+                    + std::to_string(sample.average_normal_load_n)
+                    + ", expected=" + std::to_string(weight_n));
     }
-    require(std::abs(state.steering_angle) < 1e-3f,
-            "released steering must settle at center within one second");
+}
+
+void test_sedan_small_signal_turning_balance()
+{
+    const auto parameters = simcore_host::load_vehicle_parameters(
+        SIMCORE_TEST_VEHICLE_CONFIG_PATH).parameters;
+    // Offline small-signal identification (0.525 degrees), not a keyboard
+    // input or a full-lock grip test. No runtime speed-to-angle mapping exists.
+    const auto low = measure_constant_speed_turn(parameters, 30.f / 3.6f, .015f);
+    const auto high = measure_constant_speed_turn(parameters, 25.f, .015f);
+    require(std::abs(low.speed_mps - 30.0 / 3.6) < .2
+                && std::abs(high.speed_mps - 25.0) < .2,
+            "small-signal handling comparison must actually hold 30 and 90 km/h");
+    const double a = parameters.wheelbase_m * (1.0 - parameters.front_static_load_fraction);
+    const double b = parameters.wheelbase_m * parameters.front_static_load_fraction;
+    const double gradient = parameters.mass_kg / parameters.wheelbase_m
+        * (b / (2.0 * parameters.front_tire_corner_stiffness_n_rad)
+            - a / (2.0 * parameters.rear_tire_corner_stiffness_n_rad));
+    require(gradient >= 0.0 && gradient < .0002,
+            "tracked sedan should retain mild positive small-signal understeer, not oversteer");
+    for (const auto& sample : {low, high}) {
+        const double predicted_radius = (parameters.wheelbase_m
+            + gradient * sample.speed_mps * sample.speed_mps)
+            / std::tan(.015 * parameters.max_steering_angle_rad);
+        require(std::abs(sample.radius_m - predicted_radius) < predicted_radius * .02,
+                "unsaturated tire-driven path should agree with the independently derived axle-stiffness model");
+    }
+    require(high.radius_m >= low.radius_m * .99 && high.radius_m < low.radius_m * 1.05,
+            "small-signal radius must not widen excessively with speed in the selected sedan calibration");
+    std::cout << "steering-small-signal: radius30_m=" << low.radius_m
+        << " radius90_m=" << high.radius_m << " understeer_rad_per_mps2=" << gradient << '\n';
+}
+
+void test_compression_stop_support_uses_actual_impulse_and_clears_on_reset()
+{
+    VehicleParameters parameters;
+    parameters.front_static_load_fraction = .5f;
+    // Deliberately weak springs isolate the missing rigid-stop reaction. Its
+    // load is not limited by the spring actuator's 1000 N maximum.
+    parameters.suspension.spring_rate_n_per_m = 10000.f;
+    parameters.suspension.max_force_n = 1000.f;
+    auto ground = std::make_shared<ToggleableFlatGroundQuery>(true);
+    VehiclePhysics vehicle(kInitialLat, kInitialLon, 0, 0, parameters, ground);
+    VehicleInput input;
+    input.gear = VehicleGear::Neutral;
+    vehicle.set_input(input);
+    advance(vehicle, 240);
+    const auto settled = vehicle.get_state();
+    const auto previous = vehicle.get_wheel_contact_support_diagnostics();
+    const auto lengths = reconstruct_suspension_lengths(settled, parameters);
+    double total_load = 0, total_reaction = 0;
+    for (std::size_t i = 0; i < 4; ++i) {
+        total_load += settled.wheels[i].normal_load;
+        total_reaction += previous[i].hard_stop_impulse_n_s / kDt;
+        require(std::abs(lengths[i] - (parameters.suspension.rest_length_m
+                    - parameters.suspension.max_compression_m)) < .001,
+                "weak-spring fixture must actually rest on all four compression stops");
+        require(std::abs(settled.wheels[i].normal_load
+                    - previous[i].suspension_normal_force_n
+                    - previous[i].tire_hard_stop_normal_force_n) < .01,
+                "published tire capacity must use both spring and stop support");
+    }
+    require(total_reaction > 10000.0
+                && std::abs(total_load - parameters.mass_kg * 9.80665) < 5.0,
+            "rigid stops must supply the missing vertical support without a spring-force clamp");
+
+    vehicle.update(kDt * .5);
+    const auto changed_dt = vehicle.get_wheel_contact_support_diagnostics();
+    for (std::size_t i = 0; i < 4; ++i) {
+        require(std::abs(changed_dt[i].tire_hard_stop_normal_force_n
+                    - previous[i].hard_stop_impulse_n_s / kDt) < .1,
+                "carried support is J divided by its producing dt, not the receiving dt");
+    }
+    ground->set_height(-.01);
+    const auto released = vehicle.update(kDt);
+    const auto release_support = vehicle.get_wheel_contact_support_diagnostics();
+    for (std::size_t i = 0; i < 4; ++i) {
+        require(released.wheels[i].in_contact
+                    && release_support[i].tire_hard_stop_normal_force_n == 0.f,
+                "leaving the compression stop must clear its grip even when tire contact remains");
+    }
+    ground->set_height(0.0);
+    advance(vehicle, 120);
+    ground->set_enabled(false);
+    vehicle.update(kDt);
+    for (const auto& support : vehicle.get_wheel_contact_support_diagnostics()) {
+        require(support.hard_stop_impulse_n_s == 0.0
+                    && support.tire_hard_stop_normal_force_n == 0.f,
+                "missing contact/coverage must discard all carried rigid-stop support");
+    }
+    ground->set_enabled(true);
+    vehicle.update(kDt);
+    for (const auto& support : vehicle.get_wheel_contact_support_diagnostics()) {
+        require(support.tire_hard_stop_normal_force_n == 0.f,
+                "contact reacquisition must not reuse an impulse from before contact loss");
+    }
+    advance(vehicle, 120);
+    vehicle.reset();
+    for (const auto& support : vehicle.get_wheel_contact_support_diagnostics()) {
+        require(support.hard_stop_impulse_n_s == 0.0
+                    && support.tire_hard_stop_normal_force_n == 0.f,
+                "reset must clear hard-stop diagnostics and cached reactions");
+    }
+    vehicle.update(kDt);
+    for (const auto& support : vehicle.get_wheel_contact_support_diagnostics()) {
+        require(support.tire_hard_stop_normal_force_n == 0.f,
+                "the first post-reset tick must not inherit old stop grip");
+    }
+}
+
+void test_rotating_body_frame_does_not_create_force_free_energy()
+{
+    VehicleParameters parameters;
+    parameters.rolling_resistance_coeff = 0.f;
+    parameters.drivetrain_drag_n_per_mps = 0.f;
+    parameters.drag_coefficient = 0.f;
+    VehiclePhysics vehicle(kInitialLat, kInitialLon, 0, 0, parameters);
+    VehicleInput input;
+    input.throttle = 1.f;
+    vehicle.set_input(input);
+    auto state = vehicle.get_state();
+    for (int i = 0; i < 12000 && state.speed < 40.f; ++i) state = vehicle.update(kDt);
+    require(state.speed >= 40.f, "rotating-frame fixture must reach road speed through pedals");
+    input.steering = 1.f;
+    input.gear = VehicleGear::Neutral;
+    input.throttle = 0.f;
+    vehicle.set_input(input);
+    double maximum_euler_energy_error_j = 0.0;
+    double maximum_rotation_energy_error_j = 0.0;
+    for (int i = 0; i < 60; ++i) {
+        const auto before = state;
+        state = vehicle.update(kDt);
+        const double roll = before.roll * std::numbers::pi_v<double> / 180.0;
+        const double pitch = before.pitch * std::numbers::pi_v<double> / 180.0;
+        const double clockwise_yaw_rate = -(before.angular_velocity_body.y * std::sin(roll)
+            + before.angular_velocity_body.z * std::cos(roll)) / std::cos(pitch);
+        double force_x = 0.0, force_y = 0.0;
+        for (const auto& wheel : state.wheels) {
+            require(wheel.in_contact, "rotating-frame fixture must remain grounded");
+            const double sine = std::sin(-wheel.steering_angle);
+            const double cosine = std::cos(wheel.steering_angle);
+            force_x += cosine * wheel.longitudinal_force + sine * wheel.lateral_force;
+            force_y += sine * wheel.longitudinal_force - cosine * wheel.lateral_force;
+        }
+        // Remove the analytically integrated, frozen sampled force. What is
+        // left is only a coordinate rotation and must preserve kinetic energy.
+        // There is no gravity tangent, aero, rolling, or driveline force here.
+        const double angle = clockwise_yaw_rate * kDt;
+        const double sinc = std::abs(angle) < 1e-8 ? 1.0 : std::sin(angle) / angle;
+        const double cosc = std::abs(angle) < 1e-8 ? angle * .5
+            : (1.0 - std::cos(angle)) / angle;
+        const double residual_forward = state.linear_velocity_body.x
+            - kDt / parameters.mass_kg * (sinc * force_x + cosc * force_y);
+        const double residual_right = -state.linear_velocity_body.y
+            - kDt / parameters.mass_kg * (-cosc * force_x + sinc * force_y);
+        const double initial_speed_squared = before.linear_velocity_body.x * before.linear_velocity_body.x
+            + before.linear_velocity_body.y * before.linear_velocity_body.y;
+        const double initial_energy = .5 * parameters.mass_kg * initial_speed_squared;
+        const double residual_energy = .5 * parameters.mass_kg
+            * (residual_forward * residual_forward + residual_right * residual_right);
+        maximum_rotation_energy_error_j = std::max(maximum_rotation_energy_error_j,
+            std::abs(residual_energy - initial_energy));
+        maximum_euler_energy_error_j = std::max(maximum_euler_energy_error_j,
+            initial_energy * angle * angle);
+    }
+    require(maximum_euler_energy_error_j > 20.0,
+        "rotating-frame regression must exercise meaningful yaw, not a straight zero-force no-op");
+    std::cout << "rotating-frame-energy: peak_old_euler_error_j=" << maximum_euler_energy_error_j
+        << " peak_rotation_error_j=" << maximum_rotation_energy_error_j << '\n';
+    require(maximum_rotation_energy_error_j < 1.0,
+        "coordinate rotation must preserve frozen-force residual energy; peak_error_j="
+            + std::to_string(maximum_rotation_energy_error_j));
+}
+
+void test_high_speed_full_lock_saturates_tires_not_steering()
+{
+    const auto parameters = simcore_host::load_vehicle_parameters(
+        SIMCORE_TEST_VEHICLE_CONFIG_PATH).parameters;
+    struct PedalCase { const char* name; VehicleGear gear; float throttle; };
+    const PedalCase modes[]{
+        {"drive-full", VehicleGear::Drive, 1.f},
+        {"drive-coast", VehicleGear::Drive, 0.f},
+        {"neutral", VehicleGear::Neutral, 0.f}};
+    const auto run_case = [&](float target_speed, const PedalCase& mode, float direction) {
+        VehiclePhysics vehicle(kInitialLat, kInitialLon, 0, 0, parameters);
+        VehicleInput input;
+        input.throttle = 1.f;
+        vehicle.set_input(input);
+        auto state = vehicle.get_state();
+        for (int step = 0; step < 12000 && state.speed < target_speed; ++step) {
+            state = vehicle.update(kDt);
+        }
+        require(state.speed >= target_speed,
+                "saturation test must actually reach its requested 90/180 km/h entry speed");
+        const double entry_speed = state.speed;
+        const double entry_energy = .5 * parameters.mass_kg * entry_speed * entry_speed;
+        input.throttle = mode.throttle;
+        input.gear = mode.gear;
+        input.steering = direction;
+        vehicle.set_input(input);
+        double peak_slip_degrees = 0.0;
+        double peak_force_utilization = 0.0;
+        for (int step = 0; step < 180; ++step) {
+            const auto before = state;
+            state = vehicle.update(kDt);
+            require(std::isfinite(state.east) && std::isfinite(state.north)
+                        && std::isfinite(state.yaw_rate)
+                        && std::isfinite(state.pitch) && std::isfinite(state.roll),
+                    "saturated steering must not create non-finite chassis motion");
+            if (step >= 20) {
+                require(std::abs(state.steering_angle
+                            - direction * parameters.max_steering_angle_rad) < 1e-6,
+                        "tire saturation must never reduce the driver's rack angle");
+            }
+            require_ackermann_angles(state, parameters);
+            const auto navigation_yaw_rate = [](const VehicleState& sample) {
+                const double roll = sample.roll * std::numbers::pi_v<double> / 180.0;
+                const double pitch = sample.pitch * std::numbers::pi_v<double> / 180.0;
+                return (sample.angular_velocity_body.y * std::sin(roll)
+                    + sample.angular_velocity_body.z * std::cos(roll)) / std::cos(pitch);
+            };
+            const double previous_navigation_yaw = navigation_yaw_rate(before);
+            double contact_yaw_moment = 0.0;
+            for (std::size_t wheel_index = 0; wheel_index < state.wheels.size(); ++wheel_index) {
+                const auto& wheel = state.wheels[wheel_index];
+                const double capacity = parameters.tire_friction * wheel.normal_load;
+                const double force = std::hypot(wheel.longitudinal_force, wheel.lateral_force);
+                require(force <= capacity * 1.01 + .01,
+                        "full lock must not synthesize additional tire grip");
+                peak_force_utilization = std::max(peak_force_utilization,
+                    force / std::max(capacity, 1.0));
+                peak_slip_degrees = std::max(peak_slip_degrees,
+                    std::abs(wheel.slip_angle) * 180.0 / std::numbers::pi_v<double>);
+                const double x = parameters.wheelbase_m * (wheel_index < 2
+                    ? 1.0 - parameters.front_static_load_fraction : -parameters.front_static_load_fraction);
+                const double y = (wheel_index % 2 == 0 ? .5 : -.5)
+                    * (wheel_index < 2 ? parameters.front_track_m : parameters.rear_track_m);
+                const double sine = std::sin(wheel.steering_angle);
+                const double cosine = std::cos(wheel.steering_angle);
+                const double body_fx = cosine * wheel.longitudinal_force - sine * wheel.lateral_force;
+                const double body_fy = sine * wheel.longitudinal_force + cosine * wheel.lateral_force;
+                contact_yaw_moment += x * body_fy - y * body_fx;
+                const double lateral_patch_velocity =
+                    -sine * (before.linear_velocity_body.x - previous_navigation_yaw * y)
+                    + cosine * (before.linear_velocity_body.y + previous_navigation_yaw * x);
+                require(wheel.lateral_force * lateral_patch_velocity <= .1,
+                    "saturated lateral tires must oppose slip rather than supply energy");
+            }
+            const double integrated_yaw_moment = parameters.yaw_inertia_kg_m2
+                * (navigation_yaw_rate(state) - previous_navigation_yaw) / kDt;
+            require(std::abs(integrated_yaw_moment - contact_yaw_moment) < .5,
+                "even a reversing yaw transient must follow actual contact moments, not a sign clamp");
+            const double planar_energy = .5 * parameters.mass_kg
+                * (state.linear_velocity_body.x * state.linear_velocity_body.x
+                   + state.linear_velocity_body.y * state.linear_velocity_body.y)
+                + .5 * parameters.yaw_inertia_kg_m2 * state.yaw_rate * state.yaw_rate;
+            if (mode.throttle == 0.f) {
+                require(planar_energy <= entry_energy * 1.05,
+                        "unpowered steering must not inject unbounded planar kinetic energy");
+            }
+        }
+        require(peak_slip_degrees > 10.0 && peak_force_utilization > .9,
+                "90/180 km/h full lock must exercise tire saturation, not a hidden steering cap");
+        std::cout << "steering-saturation: mode=" << mode.name << " input=" << direction
+            << " entry_kph=" << entry_speed * 3.6
+            << " final_kph=" << state.speed * 3.6
+            << " centre_deg=" << state.steering_angle * 180.0 / std::numbers::pi_v<double>
+            << " peak_tire_slip_deg=" << peak_slip_degrees
+            << " peak_force_utilization=" << peak_force_utilization << '\n';
+    };
+    for (const float target_speed : {25.f, parameters.max_forward_speed_mps}) {
+        for (const auto& mode : modes) {
+            for (const float direction : {-1.f, 1.f}) {
+                run_case(target_speed, mode, direction);
+            }
+        }
+    }
+}
+
+void test_city_steering_keeps_authored_low_friction_limits()
+{
+    const auto parameters = simcore_host::load_vehicle_parameters(
+        SIMCORE_TEST_VEHICLE_CONFIG_PATH).parameters;
+    constexpr double ground_friction = .35;
+    for (const float direction : {-1.f, 1.f}) {
+        auto ground = std::make_shared<PlaneGroundQuery>(0, 0, 0,
+            simcore_host::GroundSurfaceMaterialId::LowFriction, ground_friction);
+        VehiclePhysics vehicle(kInitialLat, kInitialLon, 0, 0, parameters, ground);
+        VehicleInput input;
+        input.throttle = 1.f;
+        auto state = vehicle.get_state();
+        vehicle.set_input(input);
+        for (int step = 0; step < 1500 && state.speed < 10.f; ++step) {
+            state = vehicle.update(kDt);
+        }
+        require(state.speed >= 10.f, "low-friction steering test must reach road speed");
+        input.steering = direction;
+        input.throttle = .1f;
+        vehicle.set_input(input);
+        double peak_lateral_force = 0.0;
+        for (int step = 0; step < 180; ++step) {
+            state = vehicle.update(kDt);
+            for (const auto& wheel : state.wheels) {
+                require(wheel.in_contact, "low-friction steering must retain wheel contact");
+                const double capacity = parameters.tire_friction * ground_friction
+                    * parameters.surface_low_friction_scale * wheel.normal_load;
+                require(std::hypot(wheel.longitudinal_force, wheel.lateral_force)
+                            <= capacity * 1.01 + .01,
+                        "additional steering authority must not increase the authored friction circle");
+                peak_lateral_force = std::max(peak_lateral_force,
+                    std::abs(static_cast<double>(wheel.lateral_force)));
+            }
+            require(std::isfinite(state.east) && std::isfinite(state.north)
+                        && std::isfinite(state.yaw_rate) && std::abs(state.roll) < 8.f,
+                    "low-friction steering must remain finite with bounded body roll");
+        }
+        require(peak_lateral_force > 100.0,
+                "low-friction regression must exercise lateral tire forces");
+    }
 }
 
 void test_drive_coastdown_has_more_drag_than_neutral()
@@ -2678,6 +3420,74 @@ void test_full_throttle_turn_preserves_drive_and_rear_axle_grip()
 
     run_turn(5.f);
     run_turn(10.f);
+}
+
+void test_rear_side_brake_unlocks_yaw_without_braking_front_wheels()
+{
+    const auto parameters = simcore_host::load_vehicle_parameters(
+        SIMCORE_TEST_VEHICLE_CONFIG_PATH).parameters;
+    struct Sample {
+        VehicleState state;
+        double front_surface_ratio = 0.0;
+        double rear_surface_ratio = 0.0;
+        double rear_lateral_force = 0.0;
+    };
+    const auto measure = [&](bool use_side_brake) {
+        VehiclePhysics vehicle(kInitialLat, kInitialLon, 0.0, 0.f, parameters);
+        VehicleInput input;
+        input.gear = VehicleGear::Drive;
+        input.throttle = 1.f;
+        vehicle.set_input(input);
+        VehicleState state;
+        for (int step = 0; step < 900 && state.speed < 15.f; ++step) {
+            state = vehicle.update(kDt);
+        }
+        require(state.speed >= 15.f,
+                "side-brake drift setup must reach road speed");
+        input.throttle = 0.f;
+        input.steering = .15f;
+        vehicle.set_input(input);
+        for (int step = 0; step < 12; ++step) state = vehicle.update(kDt);
+        input.handbrake = use_side_brake;
+        vehicle.set_input(input);
+        for (int step = 0; step < 30; ++step) state = vehicle.update(kDt);
+
+        Sample sample;
+        sample.state = state;
+        const double reference_speed = std::max(
+            1.0, std::abs(static_cast<double>(state.speed)));
+        for (std::size_t index = 0; index < state.wheels.size(); ++index) {
+            const auto& wheel = state.wheels[index];
+            const double surface_ratio = std::abs(
+                wheel.angular_speed * parameters.tire_radius_m)
+                / reference_speed;
+            if (index < 2) sample.front_surface_ratio += surface_ratio * .5;
+            else {
+                sample.rear_surface_ratio += surface_ratio * .5;
+                sample.rear_lateral_force +=
+                    std::abs(static_cast<double>(wheel.lateral_force)) * .5;
+            }
+            const double force_magnitude = std::hypot(
+                wheel.longitudinal_force, wheel.lateral_force);
+            require(force_magnitude <= parameters.tire_friction
+                        * wheel.normal_load * 1.01 + .01,
+                    "side-brake tire force must remain inside the friction circle");
+        }
+        return sample;
+    };
+
+    const Sample rolling = measure(false);
+    const Sample drifting = measure(true);
+    require(drifting.rear_surface_ratio < .45,
+            "Space must lock/slip the rear axle instead of all four wheels");
+    require(drifting.front_surface_ratio > .65,
+            "the front wheels must keep rolling under the rear side brake");
+    require(drifting.rear_lateral_force
+                < rolling.rear_lateral_force * .65,
+            "a locked rear axle must surrender lateral grip for a drift");
+    require(std::abs(drifting.state.linear_velocity_body.y)
+                > std::abs(rolling.state.linear_velocity_body.y) + .10,
+            "rear grip loss must create observable chassis sideslip");
 }
 
 void test_reverse_wheel_rotation_has_negative_sign_and_tracks_road_speed()
@@ -3271,6 +4081,325 @@ void test_authoritative_static_wall_blocks_vehicle_without_losing_ground()
             && std::isfinite(state.position_enu.y)
             && std::isfinite(state.position_enu.z),
             "static collision response must keep the vehicle state finite");
+    require(state.damage_percent > 0.f
+            && state.last_impact_impulse_n_s > 2500.f
+            && state.damage_zone == VehicleDamageZone::Front
+            && state.collision_event_sequence >= 1,
+            "a damaging front-wall impact must publish authoritative crash state");
+    vehicle.reset();
+    const auto reset_state = vehicle.get_state();
+    require(reset_state.damage_percent == 0.f
+            && reset_state.last_impact_impulse_n_s == 0.f
+            && reset_state.damage_zone == VehicleDamageZone::None
+            && reset_state.collision_event_sequence == 0,
+            "simulation reset must restore an undamaged vehicle snapshot");
+}
+
+struct SupportedCurbRun {
+    bool crossed = false;
+    double crossing_time_s = 0.0;
+    double maximum_abs_pitch_deg = 0.0;
+    bool saw_split_axle_support = false;
+    std::size_t minimum_contacts = 4;
+    VehicleState state;
+};
+
+SupportedCurbRun run_supported_curb(
+    double dt_seconds,
+    double rise_m,
+    float drive_force_n,
+    simcore_host::StaticColliderSemantic semantic =
+        simcore_host::StaticColliderSemantic::Curb,
+    bool retain_far_plateau = true,
+    bool raise_opposite_far_support = false,
+    double near_road_raster_undershoot_m = 0.0)
+{
+    VehicleParameters parameters;
+    parameters.max_drive_force_n = drive_force_n;
+    parameters.max_drive_power_w = 100000.f;
+    parameters.drive_force_rise_rate_n_per_s = 100000.f;
+    const simcore_host::StaticObbCollider obstacle{
+        "cross-road-step",
+        semantic,
+        {{0.0, 5.0}, rise_m * 0.5,
+         std::numbers::pi_v<double> * 0.5, 8.0, 0.075, rise_m * 0.5},
+        {0.9, 0.0}};
+    VehiclePhysics vehicle(
+        kInitialLat, kInitialLon, 0.0, 0.f, parameters,
+        std::make_shared<RampPlateauGroundQuery>(
+            rise_m, retain_far_plateau, raise_opposite_far_support,
+            5.0, near_road_raster_undershoot_m),
+        std::make_shared<simcore_host::CollisionWorld>(
+            std::vector<simcore_host::StaticObbCollider>{obstacle}));
+    VehicleInput input;
+    input.throttle = 1.f;
+    vehicle.set_input(input);
+    SupportedCurbRun result;
+    const int steps = static_cast<int>(std::lround(20.0 / dt_seconds));
+    for (int step = 0; step < steps; ++step) {
+        result.state = vehicle.update(dt_seconds);
+        result.maximum_abs_pitch_deg = std::max(
+            result.maximum_abs_pitch_deg,
+            std::abs(static_cast<double>(result.state.pitch)));
+        result.minimum_contacts = std::min(
+            result.minimum_contacts,
+            static_cast<std::size_t>(std::count_if(
+                result.state.wheels.begin(), result.state.wheels.end(),
+                [](const WheelState& wheel) { return wheel.in_contact; })));
+        const double front_height = .5 * (
+            result.state.wheels[0].contact_point_enu.z
+            + result.state.wheels[1].contact_point_enu.z);
+        const double rear_height = .5 * (
+            result.state.wheels[2].contact_point_enu.z
+            + result.state.wheels[3].contact_point_enu.z);
+        result.saw_split_axle_support = result.saw_split_axle_support
+            || std::abs(front_height - rear_height) > rise_m * 0.5;
+        if (!result.crossed && result.state.north > 6.0) {
+            result.crossed = true;
+            result.crossing_time_s = (step + 1) * dt_seconds;
+        }
+    }
+    return result;
+}
+
+void test_curb_requires_authored_wheel_support_and_climbs_by_suspension()
+{
+    const auto slow = run_supported_curb(kDt, 0.24, 300.f);
+    const VehicleParameters default_parameters;
+    const double slow_front_axle_north = slow.state.north
+        + default_parameters.wheelbase_m * 0.5;
+    require(!slow.crossed
+                && slow_front_axle_north > 5.0 - 0.25
+                && slow_front_axle_north < 5.0 + 0.25
+                && std::abs(slow.state.speed) < 0.1f,
+            "insufficient drive energy must reach and stall on the authored curb ramp"
+                "; north=" + std::to_string(slow.state.north)
+                + ", front_axle_north="
+                    + std::to_string(slow_front_axle_north)
+                + ", speed=" + std::to_string(slow.state.speed));
+
+    std::array<SupportedCurbRun, 3> runs{};
+    const std::array<double, 3> steps{
+        1.0 / 60.0, 1.0 / 120.0, 1.0 / 240.0};
+    for (std::size_t index = 0; index < steps.size(); ++index) {
+        runs[index] = run_supported_curb(steps[index], 0.24, 6000.f);
+        require(runs[index].crossed,
+                "a 0.75R curb with ramp/plateau support must be climbable");
+        require(runs[index].saw_split_axle_support,
+                "front and rear axle support must rise sequentially");
+        require(runs[index].minimum_contacts >= 2
+                && runs[index].maximum_abs_pitch_deg < 35.0,
+                "curb climb must retain bounded physical support and pitch");
+        require(std::abs(runs[index].state.position_enu.z - (0.55 + 0.24)) < 0.08,
+                "the settled chassis must remain on the authored sidewalk plateau");
+    }
+    require(std::abs(runs[0].crossing_time_s - runs[1].crossing_time_s) < 0.12
+            && std::abs(runs[1].crossing_time_s - runs[2].crossing_time_s) < 0.12,
+            "curb crossing must remain stable from 60 through 240Hz");
+
+    const auto tall = run_supported_curb(kDt, 0.30, 6000.f);
+    require(!tall.crossed,
+            "a rise above the 0.75R curb contract must remain blocked");
+    const auto wall = run_supported_curb(
+        kDt, 0.24, 6000.f, simcore_host::StaticColliderSemantic::Wall);
+    require(!wall.crossed,
+            "continuous ground support must never bypass a wall semantic");
+    const auto narrow_bump = run_supported_curb(
+        kDt, 0.24, 6000.f,
+        simcore_host::StaticColliderSemantic::Curb, false);
+    require(!narrow_bump.crossed,
+            "near curb-top support without a 3R far plateau must remain blocked");
+    const auto opposite_far_support = run_supported_curb(
+        kDt, 0.24, 6000.f,
+        simcore_host::StaticColliderSemantic::Curb, false, true);
+    require(!opposite_far_support.crossed,
+            "far support on the side opposite the near rise must not authorize a curb");
+
+    const auto bounded_raster_undershoot = run_supported_curb(
+        kDt, 0.24, 6000.f,
+        simcore_host::StaticColliderSemantic::Curb, true, false, 0.0288);
+    require(bounded_raster_undershoot.crossed,
+            "a bounded near-road heightfield undershoot must not reject a verified 24 cm curb plateau");
+    const auto excessive_raster_undershoot = run_supported_curb(
+        kDt, 0.24, 6000.f,
+        simcore_host::StaticColliderSemantic::Curb, true, false, 0.10);
+    require(!excessive_raster_undershoot.crossed,
+            "near-road raster tolerance must remain bounded when the sampled rise is implausible");
+}
+
+struct HighSpeedCurbResult {
+    VehicleState before_crossing_tick;
+    VehicleState after_crossing_tick;
+    VehicleState final_state;
+    double curb_north_m = 0.0;
+    bool crossed = false;
+    bool all_states_finite = true;
+    double maximum_vertical_step_m = 0.0;
+    double maximum_abs_pitch_deg = 0.0;
+    std::size_t minimum_tire_contacts = 4;
+};
+
+HighSpeedCurbResult run_high_speed_curb_scenario(
+    float target_speed_mps,
+    double rise_m,
+    simcore_host::StaticColliderSemantic semantic)
+{
+    VehicleParameters parameters;
+    parameters.max_forward_speed_mps = target_speed_mps;
+    parameters.max_drive_force_n = 12000.f;
+    parameters.max_drive_power_w = 10000000.f;
+    parameters.drive_force_rise_rate_n_per_s = 1000000.f;
+    parameters.drive_force_fall_rate_n_per_s = 1000000.f;
+    parameters.front_drive_torque_fraction = 0.5f;
+    parameters.rolling_resistance_coeff = 0.f;
+    parameters.drivetrain_drag_n_per_mps = 0.f;
+    parameters.drag_coefficient = 0.f;
+
+    VehicleInput input;
+    input.throttle = 1.f;
+    VehiclePhysics reference(
+        kInitialLat, kInitialLon, 0.0, 0.f, parameters);
+    reference.set_input(input);
+    int warmup_steps = 0;
+    VehicleState reference_state;
+    for (; warmup_steps < 2000; ++warmup_steps) {
+        reference_state = reference.update(kDt);
+        if (reference_state.speed >= target_speed_mps - 1e-3f) {
+            ++warmup_steps;
+            break;
+        }
+    }
+    require(reference_state.speed >= target_speed_mps - 1e-3f,
+            "high-speed curb fixture must reach its requested speed");
+
+    constexpr double curb_half_width_m = 0.075;
+    const double body_half_length_m = parameters.wheelbase_m * 0.5 + 0.80;
+    // Start the decisive tick just outside the old current-CG candidate gate.
+    // At both requested speeds, the unimpeded endpoint crosses the actual curb
+    // OBB during that same 60 Hz tick.
+    const double curb_north_m = reference_state.north
+        + body_half_length_m + curb_half_width_m
+        + parameters.tire_radius_m + 0.01;
+    const simcore_host::StaticObbCollider obstacle{
+        "high-speed-cross-road-step",
+        semantic,
+        {{0.0, curb_north_m}, rise_m * 0.5,
+         std::numbers::pi_v<double> * 0.5, 8.0, curb_half_width_m,
+         rise_m * 0.5},
+        {0.9, 0.0}};
+    VehiclePhysics vehicle(
+        kInitialLat, kInitialLon, 0.0, 0.f, parameters,
+        std::make_shared<RampPlateauGroundQuery>(
+            rise_m, true, false, curb_north_m),
+        std::make_shared<simcore_host::CollisionWorld>(
+            std::vector<simcore_host::StaticObbCollider>{obstacle}));
+    vehicle.set_input(input);
+    HighSpeedCurbResult result;
+    result.curb_north_m = curb_north_m;
+    double previous_height = vehicle.get_state().position_enu.z;
+    const auto observe = [&](const VehicleState& observed) {
+        result.all_states_finite = result.all_states_finite
+            && std::isfinite(observed.east)
+            && std::isfinite(observed.north)
+            && std::isfinite(observed.position_enu.z)
+            && std::isfinite(observed.speed)
+            && std::isfinite(observed.pitch)
+            && std::isfinite(observed.roll);
+        result.maximum_vertical_step_m = std::max(
+            result.maximum_vertical_step_m,
+            std::abs(observed.position_enu.z - previous_height));
+        previous_height = observed.position_enu.z;
+        result.maximum_abs_pitch_deg = std::max(
+            result.maximum_abs_pitch_deg,
+            std::abs(static_cast<double>(observed.pitch)));
+        result.minimum_tire_contacts = std::min(
+            result.minimum_tire_contacts,
+            static_cast<std::size_t>(std::count_if(
+                observed.wheels.begin(), observed.wheels.end(),
+                [](const WheelState& wheel) { return wheel.in_contact; })));
+    };
+    for (int step = 0; step < warmup_steps; ++step) {
+        observe(vehicle.update(kDt));
+    }
+
+    result.before_crossing_tick = vehicle.get_state();
+    require(std::abs(result.before_crossing_tick.north - reference_state.north)
+                < 1e-5
+                && std::abs(result.before_crossing_tick.speed
+                            - reference_state.speed) < 1e-4f,
+            "high-speed fixture must remain unobstructed before the engineered tick");
+    result.after_crossing_tick = vehicle.update(kDt);
+    observe(result.after_crossing_tick);
+    result.final_state = result.after_crossing_tick;
+    for (int step = 0; step < 180; ++step) {
+        result.final_state = vehicle.update(kDt);
+        observe(result.final_state);
+        result.crossed = result.crossed
+            || result.final_state.north > curb_north_m + 0.50;
+    }
+    return result;
+}
+
+void test_swept_curb_candidate_prevents_tunneling_and_velocity_erasure()
+{
+    for (const float target_speed_mps : {30.f, 50.f}) {
+        const auto supported = run_high_speed_curb_scenario(
+            target_speed_mps, 0.24,
+            simcore_host::StaticColliderSemantic::Curb);
+        require(supported.after_crossing_tick.speed
+                    > target_speed_mps * 0.90f
+                    && supported.after_crossing_tick.north
+                        > supported.before_crossing_tick.north
+                            + target_speed_mps * kDt * 0.80,
+                "supported curb must not erase high-speed motion on the first swept tick");
+        require(supported.crossed,
+                "swept curb candidate must preserve supported motion at both stress speeds");
+        std::cout << "swept-curb-stress: target_mps=" << target_speed_mps
+                  << " first_tick_mps=" << supported.after_crossing_tick.speed
+                  << " max_vertical_step_m="
+                  << supported.maximum_vertical_step_m
+                  << " max_abs_pitch_deg=" << supported.maximum_abs_pitch_deg
+                  << " min_contacts=" << supported.minimum_tire_contacts
+                  << " final_z_m=" << supported.final_state.position_enu.z
+                  << '\n';
+        // At 50 m/s the front axle traverses the authored 0.45 m ramp in a
+        // single 60 Hz step.  The measured chassis response is 0.1901 m, so
+        // keep a narrow deterministic ceiling below the 0.24 m curb rise: a
+        // pass cannot hide a one-tick pose teleport through the step. This is
+        // a deterministic swept-gate stress bound, not a ride-quality claim.
+        require(supported.all_states_finite
+                    && supported.maximum_vertical_step_m < 0.21
+                    && supported.maximum_abs_pitch_deg < 35.0
+                    && supported.minimum_tire_contacts >= 2,
+                "swept-gate stress must remain finite, bounded and tire-supported");
+        require(std::abs(
+                    supported.final_state.position_enu.z - (0.55 + 0.24)) < 0.08,
+                "swept-gate stress fixture must settle to the raised plateau height");
+
+        const auto tall = run_high_speed_curb_scenario(
+            target_speed_mps, 0.30,
+            simcore_host::StaticColliderSemantic::Curb);
+        require(tall.after_crossing_tick.speed < 0.1f
+                    && tall.after_crossing_tick.north
+                        <= tall.curb_north_m - 2.225 + 1e-3,
+                "a curb above the 0.75R contract must block the same high-speed tick");
+
+        const auto wall = run_high_speed_curb_scenario(
+            target_speed_mps, 0.24,
+            simcore_host::StaticColliderSemantic::Wall);
+        require(wall.after_crossing_tick.speed < 0.1f
+                    && wall.after_crossing_tick.north
+                        <= wall.curb_north_m - 2.225 + 1e-3,
+                "Wall semantic must block the same high-speed tick");
+
+        const auto barrier = run_high_speed_curb_scenario(
+            target_speed_mps, 0.24,
+            simcore_host::StaticColliderSemantic::Barrier);
+        require(barrier.after_crossing_tick.speed < 0.1f
+                    && barrier.after_crossing_tick.north
+                        <= barrier.curb_north_m - 2.225 + 1e-3,
+                "Barrier semantic must block the same high-speed tick");
+    }
 }
 
 void test_empty_collision_world_matches_no_collision_path_on_a_grade()
@@ -3392,11 +4521,115 @@ void test_glancing_wall_collision_preserves_the_fixed_enu_grade()
             "collision projection must keep chassis height tied to the grade");
 }
 
+void test_tracked_landscape_launch_keeps_body_attitude_bounded()
+{
+    // landscape_local_v1 is a live editor-baked artifact whose horizontal
+    // extent intentionally changes when the author fits the exporter to the
+    // Landscape. Keep this regression invariant to that size: the deterministic
+    // finite-edge stop contract is covered separately by
+    // test_baked_surface_boundary_stops_at_last_supported_pose().
+    const auto loaded_parameters = simcore_host::load_vehicle_parameters(
+        SIMCORE_TEST_VEHICLE_CONFIG_PATH);
+    const auto map_package = simcore_host::load_runtime_map_package(
+        SIMCORE_TEST_LANDSCAPE_MAP_PACKAGE_PATH);
+    const auto ground = map_package.ground_query;
+    VehiclePhysics vehicle(
+        kInitialLat,
+        kInitialLon,
+        0.0,
+        0.f,
+        loaded_parameters.parameters,
+        ground);
+    VehicleInput input;
+    input.throttle = 1.f;
+    input.gear = VehicleGear::Drive;
+    vehicle.set_input(input);
+
+    const auto initial_state = vehicle.get_state();
+    double maximum_absolute_pitch_degrees = 0.0;
+    double maximum_absolute_roll_degrees = 0.0;
+    double minimum_centre_clearance_m = std::numeric_limits<double>::infinity();
+    double maximum_planar_displacement_m = 0.0;
+    double maximum_absolute_speed_mps = 0.0;
+    std::size_t minimum_contact_count = initial_state.wheels.size();
+    for (int step = 0; step < 600; ++step) {
+        const auto state = vehicle.update(kDt);
+        require(std::isfinite(state.position_enu.z)
+                && std::isfinite(state.pitch) && std::isfinite(state.roll),
+                "tracked Landscape launch must keep body state finite");
+        maximum_absolute_pitch_degrees = std::max(
+            maximum_absolute_pitch_degrees,
+            std::abs(static_cast<double>(state.pitch)));
+        maximum_absolute_roll_degrees = std::max(
+            maximum_absolute_roll_degrees,
+            std::abs(static_cast<double>(state.roll)));
+        maximum_planar_displacement_m = std::max(
+            maximum_planar_displacement_m,
+            std::hypot(
+                state.east - initial_state.east,
+                state.north - initial_state.north));
+        maximum_absolute_speed_mps = std::max(
+            maximum_absolute_speed_mps,
+            std::abs(static_cast<double>(state.speed)));
+        minimum_contact_count = std::min(
+            minimum_contact_count,
+            static_cast<std::size_t>(std::count_if(
+                state.wheels.begin(), state.wheels.end(),
+                [](const WheelState& wheel) { return wheel.in_contact; })));
+        const auto centre_hit = ground->query_down({
+            {state.east, state.north, state.position_enu.z + 20.0}, 40.0});
+        require(centre_hit.has_value(),
+                "every published tracked-Landscape pose must retain centre coverage"
+                    "; north=" + std::to_string(state.north)
+                    + ", east=" + std::to_string(state.east));
+        minimum_centre_clearance_m = std::min(
+            minimum_centre_clearance_m,
+            state.position_enu.z - centre_hit->point_enu.up_m);
+    }
+
+    require(maximum_absolute_pitch_degrees < 45.0,
+            "tracked Landscape launch must not tip the chassis nose-down; max pitch="
+                + std::to_string(maximum_absolute_pitch_degrees));
+    require(maximum_absolute_roll_degrees < 45.0,
+            "tracked Landscape launch must not roll the chassis over; max roll="
+                + std::to_string(maximum_absolute_roll_degrees));
+    require(minimum_centre_clearance_m > 0.1,
+            "tracked Landscape launch must keep the chassis reference above"
+                " authored centre ground; min clearance="
+                + std::to_string(minimum_centre_clearance_m));
+    require(maximum_planar_displacement_m > 5.0
+            && maximum_absolute_speed_mps > 0.5,
+            "tracked Landscape full-throttle smoke must actually drive, not"
+                " pass while fail-closed at spawn; displacement="
+                + std::to_string(maximum_planar_displacement_m)
+                + ", max speed=" + std::to_string(maximum_absolute_speed_mps));
+    require(minimum_contact_count >= 2,
+            "tracked Landscape drive must retain a solvable tire footprint"
+                "; minimum contacts=" + std::to_string(minimum_contact_count));
+}
+
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 {
     try {
+        if (argc == 2 && std::string(argv[1]) == "--steering-sweep") {
+            // Offline calibration only: pedal control holds speed; no pose,
+            // velocity, grip or yaw override is used to obtain these radii.
+            const auto parameters = simcore_host::load_vehicle_parameters(
+                SIMCORE_TEST_VEHICLE_CONFIG_PATH).parameters;
+            for (const float fraction : {.04f, .15f, 1.f}) {
+                for (const float kph : {10.8f, 18.f, 30.f, 40.f, 50.f, 90.f}) {
+                    const auto sample = measure_constant_speed_turn(
+                        parameters, kph / 3.6f, fraction);
+                    // Report both requested and achieved speed: full-lock
+                    // cornering drag can exceed available sustaining power.
+                    print_turn_sample(sample, kph / 3.6f, fraction);
+                }
+            }
+            return 0;
+        }
+        require(argc == 1, "usage: vehicle_physics_tests [--steering-sweep]");
         test_initial_state_is_a_complete_four_wheel_snapshot();
         test_suspension_model_clamps_stroke_and_force();
         test_invalid_suspension_parameters_are_rejected();
@@ -3423,15 +4656,25 @@ int main()
         test_low_speed_40_degree_transition_never_enters_the_surface();
         test_stationary_vehicle_stays_above_25_to_40_degree_grades();
         test_handbrake_holds_at_low_speed_on_a_slope();
+        test_surface_material_multiplier_limits_grade_friction();
         test_cross_slope_sets_canonical_roll_sign();
         test_idle_and_handbrake_are_stable();
         test_reset_restores_the_configured_spawn_snapshot();
         test_throttle_accelerates_and_input_is_clamped();
-        test_steering_response_is_rate_limited_and_speed_aware();
+        test_steering_rack_is_speed_and_gear_independent();
+        test_steering_clamp_and_boundary_stop_preserve_ackermann();
+        test_fixed_angle_turns_are_measured_from_tire_driven_paths();
+        test_rotating_body_frame_does_not_create_force_free_energy();
+        test_high_speed_full_lock_saturates_tires_not_steering();
+        test_steady_flat_corner_preserves_total_normal_support();
+        test_sedan_small_signal_turning_balance();
+        test_compression_stop_support_uses_actual_impulse_and_clears_on_reset();
+        test_city_steering_keeps_authored_low_friction_limits();
         test_drive_coastdown_has_more_drag_than_neutral();
         test_full_throttle_launch_avoids_sustained_rear_wheelspin();
         test_flat_ground_launch_keeps_driven_wheels_road_coupled();
         test_full_throttle_turn_preserves_drive_and_rear_axle_grip();
+        test_rear_side_brake_unlocks_yaw_without_braking_front_wheels();
         test_reverse_wheel_rotation_has_negative_sign_and_tracks_road_speed();
         test_low_speed_lateral_and_yaw_motion_settle_without_braking();
         test_wheel_speeds_are_symmetric_straight_and_differ_in_a_turn();
@@ -3447,8 +4690,11 @@ int main()
         test_braking_settles_lateral_and_yaw_motion();
         test_driveline_does_not_wind_up_at_speed_limiter();
         test_authoritative_static_wall_blocks_vehicle_without_losing_ground();
+        test_curb_requires_authored_wheel_support_and_climbs_by_suspension();
+        test_swept_curb_candidate_prevents_tunneling_and_velocity_erasure();
         test_empty_collision_world_matches_no_collision_path_on_a_grade();
         test_glancing_wall_collision_preserves_the_fixed_enu_grade();
+        test_tracked_landscape_launch_keeps_body_attitude_bounded();
         std::cout << "vehicle_physics_tests: all tests passed\n";
         return 0;
     } catch (const std::exception& error) {

@@ -9,14 +9,18 @@
 - 요철에서는 wheel이 올라간 쪽과 반대로 차체가 기울고, 일정 pitch·roll에서 보이지 않는
   각도 경계에 걸리는 증상도 있었다.
 - Landscape는 계속 보이지만 좁게 bake한 CSV 끝에서 차량이 더 나아가지 못했다.
+- 좁은 CSV 끝으로 조금 이동하면 차체가 남은 두 spring 쪽으로 회전해 코부터 지면 아래로
+  고꾸라졌다.
 - Bake 창에는 `Map origin coverage: OK`가 표시돼 원점 문제처럼 보이지 않는다.
+- 실행 중 다시 Bake하면 checksum mismatch 뒤 조작이 막혀 서버 재시작이 필요했던 운영
+  문제가 있었다.
 
 ## 원인 판별
 
 ### 1. stale MapPackage와 lifecycle
 
 첫 실패에서는 서버 시작 시각이 Bake보다 빨랐고 네 바퀴 접촉점이 모두 `Z=0`, normal
-`(0,0,1)`이었다. 서버는 실행 중 CSV를 hot reload하지 않는다. 이후 PIE마다
+`(0,0,1)`이었다. 당시 서버는 실행 중 CSV를 hot reload하지 않았다. 이후 PIE마다
 `SimulationReset`을 전송하도록 구현해 새 Play는 서버 pose와 simulation clock도 원점으로
 되돌리게 했다.
 
@@ -99,6 +103,21 @@ MapPackage 구멍과 법선 하중 문제를 해결한 뒤에도 30~40° 연속 
   한 방향으로 한 번만 순회하면 먼저 처리한 wheel의 impulse가 남아 대칭 입력에 불필요한
   pitch·roll rate가 생겼다.
 
+### 6. 유한 MapPackage 끝에서 남은 spring으로 차체가 tip한 오류
+
+첫 wheel ray가 bake 범위를 벗어났을 때 바로 rollback하던 보이지 않는 벽을 없애기 위해
+초기 partial-support 정책은 wheel ray가 1~3개이면 모두 계속 계산했다. 그러나 이 모델은
+airborne과 전복을 푸는 full 6DoF가 아니라 authored ground에 구속된 reduced model이다.
+유한 CSV 끝에서 front/rear axle 또는 left/right side의 두 coverage ray가 함께 사라지면
+남은 두 spring만으로 pitch·roll을 계속 적분해 차체가 실제 Landscape가 없는 쪽으로
+고꾸라질 수 있었다. centre ray는 아직 삼각형 안에 있어 기존 centre/0-ray gate가 너무
+늦게 작동했다.
+
+tracked `landscape_local_v1`과 실제 `vehicle_sedan.cfg`를 사용한 full-throttle 600-tick
+회귀는 수정 전 최대 pitch `151.7°`, 최소 z `-0.182m`를 기록하며 이 실패를 재현했다.
+이는 정상적인 경사 주행이나 suspension droop가 아니라 유한 authored-surface footprint를
+ground-bound 모델의 적용 범위 밖까지 적분한 결과였다.
+
 ## 최종 수정
 
 1. 세계각 및 ground-relative pitch `±6°`·roll `±8°` hard clamp를 모두 제거한다.
@@ -113,10 +132,12 @@ MapPackage 구멍과 법선 하중 문제를 해결한 뒤에도 30~40° 연속 
 5. `Ground Actor`가 지정된 경우 해당 Landscape를 하나의 연속 authored surface로 취급해
    corner height-delta 필터를 적용하지 않는다. 필터는 여러 `WorldStatic`을 무필터로
    스캔할 때만 벽·다른 층 연결 방지용으로 남긴다.
-6. wheel coverage ray 1~3개는 실제 partial support로 계속 계산한다. 별도 centre query가
-   authored ground를 잃거나 wheel ray가 모두 0개일 때만 step 시작 지원 pose로 rollback하고
-   모든 속도를 0으로 만든다. 첫 wheel ray가 sampling 경계를 넘은 순간 차를 막던 보이지
-   않는 벽은 제거하되 CSV 전체 이탈은 계속 안전 정지한다.
+6. authored-surface coverage에서 단일 missing corner와 대각선 two-wheel coverage는 실제
+   partial support로 계속 계산한다. front/rear axle 또는 left/right side의 두 ray가 모두
+   사라지면 ground-bound reduced model이 남은 spring으로 tip하기 전에 step 시작의 이전
+   지원 pose로 rollback하고 모든 속도를 0으로 만든다. 별도 centre query miss와 0 wheel
+   ray도 기존처럼 같은 fail-close를 적용한다. 첫 wheel 하나가 sampling 경계를 넘은 순간의
+   보이지 않는 벽은 제거하되, 완전 axle/side 이탈은 airborne 상태로 잘못 적분하지 않는다.
 7. format v4의 `front_static_load_fraction`으로 CG부터 앞·뒤 차축까지의 mount arm을
    정한다. tire load는 quasi-static 배분표가 아니라 각 corner의 실제 spring/damper
    reaction에서 얻고, contact가 없거나 full droop이면 그 corner의 인공 grip을 만들지 않는다.
@@ -175,14 +196,23 @@ MapPackage 구멍과 법선 하중 문제를 해결한 뒤에도 30~40° 연속 
     navigation Euler yaw rate와 같다고 가정하지 않는다. UE는 vector와 현재 pitch·roll에서
     yaw·pitch·roll Euler rate를 재구성해 extrapolation하고, scalar는 gimbal fallback으로만
     사용한다. FLU positive roll과 Unreal `FRotator.Roll`은 같은 방향이므로 다시 반전하지 않는다.
-24. Exporter의 `Fit Sampling Bounds To Ground Actor`는 Ground Actor 전체 component bounds에
-    기본 100cm padding을 더해 sampling box를 맞춘다. 좁은 box가 화면에는 없는 runtime
-    경계가 되는 것을 막는다. 버튼을 누르는 것만으로 CSV가 바뀌지는 않으며 반드시 다시
-    Bake하고 서버를 재시작한다.
+24. Exporter Bake preflight는 Ground Actor 전체 colliding-component bounds에 기본 100cm
+    padding을 더한 범위를 검사하고 sampling volume이 작으면 자동 Fit한다. 수동
+    `Fit Sampling Bounds To Ground Actor`는 미리보기 용도다. 새 heightfield exporter는
+    기본 100cm로 높이·ImpactNormal·valid cell을 측정하고 최대 2,000,000 samples를 넘으면
+    spacing을 자동 저하하지 않고 명시적으로 거부한다. 성공 창과 host 시작/reload 로그가
+    sample/cell 수, `ground_format` 및 실제 ENU bbox/span을 표시한다.
 25. roll/pitch 적분은 finite-angle generalized axis·inertia, `E-dot*qdot`, gyroscopic
     `omega×(I*omega)`와 planar yaw acceleration coupling을 포함한다. 다만 이는 full 6DoF
     모델이 아니다. XY/heading yaw는 planar solver가 정하고, wheel hub는 massless이며,
     unsprung mass·tire carcass·jump/airborne dynamics와 Euler pitch singularity 근처는 범위 밖이다.
+26. host는 `manifest.cfg`를 250ms 주기로 감시한다. ground·static collision·checksum 전체를
+    background 검증한 최신 후보만 60Hz tick 경계에서 원자 교체하고 차량·clock·lease·entity를
+    reset한다. invalid/작성 중 후보에는 기존 snapshot을 유지한다. Unreal은 닫힌 socket에
+    재연결하면서 manifest를 다시 검증하고 checksum이 달라졌다면 새 PlaySession으로 Reset
+    handshake를 자동 수행한다. 따라서 정상 Bake 후 서버 프로세스를 재시작하지 않는다.
+27. 승용차보다 둔했던 조향은 steering rate/return을 `1.35/1.80rad/s`, speed-aware lateral
+    acceleration cap을 `5.5m/s²`로 보완했다. cap은 타이어 friction budget을 넘지 못한다.
 
 ## 자동 검증
 
@@ -193,48 +223,62 @@ MapPackage 구멍과 법선 하중 문제를 해결한 뒤에도 30~40° 연속 
 | 20° 평면 정지 하중 | 총 타이어 하중이 `m*g*cos(20°)`의 5% 이내이고 앞·뒤 차축 모두 유효 하중 유지 |
 | 20° 기본 RWD 등판 | 뒤 차축 하중을 유지하며 6초 동안 2m 이상 지속 전진하고 최종 속도 0.5m/s 초과 |
 | 조향·차동 | Ackermann 안쪽 조향각 우세, 직진 좌우 회전수 대칭, 선회 안쪽·바깥쪽 회전수 차이 통과 |
+| 승용차 선회 envelope | full-key 약 5m/s 반경 4.0~6.5m, 약 10m/s 반경 15~25m, bicycle yaw response 75~115%, 마찰 한도 비초과 |
 | 경사 부유·접촉 회귀 | 20°·30°·40° 종경사와 30° 횡경사에서 각각 180 tick 동안 네 바퀴 접촉 유지 |
 | 요철 차체 자세 회귀 | normal이 모두 수직인 서로 다른 높이의 네 wheel center에서 7초 동안 4접촉 유지, 차체 pitch·roll과 지지면 오차 1° 이내, 틱당 변화 0.75° 이하, 가상 수평 이동 없음 |
 | 자세 부호·기존 경계 회귀 | 앞이 높으면 positive pitch, 왼쪽이 높으면 positive roll이며 기존 6°/8°보다 큰 자세도 snap 없이 연속 통과 |
 | deep one-side hard-stop | 한쪽 지면이 깊게 복귀한 첫 frame에도 finite pose, 지원 wheel 복구, pitch 5°·roll 25° 이내로 flip 방지 |
 | symmetric four-wheel 재접촉 | 네 wheel 동시 hard-stop에서 불필요한 pitch·roll 및 `omega_x/omega_y`가 각각 0.1 이내로 order bias 방지 |
-| partial coverage·centre gate | wheel ray 1~3개는 지원을 유지하고 centre miss 또는 0 wheel ray만 fail-closed |
+| terminal footprint coverage | 단일 missing corner와 대각선 two-wheel coverage는 유지하고, 완전 front/rear axle·left/right side 또는 centre·0-ray miss는 이전 지원 step으로 fail-close |
+| tracked Landscape 600 tick | 실제 package·차량 설정 full-throttle에서 수정 전 최대 pitch 151.7°·최소 z -0.182m nose-down 재현; 수정 후 live bake 크기에 불변인 finite pose·centre coverage·비관통·pitch/roll 안정성 통과 |
 | wheel-local tangent | 서로 다른 adjacent contact normal에서 hub velocity와 tire force가 각 wheel tangent를 사용 |
 | active hard-stop LCP | 한 corner hard-stop이 travel이 남은 반대 corner의 compression velocity를 잠그지 않음 |
 | compound angular contract | `yaw_rate == angular_velocity_body.z`와 vector에서 복원한 navigation yaw/heading 부호 검증 |
 | 유한 MapPackage 경계 | 20초 가속 후 마지막 지원 pose 정지, 추가 5초에 수평 누적 이동 없음 |
-| C++ full Release | 전체 build와 CTest 11/11, `vehicle_physics_tests`·`vehicle_config_tests` 각각 20/20 반복 통과 |
-| UE 5.6 Editor | `DriveIntegrationEditor` build 성공 (`UBT Result: Succeeded`) |
-| background server smoke | 최종 감사 시 PID `17604`가 `0.0.0.0:9000 LISTENING`이고 `127.0.0.1:9000` 연결 가능함을 확인. config `fnv1a64:2759c831f3bc939a`, MapPackage `fnv1a64:bc3ae81aa738d339`, `ground_triangles=2220`, `ground_cells=1872`, `ground_global=0`, `ground_max_candidates=8`, `static_colliders=0`. 시작 확인 때 stderr 0 bytes였고 연결 프로브 종료 뒤에는 정상 close 진단 한 줄만 추가됨. PID는 지속 상태 보장이 아닌 시점별 증거 |
-| 사용자 수동 gate | `Fit Sampling Bounds To Ground Actor` 적용·재-bake와 실제 PIE 주행 대기 |
+| C++ full Release | 전체 build와 CTest 13/13, 신규 heightfield query·MapPackage hot reload 각각 50/50, WebSocket 100/100 반복 통과 |
+| UE 5.6 Editor | 100cm `SIMGHF1` 측정·full-bounds preflight·자동 Fit을 포함한 Editor/Game target build 성공 |
+| background server smoke | 2026-08-27 historical smoke는 2,220-triangle package를 확인했다. 2026-08-28 PID `11152` fixture smoke에 이어 실제 PID `6692`가 legacy package에서 checksum `fnv1a64:b8b0a6ccd89614de`의 packed heightfield로 재시작 없이 교체됐다. 실제 payload는 257,556 samples/256,542 cells다. PID는 시점별 실행 증거다. |
+| 사용자 수동 gate | 새 100cm payload 실제 Bake와 서버 PID 유지 자동 apply는 완료. 실제 PIE 조향·경사·요철·차체 자세, Sculpt 재Bake 후 UE 재연결과 `static_colliders>0` 벽 충돌 대기 |
 
 당시 CSV는 75개 구멍이 있는 `2,070 triangles` 파일이었다. Editor 재시작 후
 `Ground Actor=Landscape_0`을 지정해 다시 Bake했으며, 2026-08-26 17:20 생성 파일을
 서버가 예상값인 `2,220 triangles`로 로드했다. 즉 누락됐던 75개 cell(150 triangles)은
-현재 파일에서 복원됐다. 더 세밀한 경사 형상이 필요하면 `Sample Spacing Cm=50`을
-권장하며 전체 60m×30m box도 14,400 triangle 제한 안에 있다.
+현재 파일에서 복원됐다. 이후 수치 감사에서는 이 파일이 내부 hole 없는 30×37m 연속
+직사각형이며, 체감 이동 제한은 이 좁은 CSV 자체에서 왔음을 확인했다.
 
 ## 운영 체크리스트
 
 1. Unreal Editor를 새 DLL로 다시 시작한다.
 2. Exporter의 `Ground Actor`에 `Landscape_0`을 지정한다.
-3. `Fit Sampling Bounds To Ground Actor`를 눌러 Landscape 전체 bounds와 기본 100cm padding이
-   청록색 sampling box에 포함되는지 확인한다.
-4. 필요하면 `Sample Spacing Cm`을 50으로 낮추고 `Bake Ground + Static Collision To MapPackage`를
-   누른다.
-5. 결과 창에서 `Height discontinuity filter: disabled for explicit Ground Actor`,
-   `discontinuous=0`, `Map origin coverage: OK`를 확인한다.
-6. 기존 SimCore를 종료하고 저장소 루트에서 `.\scripts\run_landscape_server.ps1`을 실행한다.
-7. 로그에서 `landscape_local_v1`과 새 triangle 수를 확인한 뒤 PIE를 Play한다.
-8. PIE 재시작은 `SimulationReset`으로 서버 차량을 원점에 되돌린다. E-stop latch를
-   해제하거나 새 CSV를 로드할 때만 서버 프로세스를 다시 시작한다.
-9. sampling box 밖에서는 차량이 마지막 지원 위치에 멈춘다. 더 멀리 주행하려면 exporter
-   box와 Landscape collision 영역을 함께 넓혀 다시 Bake한다.
+3. 필요하면 수동 Fit 버튼으로 청록색 sampling box를 미리 본다. Bake 자체도 전체 bounds와
+   padding을 검사하고 좁으면 자동 Fit한다.
+4. `Heightfield Sample Spacing Cm=100`, `Max Heightfield Sample Count=2000000`을 확인하고
+   `Bake Ground + Static Collision To MapPackage`를 누른다. limit을 넘는 경우에만 의도적으로
+   spacing을 조정한다.
+5. 결과 창에서 `Ground Actor bounds coverage: OK`, `Ground sample step`, sample/valid/
+   drivable cell 수, `Exported ENU bounds`,
+   `Height discontinuity filter: disabled for explicit Ground Actor`, `discontinuous=0`,
+   `Map origin coverage: OK`를 확인한다.
+6. 서버가 실행 중이면 종료하지 않는다. `[MapReload] verified candidate` 뒤
+   `[MapReload] applied at tick boundary`가 같은 프로세스에 출력되는지 확인한다. 서버가
+   꺼져 있을 때만 저장소 루트에서 `.\scripts\run_landscape_server.ps1`을 실행한다.
+7. 로그에서 `landscape_local_v1`, `ground_format=packed_heightfield_v1`, sample/cell 수와
+   `exported_ground_bbox_enu_m`·
+   `exported_span_m`을 확인한다. Unreal은 짧게 disconnect/reconnect한 뒤 새 checksum의
+   PlaySession Reset을 자동 수행한다.
+8. PIE 재시작은 `SimulationReset`으로 서버 차량을 원점에 되돌린다. process-lifetime
+   E-stop latch를 해제할 때만 서버 프로세스를 다시 시작한다. 새 snapshot은 hot reload한다.
+9. exported ground 밖에서는 차량이 마지막 지원 위치에 멈춘다. 더 멀리 주행하려면
+   Ground Actor 전체 범위를 새로 Bake한다.
 
-현재 tracked CSV 범위는 `east=-15~15m`, `north=-7~30m`다. 새 fit 버튼을 적용해 재-bake하기
-전까지 이 범위는 그대로다. 범위 끝에서 wheel ray 1~3개만 남은 동안은 partial support로
-진행하며, centre coverage 또는 모든 wheel ray가 사라질 때의 안전 정지는 물리 각도 clamp가
-아니라 유한 MapPackage coverage 경계다.
+현재 tracked collision ground는 header-only CSV sentinel과 `507×508` packed heightfield다.
+header 기준 257,556 samples/256,542 cells, column·row step 길이 1m이며 checksum은
+`fnv1a64:b8b0a6ccd89614de`다. 범위 끝에서 단일 missing
+corner와 대각선 two-wheel support는 계속 계산하지만, 완전 axle/side coverage loss 또는
+centre/0-ray miss에서는 이전 지원 step으로 안전 정지한다. 이는 물리 각도 clamp가 아니라
+ground-bound reduced model을 유한 MapPackage 밖으로 적분하지 않는 terminal footprint
+경계다. 인공적인 범위 끝을 더 멀리 옮기려면 Ground Actor 지정→Bake하면 되며 새 package의
+실제 PIE 재검증은 대기 상태다.
 
 수직 벽·턱 측면은 별도의 `SimCore Static Collider` marker와 WP-03 `CollisionWorld`가
 처리하고, NPC·보행자는 opt-in runtime proxy 경로가 처리한다. 다층 도로 surface 정책과

@@ -14,6 +14,7 @@ WsSession::WsSession(tcp::socket socket,
                      BinaryMessageCallback on_msg,
                      ConnectMessageFactory on_connect)
     : ws_(std::move(socket))
+    , close_timer_(ws_.get_executor())
     , connection_generation_(connection_generation)
     , on_message_(std::move(on_msg))
     , on_connect_(std::move(on_connect))
@@ -52,13 +53,22 @@ void WsSession::start() {
         self->write_queue_.clear();
         auto initial_message = self->on_connect_();
         if (!initial_message.empty()) {
-            self->send_binary(std::make_shared<const std::string>(
+            self->send_initial_binary(std::make_shared<const std::string>(
                 std::move(initial_message)));
         }
     });
 }
 
 void WsSession::send_binary(std::shared_ptr<const std::string> message) {
+    if (closed_ || close_requested_ || !application_ready_) {
+        return;
+    }
+
+    send_initial_binary(std::move(message));
+}
+
+void WsSession::send_initial_binary(
+    std::shared_ptr<const std::string> message) {
     if (closed_ || close_requested_) {
         return;
     }
@@ -106,6 +116,7 @@ void WsSession::close(const std::string& reason) {
         write_queue_.clear();
         return;
     }
+    arm_close_deadline();
     if (write_in_progress_) {
         // The front message owns the buffer used by async_write and must stay
         // alive until its completion handler runs. Only discard pending state.
@@ -124,14 +135,20 @@ void WsSession::do_read() {
         [self = shared_from_this()](beast::error_code ec, std::size_t) {
             if (ec) {
                 std::cout << "[WS] Unreal disconnected\n";
-                self->closed_ = true;
+                self->cancel_close_deadline();
+                self->force_close();
                 return;
             }
 
             if (!self->ws_.got_binary()) {
                 self->buf_.consume(self->buf_.size());
-                std::cerr << "[WS] Ignored non-binary frame\n";
-                self->do_read();
+                if (!self->application_ready_) {
+                    std::cerr << "[WS] Rejected non-binary frame before client Hello\n";
+                    self->close("client application Hello rejected");
+                } else {
+                    std::cerr << "[WS] Ignored non-binary frame\n";
+                    self->do_read();
+                }
                 return;
             }
 
@@ -140,7 +157,18 @@ void WsSession::do_read() {
             if (self->close_requested_) {
                 return;
             }
-            self->on_message_(self->connection_generation_, msg);
+            const bool first_application_message = !self->application_ready_;
+            const bool accepted_as_hello =
+                self->on_message_(self->connection_generation_, msg);
+            if (first_application_message) {
+                if (!accepted_as_hello) {
+                    std::cerr << "[WS] Client application Hello rejected\n";
+                    self->close("client application Hello rejected");
+                    return;
+                }
+                self->application_ready_ = true;
+                std::cout << "[WS] Client application Hello accepted\n";
+            }
             self->do_read();
         });
 }
@@ -160,7 +188,8 @@ void WsSession::do_write() {
                 if (!self->closed_ && ec != net::error::operation_aborted) {
                     std::cerr << "[WS] write error: " << ec.message() << "\n";
                 }
-                self->closed_ = true;
+                self->cancel_close_deadline();
+                self->force_close();
                 self->write_queue_.clear();
                 return;
             }
@@ -190,8 +219,58 @@ void WsSession::do_close() {
             std::cerr << "[WS] close error: " << ec.message() << "\n";
         }
         self->closed_ = true;
+        self->cancel_close_deadline();
         self->write_queue_.clear();
     });
+}
+
+void WsSession::arm_close_deadline() {
+    close_timer_.expires_after(kCloseGracePeriod);
+    close_timer_.async_wait(
+        [self = shared_from_this()](beast::error_code ec) {
+            if (ec == net::error::operation_aborted || self->closed_) {
+                return;
+            }
+            if (ec) {
+                std::cerr << "[WS] close deadline timer error: "
+                          << ec.message() << "\n";
+            } else {
+                std::cerr << "[WS] close deadline exceeded; forcing TCP shutdown\n";
+            }
+            self->force_close();
+        });
+}
+
+void WsSession::cancel_close_deadline() {
+    try {
+        static_cast<void>(close_timer_.cancel());
+    } catch (const boost::system::system_error& error) {
+        std::cerr << "[WS] close deadline cancellation failed: "
+                  << error.what() << "\n";
+    }
+}
+
+void WsSession::force_close() {
+    if (closed_) {
+        return;
+    }
+
+    closed_ = true;
+    // An already-completed async_write may still have its success handler
+    // queued behind this timer. Preserve its front entry so that handler can
+    // pop it safely; its captured shared_ptr keeps the payload bytes alive.
+    if (write_in_progress_) {
+        while (write_queue_.size() > 1) {
+            write_queue_.pop_back();
+        }
+    } else {
+        write_queue_.clear();
+    }
+
+    beast::error_code ignored;
+    ws_.next_layer().cancel(ignored);
+    ws_.next_layer().shutdown(tcp::socket::shutdown_both, ignored);
+    ws_.next_layer().close(ignored);
 }
 
 // --- WsServer ---
@@ -203,7 +282,9 @@ struct WsServer::State : public std::enable_shared_from_this<WsServer::State> {
         , on_message(std::move(on_msg))
         , connect_message(std::move(on_connect))
     {
-        const tcp::endpoint endpoint(tcp::v4(), port);
+        // Local simulation is the safe default. Exposing an unauthenticated
+        // control socket to the LAN must be a separate, explicit feature.
+        const tcp::endpoint endpoint(net::ip::address_v4::loopback(), port);
         acceptor.open(endpoint.protocol());
 #ifdef _WIN32
         // Windows SO_REUSEADDR semantics can allow two processes to listen on

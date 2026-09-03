@@ -261,6 +261,15 @@ public:
     }
 
     bool safe_stop_active() const { return safe_stop_active_; }
+    bool has_control_command() const {
+        return last_receive_time_ != Clock::time_point::min();
+    }
+    // Only hard expiry clears an acquired owner while retaining its command
+    // timestamp. Lifecycle reset/reconnect clears both, so waiting for a first
+    // command is distinguishable from a retired control connection.
+    bool requires_reconnect() const {
+        return has_control_command() && active_key_.empty();
+    }
     std::string_view active_source_id() const { return active_source_id_; }
     std::string_view active_session_id() const { return active_session_id_; }
 

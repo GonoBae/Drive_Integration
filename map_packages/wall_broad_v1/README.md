@@ -1,10 +1,13 @@
 # Wall/Broad MapPackage v1
 
-Wall Street·Broad Street 주변 수동운전 버티컬 슬라이스의 bootstrap package다.
+이전 Wall Street·Broad Street 계획에서 만든 bootstrap package다. 2026-08-31 R1은
+작은 가상 도심으로 전환됐고, 이 디렉터리는 기존 코드/시험/기본 설정과의 호환용으로
+보존한다. 완성된 실제 도시나 새 가상 코스가 아니다. 새 대상은 제작 예정인
+`virtual_city_v1`이며 아래 실지리 후속 계획은 이력이다.
 
 현재 C++ 기준원점은 교차점 근사 WGS84 `40.70694, -74.01083`이다. 최종 차량 스폰
-지점은 아니며 ellipsoidal height, 정확한 ENU 원점, 주행 루프와 스폰은 지도 원본과
-통행 가능 차선을 검증한 뒤 확정한다.
+지점은 아니며 현재는 이전 설정/좌표 회귀용으로 남는다. 새 가상 코스의 실제 위치를
+뜻하지 않는다. 가상 코스는 별도 로컬 원점·주행 루프·스폰을 authoring한다.
 
 ## 현재 runtime 파일
 
@@ -26,7 +29,7 @@ adaptive ground grid와 8m deterministic collision broad phase, Unreal
 실제 Wall/Broad 벽·커브 OBB가 없고 marker bake·실제 PIE 충돌 확인이 남아 있으므로
 WP-03 전체 완료 상태가 아니다.
 
-## 후속 package 데이터
+## 이전 실지리 후속 계획(이력)
 
 - `georeference`와 정확한 ENU 원점
 - 방향성 LaneGraph와 통행 규칙

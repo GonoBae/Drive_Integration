@@ -23,6 +23,16 @@ enum EntityKind {
     ENTITY_KIND_PEDESTRIAN = 3;
 }
 
+enum VehicleDamageZone {
+    VEHICLE_DAMAGE_ZONE_NONE = 0;
+    VEHICLE_DAMAGE_ZONE_FRONT = 1;
+    VEHICLE_DAMAGE_ZONE_REAR = 2;
+    VEHICLE_DAMAGE_ZONE_LEFT = 3;
+    VEHICLE_DAMAGE_ZONE_RIGHT = 4;
+    VEHICLE_DAMAGE_ZONE_ROOF = 5;
+    VEHICLE_DAMAGE_ZONE_UNDERBODY = 6;
+}
+
 message Vector3d {
     double x = 1;
     double y = 2;
@@ -55,8 +65,8 @@ message EntityState {
 
     // 자세
     float heading   = 6;    // navigation heading (degrees, North=0, clockwise-positive)
-    float pitch     = 7;    // body-frame pitch (degrees)
-    float roll      = 8;    // body-frame roll (degrees)
+    float pitch     = 7;    // schema-v2 Euler pitch (degrees), nose-up positive
+    float roll      = 8;    // schema-v2 Euler roll (degrees), left-up positive
 
     // 동역학
     float speed     = 9;    // 속도 (m/s)
@@ -72,19 +82,25 @@ message EntityState {
     float yaw_rate       = 15; // true FLU angular-velocity Z component (rad/s), left-positive
     float steering_angle = 16; // road wheel angle (radians), positive = left
     VehicleGear gear     = 17;
-    Vector3d position_enu = 18;
-    Vector3d linear_velocity_body = 19;  // body frame: X forward, Y left, Z up
-    Vector3d angular_velocity_body = 20; // right-handed body frame: X forward, Y left, Z up
+    Vector3d position_enu = 18; // map_enu polar position: East, North, Up in meters
+    Vector3d linear_velocity_body = 19;  // base_link polar: X forward, Y left, Z up, m/s
+    Vector3d angular_velocity_body = 20; // base_link axial: X forward, Y left, Z up, rad/s
     repeated WheelState wheels = 21;
 
     // Additive runtime-entity presentation/collision metadata. Field numbers
     // 1~21 keep their schema-v2 meaning for backward wire compatibility.
     EntityKind entity_kind = 22;
-    Vector3d linear_velocity_enu = 23;
+    Vector3d linear_velocity_enu = 23; // map_enu polar velocity: East, North, Up, m/s
     float collision_half_length = 24;
     float collision_half_width = 25;
     float collision_half_height = 26;
     float collision_radius = 27;
+    // Additive authoritative crash state. Damage is cumulative until reset;
+    // event_sequence changes only for a newly accepted damaging impact.
+    float damage_percent = 28;
+    float last_impact_impulse_n_s = 29;
+    VehicleDamageZone damage_zone = 30;
+    uint32 collision_event_sequence = 31;
 }
 
 // 여러 엔티티를 한 패킷에 담을 때 사용
@@ -92,8 +108,45 @@ message EntityStatePacket {
     repeated EntityState entities = 1;
 }
 
+enum TrafficSignalAspect {
+    TRAFFIC_SIGNAL_UNKNOWN = 0;
+    TRAFFIC_SIGNAL_RED = 1;
+    TRAFFIC_SIGNAL_YELLOW = 2;
+    TRAFFIC_SIGNAL_GREEN = 3;
+}
+
+enum TrafficSignalKind {
+    TRAFFIC_SIGNAL_KIND_UNSPECIFIED = 0;
+    TRAFFIC_SIGNAL_KIND_VEHICLE = 1;
+    TRAFFIC_SIGNAL_KIND_PEDESTRIAN = 2;
+}
+
+// Server authority. Position is the visual pole base in map-local ENU meters;
+// heading is the controlled travel direction, not the lens-facing direction.
+message TrafficSignalState {
+    uint32 signal_id = 1;
+    uint32 group_id = 2;
+    TrafficSignalAspect aspect = 3;
+    Vector3d position_enu = 4;
+    float heading_deg = 5;
+    float remaining_seconds = 6;
+    // Additive multi-intersection identity. Legacy traffic-signals.v1 snapshots
+    // belong to controller 1.
+    uint32 controller_id = 7;
+    // Additive presentation/control role. Omitted legacy snapshots are treated
+    // as vehicle heads by schema-v2 clients.
+    TrafficSignalKind signal_kind = 8;
+}
+
 message WorldState {
     repeated EntityState entities = 1;
+    // Additive world-health.v1 capability. Health and pose share one sequence,
+    // map identity and latest-wins queue slot; a separate Health frame could
+    // otherwise replace the WorldState it describes under backpressure.
+    Health health = 2;
+    // Optional traffic-signals.v1; shares pose/health sequence and lifecycle.
+    repeated TrafficSignalState traffic_signals = 3;
+    string traffic_network_checksum = 4;
 }
 
 message ControlCommand {
@@ -114,10 +167,16 @@ message Hello {
 }
 
 message Health {
+    // awaiting_reset, awaiting_control, active, safe_stop,
+    // reconnect_required, or estop_latched. This is server authority, not a
+    // client-side connection/freshness estimate.
     string status = 1;
     uint32 tick_overrun_count = 2;
     uint64 last_command_age_ns = 3;
     string message = 4;
+    // False before the first accepted ordinary command after reset/reconnect.
+    // In that case last_command_age_ns is zero, not an unavailable sentinel.
+    bool has_control_command = 5;
 }
 
 // Requests that the authoritative simulation return to its configured spawn.

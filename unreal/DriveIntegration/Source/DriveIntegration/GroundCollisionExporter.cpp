@@ -1,7 +1,9 @@
 #include "GroundCollisionExporter.h"
 
+#include "SimCoreGroundSnapshot.h"
 #include "SimCoreMapPackage.h"
 #include "SimCoreStaticCollider.h"
+#include "SimCoreStaticCollisionSnapshot.h"
 
 #include "Components/BoxComponent.h"
 #include "Components/SceneComponent.h"
@@ -9,6 +11,7 @@
 #include "EngineUtils.h"
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
+#include "Misc/App.h"
 #include "Misc/MessageDialog.h"
 #include "Misc/Paths.h"
 
@@ -20,17 +23,7 @@ DEFINE_LOG_CATEGORY_STATIC(LogSimCoreGroundExporter, Log, All);
 
 namespace
 {
-// Bound editor bake size and package churn. The server's adaptive grid index
-// keeps wheel queries local, but the R1 package still intentionally targets a
-// compact development corridor rather than an unbounded world export.
-constexpr int64 MaxExportedTriangleCount = 20000;
 constexpr int32 MaxExportedStaticColliderCount = 4096;
-
-struct FGroundCollisionSample
-{
-	FVector ImpactPoint = FVector::ZeroVector;
-	bool bValid = false;
-};
 
 struct FStaticColliderCsvRecord
 {
@@ -83,6 +76,149 @@ bool IsFiniteVector(const FVector& Value)
 		&& FMath::IsFinite(Value.Y)
 		&& FMath::IsFinite(Value.Z);
 }
+
+#if WITH_EDITOR
+struct FGroundActorSamplingFit
+{
+	FVector WorldCenter = FVector::ZeroVector;
+	FQuat YawRotation = FQuat::Identity;
+	double YawDegrees = 0.0;
+	FVector2D HorizontalHalfExtentCm = FVector2D(100.0, 100.0);
+	double VerticalHalfExtentCm = 100.0;
+};
+
+bool CalculateGroundActorSamplingFit(
+	const AActor* GroundActor,
+	double PaddingCm,
+	FGroundActorSamplingFit& OutFit,
+	FString& OutError)
+{
+	OutError.Reset();
+	if (!IsValid(GroundActor))
+	{
+		OutError = TEXT("assign Ground Actor first");
+		return false;
+	}
+
+	// Actor-local component bounds are transformed explicitly rather than using
+	// a world AABB. Aligning the sampler to the actor's yaw avoids an oversized
+	// box for rotated ground while retaining pitched, rolled, scaled, and
+	// component-offset colliding geometry.
+	const FBox GroundLocalBounds =
+		GroundActor->CalculateComponentsBoundingBoxInLocalSpace(false, true);
+	if (!GroundLocalBounds.IsValid
+		|| !IsFiniteVector(GroundLocalBounds.Min)
+		|| !IsFiniteVector(GroundLocalBounds.Max))
+	{
+		OutError = TEXT("Ground Actor has no valid colliding component bounds");
+		return false;
+	}
+
+	const FTransform GroundTransform = GroundActor->GetActorTransform();
+	OutFit.YawDegrees =
+		FRotator::NormalizeAxis(GroundActor->GetActorRotation().Yaw);
+	OutFit.YawRotation = FQuat(FRotator(0.0, OutFit.YawDegrees, 0.0));
+	FVector SamplingMinimum(
+		TNumericLimits<double>::Max(),
+		TNumericLimits<double>::Max(),
+		TNumericLimits<double>::Max());
+	FVector SamplingMaximum(
+		TNumericLimits<double>::Lowest(),
+		TNumericLimits<double>::Lowest(),
+		TNumericLimits<double>::Lowest());
+
+	for (int32 CornerIndex = 0; CornerIndex < 8; ++CornerIndex)
+	{
+		const FVector GroundLocalCorner(
+			(CornerIndex & 1) != 0 ? GroundLocalBounds.Max.X : GroundLocalBounds.Min.X,
+			(CornerIndex & 2) != 0 ? GroundLocalBounds.Max.Y : GroundLocalBounds.Min.Y,
+			(CornerIndex & 4) != 0 ? GroundLocalBounds.Max.Z : GroundLocalBounds.Min.Z);
+		const FVector WorldCorner =
+			GroundTransform.TransformPosition(GroundLocalCorner);
+		if (!IsFiniteVector(WorldCorner))
+		{
+			OutError = TEXT("Ground Actor transform produced a non-finite world bound");
+			return false;
+		}
+
+		const FVector SamplingCorner =
+			OutFit.YawRotation.UnrotateVector(WorldCorner);
+		SamplingMinimum.X = FMath::Min(SamplingMinimum.X, SamplingCorner.X);
+		SamplingMinimum.Y = FMath::Min(SamplingMinimum.Y, SamplingCorner.Y);
+		SamplingMinimum.Z = FMath::Min(SamplingMinimum.Z, SamplingCorner.Z);
+		SamplingMaximum.X = FMath::Max(SamplingMaximum.X, SamplingCorner.X);
+		SamplingMaximum.Y = FMath::Max(SamplingMaximum.Y, SamplingCorner.Y);
+		SamplingMaximum.Z = FMath::Max(SamplingMaximum.Z, SamplingCorner.Z);
+	}
+
+	const FVector SamplingCenter =
+		(SamplingMinimum + SamplingMaximum) * 0.5;
+	const FVector SamplingHalfExtent =
+		(SamplingMaximum - SamplingMinimum) * 0.5;
+	if (!IsFiniteVector(SamplingCenter)
+		|| !IsFiniteVector(SamplingHalfExtent))
+	{
+		OutError = TEXT("computed sampling bounds are not finite");
+		return false;
+	}
+
+	OutFit.WorldCenter = OutFit.YawRotation.RotateVector(SamplingCenter);
+	// A yaw-only transform leaves Z unchanged, but assigning it explicitly keeps
+	// the vertical contract clear if the projection above changes in the future.
+	OutFit.WorldCenter.Z = SamplingCenter.Z;
+	const double SafePadding = FMath::Max(PaddingCm, 0.0);
+	OutFit.HorizontalHalfExtentCm = FVector2D(
+		FMath::Max(SamplingHalfExtent.X + SafePadding, 100.0),
+		FMath::Max(SamplingHalfExtent.Y + SafePadding, 100.0));
+	OutFit.VerticalHalfExtentCm =
+		FMath::Max(SamplingHalfExtent.Z + SafePadding, 100.0);
+	return true;
+}
+
+bool SamplingVolumeContainsGroundFit(
+	const FGroundActorSamplingFit& RequiredFit,
+	const FVector& CurrentCenter,
+	const FQuat& CurrentYawRotation,
+	double CurrentExtentX,
+	double CurrentExtentY,
+	double CurrentTraceAbove,
+	double CurrentTraceBelow)
+{
+	constexpr double ContainmentToleranceCm = 0.1;
+	for (int32 CornerIndex = 0; CornerIndex < 8; ++CornerIndex)
+	{
+		const FVector RequiredLocalCorner(
+			(CornerIndex & 1) != 0
+				? RequiredFit.HorizontalHalfExtentCm.X
+				: -RequiredFit.HorizontalHalfExtentCm.X,
+			(CornerIndex & 2) != 0
+				? RequiredFit.HorizontalHalfExtentCm.Y
+				: -RequiredFit.HorizontalHalfExtentCm.Y,
+			(CornerIndex & 4) != 0
+				? RequiredFit.VerticalHalfExtentCm
+				: -RequiredFit.VerticalHalfExtentCm);
+		const FVector RequiredWorldCorner =
+			RequiredFit.WorldCenter
+			+ RequiredFit.YawRotation.RotateVector(RequiredLocalCorner);
+		const FVector CurrentLocalCorner =
+			CurrentYawRotation.UnrotateVector(
+				RequiredWorldCorner - CurrentCenter);
+		if (FMath::Abs(CurrentLocalCorner.X)
+				> CurrentExtentX + ContainmentToleranceCm
+			|| FMath::Abs(CurrentLocalCorner.Y)
+				> CurrentExtentY + ContainmentToleranceCm
+			|| CurrentLocalCorner.Z
+				> CurrentTraceAbove + ContainmentToleranceCm
+			|| CurrentLocalCorner.Z
+				< -CurrentTraceBelow - ContainmentToleranceCm)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+#endif
 
 bool BuildStaticColliderCsv(
 	UWorld* World,
@@ -241,19 +377,6 @@ bool BuildStaticColliderCsv(
 	return true;
 }
 
-bool MatchesGroundActor(const FHitResult& Hit, const AActor* GroundActor)
-{
-	if (GroundActor == nullptr)
-	{
-		return true;
-	}
-
-	const AActor* HitActor = Hit.GetActor();
-	return HitActor == GroundActor
-		|| (HitActor != nullptr && HitActor->IsOwnedBy(GroundActor))
-		|| (HitActor != nullptr && GroundActor->IsOwnedBy(HitActor));
-}
-
 bool ContainsUnsupportedSurfaceIdCharacter(const FString& Value)
 {
 	return Value.IsEmpty()
@@ -292,13 +415,27 @@ bool ContainsReparsePointBelowRoot(
 	return false;
 }
 
-void ShowExportError(const FString& Message)
+void ShowExportError(const FString& Message, bool bShowDialog = true)
 {
 	UE_LOG(LogSimCoreGroundExporter, Error, TEXT("%s"), *Message);
 #if WITH_EDITOR
-	FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(Message));
+	if (bShowDialog && !IsRunningCommandlet() && !FApp::IsUnattended())
+	{
+		FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(Message));
+	}
 #endif
 }
+}
+
+bool SimCoreStaticCollisionSnapshot::BuildCsv(
+	UWorld* World,
+	const FVector& MapOriginWorldCm,
+	FString& OutCsv,
+	int32& OutColliderCount,
+	FString& OutError)
+{
+	return BuildStaticColliderCsv(
+		World, MapOriginWorldCm, OutCsv, OutColliderCount, OutError);
 }
 
 AGroundCollisionExporter::AGroundCollisionExporter()
@@ -367,124 +504,106 @@ void AGroundCollisionExporter::FitSamplingBoundsToGroundActor()
 #if !WITH_EDITOR
 	UE_LOG(LogSimCoreGroundExporter, Warning,
 		TEXT("Ground collision bounds fitting is available only in the Unreal Editor"));
-	return;
 #else
-	if (!IsValid(GroundActor))
+	FString Result;
+	if (!FitSamplingBoundsToGroundActorInternal(true, Result))
 	{
-		ShowExportError(TEXT("Ground bounds fit failed: assign Ground Actor first."));
-		return;
+		ShowExportError(FString::Printf(
+			TEXT("Ground bounds fit failed: %s."),
+			*Result));
 	}
+#endif
+}
+
+#if WITH_EDITOR
+bool AGroundCollisionExporter::FitSamplingBoundsToGroundActorInternal(
+	bool bShowResultDialog,
+	FString& OutResult)
+{
 	if (GroundActor == this)
 	{
-		ShowExportError(TEXT("Ground bounds fit failed: Ground Actor cannot be the exporter itself."));
-		return;
+		OutResult = TEXT("Ground Actor cannot be the exporter itself");
+		return false;
 	}
 
-	// Actor-local component bounds are transformed explicitly rather than using
-	// a world AABB. Aligning the sampler to the Ground Actor's yaw therefore
-	// avoids the unnecessarily large box produced for a rotated Landscape while
-	// still containing pitched, rolled, scaled, or component-offset geometry.
-	const FBox GroundLocalBounds =
-		GroundActor->CalculateComponentsBoundingBoxInLocalSpace(false, true);
-	if (!GroundLocalBounds.IsValid
-		|| !IsFiniteVector(GroundLocalBounds.Min)
-		|| !IsFiniteVector(GroundLocalBounds.Max))
+	FGroundActorSamplingFit RequiredFit;
+	if (!CalculateGroundActorSamplingFit(
+		GroundActor,
+		static_cast<double>(GroundBoundsPaddingCm),
+		RequiredFit,
+		OutResult))
 	{
-		ShowExportError(TEXT("Ground bounds fit failed: Ground Actor has no valid colliding component bounds."));
-		return;
+		return false;
 	}
 
-	const FTransform GroundTransform = GroundActor->GetActorTransform();
-	const double SamplingYawDegrees =
-		FRotator::NormalizeAxis(GroundActor->GetActorRotation().Yaw);
-	const FQuat SamplingYaw(FRotator(0.0, SamplingYawDegrees, 0.0));
-	FVector SamplingMinimum(
-		TNumericLimits<double>::Max(),
-		TNumericLimits<double>::Max(),
-		TNumericLimits<double>::Max());
-	FVector SamplingMaximum(
-		TNumericLimits<double>::Lowest(),
-		TNumericLimits<double>::Lowest(),
-		TNumericLimits<double>::Lowest());
-
-	for (int32 CornerIndex = 0; CornerIndex < 8; ++CornerIndex)
-	{
-		const FVector GroundLocalCorner(
-			(CornerIndex & 1) != 0 ? GroundLocalBounds.Max.X : GroundLocalBounds.Min.X,
-			(CornerIndex & 2) != 0 ? GroundLocalBounds.Max.Y : GroundLocalBounds.Min.Y,
-			(CornerIndex & 4) != 0 ? GroundLocalBounds.Max.Z : GroundLocalBounds.Min.Z);
-		const FVector WorldCorner = GroundTransform.TransformPosition(GroundLocalCorner);
-		if (!IsFiniteVector(WorldCorner))
-		{
-			ShowExportError(TEXT("Ground bounds fit failed: Ground Actor transform produced a non-finite world bound."));
-			return;
-		}
-
-		const FVector SamplingCorner = SamplingYaw.UnrotateVector(WorldCorner);
-		SamplingMinimum.X = FMath::Min(SamplingMinimum.X, SamplingCorner.X);
-		SamplingMinimum.Y = FMath::Min(SamplingMinimum.Y, SamplingCorner.Y);
-		SamplingMinimum.Z = FMath::Min(SamplingMinimum.Z, SamplingCorner.Z);
-		SamplingMaximum.X = FMath::Max(SamplingMaximum.X, SamplingCorner.X);
-		SamplingMaximum.Y = FMath::Max(SamplingMaximum.Y, SamplingCorner.Y);
-		SamplingMaximum.Z = FMath::Max(SamplingMaximum.Z, SamplingCorner.Z);
-	}
+	Modify();
+	HorizontalExtentCm = RequiredFit.HorizontalHalfExtentCm;
+	// Keep a deliberately larger author-provided trace corridor, but expand it
+	// when necessary so the fitted volume contains the complete actor.
+	TraceAboveCm = static_cast<float>(FMath::Max(
+		static_cast<double>(TraceAboveCm),
+		RequiredFit.VerticalHalfExtentCm));
+	TraceBelowCm = static_cast<float>(FMath::Max(
+		static_cast<double>(TraceBelowCm),
+		RequiredFit.VerticalHalfExtentCm));
+	SetActorLocationAndRotation(
+		RequiredFit.WorldCenter,
+		FRotator(0.0, RequiredFit.YawDegrees, 0.0));
+	UpdateBoundsVisualization();
+	MarkPackageDirty();
 
 	const double Padding = FMath::Max(
 		static_cast<double>(GroundBoundsPaddingCm),
 		0.0);
-	const FVector SamplingCenter =
-		(SamplingMinimum + SamplingMaximum) * 0.5;
-	const FVector SamplingHalfExtent =
-		(SamplingMaximum - SamplingMinimum) * 0.5;
-	if (!IsFiniteVector(SamplingCenter)
-		|| !IsFiniteVector(SamplingHalfExtent))
-	{
-		ShowExportError(TEXT("Ground bounds fit failed: computed sampling bounds are not finite."));
-		return;
-	}
-
-	FVector WorldCenter = SamplingYaw.RotateVector(SamplingCenter);
-	// A yaw-only transform leaves Z unchanged, but assigning it explicitly keeps
-	// this contract clear if the projection above changes in the future.
-	WorldCenter.Z = SamplingCenter.Z;
-
-	Modify();
-	HorizontalExtentCm = FVector2D(
-		FMath::Max(SamplingHalfExtent.X + Padding, 100.0),
-		FMath::Max(SamplingHalfExtent.Y + Padding, 100.0));
-	// Keep a deliberately larger author-provided trace corridor, but expand it
-	// when necessary so the fitted preview volume contains the complete actor.
-	const double RequiredVerticalExtent =
-		FMath::Max(SamplingHalfExtent.Z + Padding, 100.0);
-	TraceAboveCm = static_cast<float>(FMath::Max(
-		static_cast<double>(TraceAboveCm),
-		RequiredVerticalExtent));
-	TraceBelowCm = static_cast<float>(FMath::Max(
-		static_cast<double>(TraceBelowCm),
-		RequiredVerticalExtent));
-	SetActorLocationAndRotation(
-		WorldCenter,
-		FRotator(0.0, SamplingYawDegrees, 0.0));
-	UpdateBoundsVisualization();
-	MarkPackageDirty();
-
-	const FString Result = FString::Printf(
+	OutResult = FString::Printf(
 		TEXT("Sampling bounds fitted to Ground Actor '%s'.\nCenter: %.1f, %.1f, %.1f cm\nYaw: %.2f deg\nHorizontal half extent: %.1f x %.1f cm\nSafety padding: %.1f cm"),
 		*GroundActor->GetActorNameOrLabel(),
-		WorldCenter.X,
-		WorldCenter.Y,
-		WorldCenter.Z,
-		SamplingYawDegrees,
+		RequiredFit.WorldCenter.X,
+		RequiredFit.WorldCenter.Y,
+		RequiredFit.WorldCenter.Z,
+		RequiredFit.YawDegrees,
 		HorizontalExtentCm.X,
 		HorizontalExtentCm.Y,
 		Padding);
-	UE_LOG(LogSimCoreGroundExporter, Display, TEXT("%s"), *Result);
-	FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(Result));
+	UE_LOG(LogSimCoreGroundExporter, Display, TEXT("%s"), *OutResult);
+	if (bShowResultDialog && !IsRunningCommandlet() && !FApp::IsUnattended())
+	{
+		FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(OutResult));
+	}
+	return true;
+}
 #endif
+
+void AGroundCollisionExporter::ConfigureForAuthoring(
+	AActor* InGroundActor, const FString& InMapPackageDirectory,
+	const FVector& InMapOriginWorldCm, const FVector& InSamplingCenterWorldCm,
+	const FVector2D& InHorizontalExtentCm, float InSampleSpacingCm,
+	float InGroundBoundsPaddingCm)
+{
+	GroundActor = InGroundActor;
+	MapPackageDirectory = InMapPackageDirectory;
+	MapOriginWorldCm = InMapOriginWorldCm;
+	HorizontalExtentCm = InHorizontalExtentCm;
+	HeightfieldSampleSpacingCm = InSampleSpacingCm;
+	GroundBoundsPaddingCm = InGroundBoundsPaddingCm;
+	SetActorLocationAndRotation(InSamplingCenterWorldCm, FRotator::ZeroRotator);
+	UpdateBoundsVisualization();
+}
+
+bool AGroundCollisionExporter::ExportGroundSurfaceUnattended()
+{
+	TGuardValue<bool> SuppressDialogs(bSuppressExportDialogs, true);
+	ExportGroundSurface();
+	return bLastExportSucceeded;
 }
 
 void AGroundCollisionExporter::ExportGroundSurface()
 {
+	bLastExportSucceeded = false;
+	const auto ShowExportError = [this](const FString& Message)
+	{
+		::ShowExportError(Message, !bSuppressExportDialogs);
+	};
 #if !WITH_EDITOR
 	UE_LOG(LogSimCoreGroundExporter, Warning,
 		TEXT("Ground collision export is available only in the Unreal Editor"));
@@ -509,31 +628,82 @@ void AGroundCollisionExporter::ExportGroundSurface()
 		return;
 	}
 
+	bool bGroundActorBoundsAutoFitted = false;
+	if (GroundActor != nullptr)
+	{
+		if (!IsValid(GroundActor))
+		{
+			ShowExportError(TEXT("Ground export preflight failed: the assigned Ground Actor is no longer valid. Reassign it before baking."));
+			return;
+		}
+
+		FGroundActorSamplingFit RequiredFit;
+		FString FitError;
+		if (!CalculateGroundActorSamplingFit(
+			GroundActor,
+			static_cast<double>(GroundBoundsPaddingCm),
+			RequiredFit,
+			FitError))
+		{
+			ShowExportError(FString::Printf(
+				TEXT("Ground export preflight failed: %s."),
+				*FitError));
+			return;
+		}
+
+		const double CurrentExtentX =
+			FMath::Max(HorizontalExtentCm.X, 100.0);
+		const double CurrentExtentY =
+			FMath::Max(HorizontalExtentCm.Y, 100.0);
+		const double CurrentTraceAbove = FMath::Max(
+			static_cast<double>(TraceAboveCm),
+			100.0);
+		const double CurrentTraceBelow = FMath::Max(
+			static_cast<double>(TraceBelowCm),
+			100.0);
+		const FQuat CurrentYawRotation(
+			FRotator(0.0, GetActorRotation().Yaw, 0.0));
+		if (!SamplingVolumeContainsGroundFit(
+			RequiredFit,
+			GetActorLocation(),
+			CurrentYawRotation,
+			CurrentExtentX,
+			CurrentExtentY,
+			CurrentTraceAbove,
+			CurrentTraceBelow))
+		{
+			FString AutoFitResult;
+			if (!FitSamplingBoundsToGroundActorInternal(
+				false,
+				AutoFitResult))
+			{
+				ShowExportError(FString::Printf(
+					TEXT("Ground export preflight could not fit the complete Ground Actor bounds: %s."),
+					*AutoFitResult));
+				return;
+			}
+			bGroundActorBoundsAutoFitted = true;
+			UE_LOG(
+				LogSimCoreGroundExporter,
+				Warning,
+				TEXT("Bake preflight automatically expanded the sampling volume because the previous bounds clipped Ground Actor '%s'. New horizontal half extent: %.1f x %.1f cm."),
+				*GroundActor->GetActorNameOrLabel(),
+				HorizontalExtentCm.X,
+				HorizontalExtentCm.Y);
+		}
+	}
+
 	const double ExtentX = FMath::Max(HorizontalExtentCm.X, 100.0);
 	const double ExtentY = FMath::Max(HorizontalExtentCm.Y, 100.0);
-	const double Spacing = FMath::Max(static_cast<double>(SampleSpacingCm), 25.0);
+	const double Spacing = FMath::Max(
+		static_cast<double>(HeightfieldSampleSpacingCm),
+		25.0);
 	// A named Landscape (or other explicitly selected ground actor) is a single
 	// authored surface. Applying a raw corner-height cutoff to it turns a valid
 	// 36-45 degree grade into a hole whose exact threshold depends on grid
 	// direction. Retain the cutoff only for unfiltered WorldStatic sampling,
 	// where it still prevents unrelated floors and walls from being bridged.
 	const bool bApplyHeightDiscontinuityFilter = GroundActor == nullptr;
-	const int32 QuadsX = FMath::CeilToInt(ExtentX * 2.0 / Spacing);
-	const int32 QuadsY = FMath::CeilToInt(ExtentY * 2.0 / Spacing);
-	const int64 PotentialTriangleCount = static_cast<int64>(QuadsX) * QuadsY * 2;
-	if (QuadsX < 1 || QuadsY < 1 || PotentialTriangleCount > MaxExportedTriangleCount)
-	{
-		ShowExportError(FString::Printf(
-			TEXT("Ground export rejected: this grid can produce %lld triangles; the limit is %lld. Increase Sample Spacing or reduce Horizontal Extent."),
-			PotentialTriangleCount,
-			MaxExportedTriangleCount));
-		return;
-	}
-
-	const int32 Columns = QuadsX + 1;
-	const int32 Rows = QuadsY + 1;
-	const double StepX = ExtentX * 2.0 / QuadsX;
-	const double StepY = ExtentY * 2.0 / QuadsY;
 	const FVector Center = GetActorLocation();
 	const FQuat YawRotation(FRotator(0.0, GetActorRotation().Yaw, 0.0));
 	const FVector MapOriginLocalOffset =
@@ -552,169 +722,66 @@ void AGroundCollisionExporter::ExportGroundSurface()
 	const double StartZ = Center.Z + FMath::Max(static_cast<double>(TraceAboveCm), 100.0);
 	const double EndZ = Center.Z - FMath::Max(static_cast<double>(TraceBelowCm), 100.0);
 
-	TArray<FGroundCollisionSample> Samples;
-	Samples.SetNum(Columns * Rows);
-	FCollisionObjectQueryParams ObjectQuery;
-	ObjectQuery.AddObjectTypesToQuery(ECC_WorldStatic);
-	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(SimCoreGroundExport), true);
-	QueryParams.AddIgnoredActor(this);
+	SimCoreGroundSnapshot::FBuildRequest SnapshotRequest;
+	SnapshotRequest.World = World;
+	SnapshotRequest.IgnoredActor = this;
+	SnapshotRequest.GroundActor = GroundActor;
+	SnapshotRequest.SamplingCenterWorldCm = Center;
+	SnapshotRequest.SamplingYaw = YawRotation;
+	SnapshotRequest.MapOriginWorldCm = MapOriginWorldCm;
+	SnapshotRequest.HorizontalExtentXCm = ExtentX;
+	SnapshotRequest.HorizontalExtentYCm = ExtentY;
+	SnapshotRequest.SampleSpacingCm = Spacing;
+	SnapshotRequest.TraceStartZCm = StartZ;
+	SnapshotRequest.TraceEndZCm = EndZ;
+	SnapshotRequest.MinimumGroundNormalZ = MinimumGroundNormalZ;
+	SnapshotRequest.MaximumCellHeightDeltaCm = MaxCellHeightDeltaCm;
+	SnapshotRequest.AsphaltPhysicalSurface =
+		static_cast<uint8>(AsphaltPhysicalSurface.GetValue());
+	SnapshotRequest.LowFrictionPhysicalSurface =
+		static_cast<uint8>(LowFrictionPhysicalSurface.GetValue());
+	SnapshotRequest.RoughPhysicalSurface =
+		static_cast<uint8>(RoughPhysicalSurface.GetValue());
+	SnapshotRequest.DefaultFrictionMultiplier = DefaultFrictionMultiplier;
+	SnapshotRequest.AsphaltFrictionMultiplier = AsphaltFrictionMultiplier;
+	SnapshotRequest.LowFrictionFrictionMultiplier =
+		LowFrictionFrictionMultiplier;
+	SnapshotRequest.RoughFrictionMultiplier = RoughFrictionMultiplier;
+	SnapshotRequest.MaximumSampleCount = MaxHeightfieldSampleCount;
+	SnapshotRequest.bApplyHeightDiscontinuityFilter =
+		bApplyHeightDiscontinuityFilter;
 
-	int32 ValidSampleCount = 0;
-	for (int32 Row = 0; Row < Rows; ++Row)
+	SimCoreGroundSnapshot::FBuildResult Snapshot;
+	FString SnapshotError;
+	if (!SimCoreGroundSnapshot::Build(
+		SnapshotRequest,
+		Snapshot,
+		SnapshotError))
 	{
-		for (int32 Column = 0; Column < Columns; ++Column)
-		{
-			const FVector LocalOffset(
-				-ExtentX + StepX * Column,
-				-ExtentY + StepY * Row,
-				0.0);
-			const FVector PlanarOffset = YawRotation.RotateVector(LocalOffset);
-			const FVector TraceStart(Center.X + PlanarOffset.X, Center.Y + PlanarOffset.Y, StartZ);
-			const FVector TraceEnd(TraceStart.X, TraceStart.Y, EndZ);
-
-			TArray<FHitResult> Hits;
-			World->LineTraceMultiByObjectType(
-				Hits,
-				TraceStart,
-				TraceEnd,
-				ObjectQuery,
-				QueryParams);
-
-			const FHitResult* BestHit = nullptr;
-			for (const FHitResult& Hit : Hits)
-			{
-				if (!Hit.bBlockingHit
-					|| Hit.ImpactNormal.Z < MinimumGroundNormalZ
-					|| !MatchesGroundActor(Hit, GroundActor))
-				{
-					continue;
-				}
-				if (BestHit == nullptr || Hit.Distance < BestHit->Distance)
-				{
-					BestHit = &Hit;
-				}
-			}
-
-			if (BestHit != nullptr)
-			{
-				FGroundCollisionSample& Sample = Samples[Row * Columns + Column];
-				Sample.ImpactPoint = BestHit->ImpactPoint;
-				Sample.bValid = true;
-				++ValidSampleCount;
-			}
-		}
-	}
-
-	if (ValidSampleCount == 0)
-	{
-		ShowExportError(TEXT("Ground export found no matching WorldStatic collision. Check the Landscape collision, Ground Actor filter, and sampling box."));
+		ShowExportError(FString::Printf(
+			TEXT("Ground heightfield export rejected: %s."),
+			*SnapshotError));
 		return;
 	}
 
-	FString Csv;
-	Csv.Reserve(static_cast<int32>(FMath::Min<int64>(
-		PotentialTriangleCount * 190,
-		MAX_int32)));
-	Csv += TEXT("# Generated by SimCore Ground Collision Exporter.\n");
-	Csv += FString::Printf(TEXT("# level=%s source_actor=%s spacing_cm=%.3f\n"),
+	// Manifest v1 still requires ground_surface.csv. Keep the strict legacy
+	// header as a row-free sentinel while ground_heightfield.bin owns terrain.
+	FString GroundSurfaceSentinel;
+	GroundSurfaceSentinel += TEXT("# Generated by SimCore Ground Collision Exporter.\n");
+	GroundSurfaceSentinel += TEXT("# terrain_payload=ground_heightfield.bin format=SIMGHF2\n");
+	GroundSurfaceSentinel += FString::Printf(
+		TEXT("# level=%s source_actor=%s spacing_cm=%.3f\n"),
 		*World->GetMapName(),
-		GroundActor != nullptr ? *GroundActor->GetName() : TEXT("any_world_static"),
-		SampleSpacingCm);
-	Csv += FString::Printf(TEXT("# map_origin_world_cm=%.3f,%.3f,%.3f\n"),
-		MapOriginWorldCm.X,
-		MapOriginWorldCm.Y,
-		MapOriginWorldCm.Z);
-	Csv += FString::Printf(TEXT("# height_discontinuity_filter=%s max_delta_cm=%.3f\n"),
-		bApplyHeightDiscontinuityFilter ? TEXT("enabled") : TEXT("disabled_explicit_ground_actor"),
-		MaxCellHeightDeltaCm);
-	Csv += TEXT("# coordinate_mapping=east:UE_Y/100,north:UE_X/100,up:UE_Z/100\n");
-	Csv += TEXT("surface_id,e0,n0,u0,e1,n1,u1,e2,n2,u2\n");
-
-	int32 ExportedTriangleCount = 0;
-	int32 SkippedMissingCells = 0;
-	int32 SkippedDiscontinuousCells = 0;
-	bool bMapOriginCoveredByExportedCell = false;
-	const auto AppendTriangle = [
-		&Csv,
-		&SurfaceName,
-		&ExportedTriangleCount,
-		this](
-		const FVector& A,
-		const FVector& B,
-		const FVector& C)
-	{
-		const FVector RelativeA = A - MapOriginWorldCm;
-		const FVector RelativeB = B - MapOriginWorldCm;
-		const FVector RelativeC = C - MapOriginWorldCm;
-		Csv += FString::Printf(
-			TEXT("%s,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n"),
-			*SurfaceName,
-			RelativeA.Y / 100.0, RelativeA.X / 100.0, RelativeA.Z / 100.0,
-			RelativeB.Y / 100.0, RelativeB.X / 100.0, RelativeB.Z / 100.0,
-			RelativeC.Y / 100.0, RelativeC.X / 100.0, RelativeC.Z / 100.0);
-		++ExportedTriangleCount;
-	};
-
-	for (int32 Row = 0; Row < QuadsY; ++Row)
-	{
-		for (int32 Column = 0; Column < QuadsX; ++Column)
-		{
-			const FGroundCollisionSample& P00 = Samples[Row * Columns + Column];
-			const FGroundCollisionSample& P10 = Samples[Row * Columns + Column + 1];
-			const FGroundCollisionSample& P01 = Samples[(Row + 1) * Columns + Column];
-			const FGroundCollisionSample& P11 = Samples[(Row + 1) * Columns + Column + 1];
-			if (!P00.bValid || !P10.bValid || !P01.bValid || !P11.bValid)
-			{
-				++SkippedMissingCells;
-				continue;
-			}
-
-			const double MinimumHeight = FMath::Min(
-				FMath::Min(P00.ImpactPoint.Z, P10.ImpactPoint.Z),
-				FMath::Min(P01.ImpactPoint.Z, P11.ImpactPoint.Z));
-			const double MaximumHeight = FMath::Max(
-				FMath::Max(P00.ImpactPoint.Z, P10.ImpactPoint.Z),
-				FMath::Max(P01.ImpactPoint.Z, P11.ImpactPoint.Z));
-			if (bApplyHeightDiscontinuityFilter
-				&& MaximumHeight - MinimumHeight > MaxCellHeightDeltaCm)
-			{
-				++SkippedDiscontinuousCells;
-				continue;
-			}
-
-			AppendTriangle(P00.ImpactPoint, P10.ImpactPoint, P11.ImpactPoint);
-			AppendTriangle(P00.ImpactPoint, P11.ImpactPoint, P01.ImpactPoint);
-
-			const double CellMinimumX = -ExtentX + StepX * Column;
-			const double CellMaximumX = CellMinimumX + StepX;
-			const double CellMinimumY = -ExtentY + StepY * Row;
-			const double CellMaximumY = CellMinimumY + StepY;
-			constexpr double CoverageToleranceCm = 0.01;
-			if (MapOriginLocalOffset.X >= CellMinimumX - CoverageToleranceCm
-				&& MapOriginLocalOffset.X <= CellMaximumX + CoverageToleranceCm
-				&& MapOriginLocalOffset.Y >= CellMinimumY - CoverageToleranceCm
-				&& MapOriginLocalOffset.Y <= CellMaximumY + CoverageToleranceCm)
-			{
-				bMapOriginCoveredByExportedCell = true;
-			}
-		}
-	}
-
-	if (ExportedTriangleCount == 0)
-	{
-		ShowExportError(TEXT("Ground export produced no valid four-corner cells. Reduce Sample Spacing or fix missing collision samples."));
-		return;
-	}
-	if (!bMapOriginCoveredByExportedCell)
-	{
-		ShowExportError(TEXT("Ground export rejected: no continuous exported ground cell covers Map Origin World Cm. The vehicle spawns at ENU (0, 0); move the sampling box onto the start area or repair collision near the map origin."));
-		return;
-	}
+		GroundActor != nullptr
+			? *GroundActor->GetName()
+			: TEXT("any_world_static"),
+		Spacing);
+	GroundSurfaceSentinel += TEXT("surface_id,e0,n0,u0,e1,n1,u1,e2,n2,u2\n");
 
 	FString StaticCollisionCsv;
 	FString StaticCollisionError;
 	int32 ExportedStaticColliderCount = 0;
-	if (!BuildStaticColliderCsv(
+	if (!SimCoreStaticCollisionSnapshot::BuildCsv(
 		World,
 		MapOriginWorldCm,
 		StaticCollisionCsv,
@@ -758,24 +825,55 @@ void AGroundCollisionExporter::ExportGroundSurface()
 		return;
 	}
 
-	const FString GroundOutputPath = FPaths::Combine(
+	const FString GroundSurfaceOutputPath = FPaths::Combine(
 		ResolvedPackageDirectory,
 		TEXT("ground_surface.csv"));
-	const FString GroundTemporaryPath = GroundOutputPath + TEXT(".tmp");
+	const FString GroundSurfaceTemporaryPath =
+		GroundSurfaceOutputPath + TEXT(".tmp");
+	const FString HeightfieldOutputPath = FPaths::Combine(
+		ResolvedPackageDirectory,
+		TEXT("ground_heightfield.bin"));
+	const FString HeightfieldTemporaryPath =
+		HeightfieldOutputPath + TEXT(".tmp");
 	const FString StaticCollisionOutputPath = FPaths::Combine(
 		ResolvedPackageDirectory,
 		TEXT("static_colliders.csv"));
 	const FString StaticCollisionTemporaryPath =
 		StaticCollisionOutputPath + TEXT(".tmp");
+	const auto DeleteTemporaryFiles = [&]()
+	{
+		IFileManager::Get().Delete(
+			*GroundSurfaceTemporaryPath,
+			false,
+			true);
+		IFileManager::Get().Delete(
+			*HeightfieldTemporaryPath,
+			false,
+			true);
+		IFileManager::Get().Delete(
+			*StaticCollisionTemporaryPath,
+			false,
+			true);
+	};
 	if (!FFileHelper::SaveStringToFile(
-		Csv,
-		*GroundTemporaryPath,
+		GroundSurfaceSentinel,
+		*GroundSurfaceTemporaryPath,
 		FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
 	{
-		IFileManager::Get().Delete(*GroundTemporaryPath, false, true);
+		DeleteTemporaryFiles();
 		ShowExportError(FString::Printf(
-			TEXT("Ground export failed to write temporary file: %s"),
-			*GroundTemporaryPath));
+			TEXT("Ground sentinel export failed to write temporary file: %s"),
+			*GroundSurfaceTemporaryPath));
+		return;
+	}
+	if (!FFileHelper::SaveArrayToFile(
+		Snapshot.Binary,
+		*HeightfieldTemporaryPath))
+	{
+		DeleteTemporaryFiles();
+		ShowExportError(FString::Printf(
+			TEXT("Ground heightfield export failed to write temporary file: %s"),
+			*HeightfieldTemporaryPath));
 		return;
 	}
 	if (!FFileHelper::SaveStringToFile(
@@ -783,29 +881,41 @@ void AGroundCollisionExporter::ExportGroundSurface()
 		*StaticCollisionTemporaryPath,
 		FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
 	{
-		IFileManager::Get().Delete(*GroundTemporaryPath, false, true);
-		IFileManager::Get().Delete(*StaticCollisionTemporaryPath, false, true);
+		DeleteTemporaryFiles();
 		ShowExportError(FString::Printf(
 			TEXT("Static collision export failed to write temporary file: %s"),
 			*StaticCollisionTemporaryPath));
 		return;
 	}
 
-	// Stage both payloads before replacing either one. manifest.cfg remains the
+	// Stage all payloads before replacing any one. manifest.cfg remains the
 	// final commit marker, so a failure between payload moves leaves the old
 	// identity mismatched and both runtimes fail closed instead of accepting a
-	// mixed ground/static snapshot.
+	// mixed ground/static snapshot. Move the new binary first: an old manifest
+	// does not name it and therefore remains valid until its declared sentinel is
+	// replaced.
 	if (!IFileManager::Get().Move(
-		*GroundOutputPath,
-		*GroundTemporaryPath,
+		*HeightfieldOutputPath,
+		*HeightfieldTemporaryPath,
 		true,
 		true))
 	{
-		IFileManager::Get().Delete(*GroundTemporaryPath, false, true);
-		IFileManager::Get().Delete(*StaticCollisionTemporaryPath, false, true);
+		DeleteTemporaryFiles();
 		ShowExportError(FString::Printf(
-			TEXT("Ground export failed to replace: %s"),
-			*GroundOutputPath));
+			TEXT("Ground heightfield export failed to replace: %s"),
+			*HeightfieldOutputPath));
+		return;
+	}
+	if (!IFileManager::Get().Move(
+		*GroundSurfaceOutputPath,
+		*GroundSurfaceTemporaryPath,
+		true,
+		true))
+	{
+		DeleteTemporaryFiles();
+		ShowExportError(FString::Printf(
+			TEXT("Ground heightfield was replaced, but sentinel commit failed. Bake again before using this intentionally fail-closed package.\n\n%s"),
+			*GroundSurfaceOutputPath));
 		return;
 	}
 	if (!IFileManager::Get().Move(
@@ -814,9 +924,9 @@ void AGroundCollisionExporter::ExportGroundSurface()
 		true,
 		true))
 	{
-		IFileManager::Get().Delete(*StaticCollisionTemporaryPath, false, true);
+		DeleteTemporaryFiles();
 		ShowExportError(FString::Printf(
-			TEXT("Ground CSV was replaced, but static collision commit failed. The package is intentionally unusable until it is baked again.\n\n%s"),
+			TEXT("Ground heightfield and sentinel were replaced, but static collision commit failed. Bake again before using this intentionally fail-closed package.\n\n%s"),
 			*StaticCollisionOutputPath));
 		return;
 	}
@@ -826,6 +936,7 @@ void AGroundCollisionExporter::ExportGroundSurface()
 	// cannot validate the new payload and both runtimes fail closed.
 	const TArray<FString> CollisionFiles{
 		TEXT("ground_surface.csv"),
+		TEXT("ground_heightfield.bin"),
 		TEXT("static_colliders.csv")};
 	FString CollisionChecksum;
 	FString ManifestError;
@@ -837,25 +948,50 @@ void AGroundCollisionExporter::ExportGroundSurface()
 		ManifestError))
 	{
 		ShowExportError(FString::Printf(
-			TEXT("Collision CSVs were replaced, but manifest commit failed. The package is intentionally unusable until it is baked again.\n\n%s"),
+			TEXT("Collision payloads were replaced, but manifest commit failed. The package is intentionally unusable until it is baked again.\n\n%s"),
 			*ManifestError));
 		return;
 	}
 
 	const FString Result = FString::Printf(
-		TEXT("Exported %d ground triangles from %d/%d collision samples.\nExported %d explicit static OBB colliders.\nMap origin coverage: OK\nHeight discontinuity filter: %s\nSkipped cells: missing=%d, discontinuous=%d\nCollision identity: %s\n\n%s\n%s\n\nSTOP the current SimCore process, then restart it with --map-package %s"),
-		ExportedTriangleCount,
-		ValidSampleCount,
-		Columns * Rows,
+		TEXT("Exported Unreal collision heightfield: %d x %d samples (%d/%lld valid), %d drivable cells.\nBinary size: %.2f MiB\nSurface cells: default=%d, asphalt=%d, low-friction=%d, rough=%d\nExported ENU bounds: E [%.2f, %.2f] m, N [%.2f, %.2f] m, U [%.2f, %.2f] m\nGround Actor bounds coverage: OK (%s)\nGround sample step: %.2f x %.2f cm (configured resolution; never auto-raised)\nExported %d explicit static OBB colliders.\nMap origin coverage: OK\nHeight discontinuity filter: %s\nSkipped cells: missing=%d, discontinuous=%d\nCollision identity: %s\n\n%s\n%s\n%s\nPackage directory: %s\n\nA running SimCore process will verify this manifest and apply it at a fixed-tick boundary. Do not restart the server; PIE briefly reconnects and sends a fresh automatic reset."),
+		Snapshot.Columns,
+		Snapshot.Rows,
+		Snapshot.ValidSampleCount,
+		static_cast<long long>(Snapshot.Columns) * Snapshot.Rows,
+		Snapshot.DrivableCellCount,
+		static_cast<double>(Snapshot.Binary.Num()) / (1024.0 * 1024.0),
+		Snapshot.DefaultMaterialCellCount,
+		Snapshot.AsphaltMaterialCellCount,
+		Snapshot.LowFrictionMaterialCellCount,
+		Snapshot.RoughMaterialCellCount,
+		Snapshot.MinimumEnuM.X,
+		Snapshot.MaximumEnuM.X,
+		Snapshot.MinimumEnuM.Y,
+		Snapshot.MaximumEnuM.Y,
+		Snapshot.MinimumEnuM.Z,
+		Snapshot.MaximumEnuM.Z,
+		GroundActor == nullptr
+			? TEXT("no explicit Ground Actor")
+			: (bGroundActorBoundsAutoFitted
+				? TEXT("auto-fitted before bake")
+				: TEXT("sampling volume already contained full actor")),
+		Snapshot.StepXCm,
+		Snapshot.StepYCm,
 		ExportedStaticColliderCount,
 		bApplyHeightDiscontinuityFilter ? TEXT("enabled") : TEXT("disabled for explicit Ground Actor"),
-		SkippedMissingCells,
-		SkippedDiscontinuousCells,
+		Snapshot.SkippedMissingCellCount,
+		Snapshot.SkippedDiscontinuousCellCount,
 		*CollisionChecksum,
-		*GroundOutputPath,
+		*GroundSurfaceOutputPath,
+		*HeightfieldOutputPath,
 		*StaticCollisionOutputPath,
 		*ResolvedPackageDirectory);
 	UE_LOG(LogSimCoreGroundExporter, Display, TEXT("%s"), *Result);
-	FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(Result));
+	bLastExportSucceeded = true;
+	if (!bSuppressExportDialogs && !IsRunningCommandlet() && !FApp::IsUnattended())
+	{
+		FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(Result));
+	}
 #endif
 }

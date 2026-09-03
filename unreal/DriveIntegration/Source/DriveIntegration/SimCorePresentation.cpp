@@ -138,9 +138,8 @@ FVehiclePresentationSample BuildVehicleSample(
 						WheelCenterEnu,
 						PresentationOffsetCentimeters);
 				const FVector WorldContactNormal(
-					ContactNormalEnu.Y,
-					ContactNormalEnu.X,
-					ContactNormalEnu.Z);
+					SimCoreCoordinateFrames::MapEnuPolarVectorToUnrealWorld(
+						ContactNormalEnu));
 				const FVector RelativeCenterLocationCm =
 					SnapshotActorTransform.InverseTransformPosition(
 						WheelCenterWorldCm);

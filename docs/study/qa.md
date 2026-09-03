@@ -95,7 +95,7 @@ Unreal 입력
 ### Envelope payload
 
 ```text
-연결 협상: Envelope{Hello}           # 목표, 현재 runtime 미구현
+연결 협상: Envelope{Hello}           # 현재 양방향 runtime 구현
 운전 입력: Envelope{ControlCommand}  # 현재 구현
 물리 상태: Envelope{WorldState}      # 현재 구현
 상태 진단: Envelope{Health}          # 목표, 현재 runtime 미구현

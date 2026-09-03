@@ -23,7 +23,8 @@ set(SIMCORE_VEHICLE_PROTO "${SIMCORE_PROTOCOL_DIR}/vehicle.proto")
 find_package(protobuf CONFIG REQUIRED)
 
 # Boost (Beast WebSocket)
-find_package(Boost CONFIG REQUIRED COMPONENTS system)
+find_package(Boost CONFIG REQUIRED COMPONENTS system property_tree)
+find_package(Threads REQUIRED)
 
 if(SIMCORE_ENABLE_ZMQ_OBSERVER)
     find_package(ZeroMQ CONFIG REQUIRED)
@@ -31,6 +32,7 @@ if(SIMCORE_ENABLE_ZMQ_OBSERVER)
 endif()
 
 add_library(simcore_protocol
+    src/protocol/vehicle_message_decoder.cpp
     src/protocol/vehicle_messages.cpp
 )
 
@@ -61,10 +63,13 @@ target_include_directories(simcore_collision PUBLIC
 )
 
 add_library(simcore_physics
+    src/physics/chassis_ground_contact.cpp
     src/physics/vehicle_config.cpp
     src/physics/vehicle_physics.cpp
+    src/terrain/heightfield_ground_query.cpp
     src/terrain/map_package_ground_query.cpp
     src/terrain/map_package_manifest.cpp
+    src/terrain/map_package_runtime.cpp
 )
 
 target_include_directories(simcore_physics PUBLIC
@@ -73,11 +78,20 @@ target_include_directories(simcore_physics PUBLIC
 
 target_link_libraries(simcore_physics PUBLIC
     simcore_collision
+    Threads::Threads
 )
 
 add_library(simcore_websocket
     src/websocket/ws_server.cpp
 )
+
+add_library(simcore_traffic
+    src/traffic/traffic_network.cpp
+    src/traffic/traffic_network_hot_reloader.cpp
+    src/traffic/npc_lane_follower.cpp
+)
+target_include_directories(simcore_traffic PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(simcore_traffic PUBLIC simcore_physics Boost::property_tree)
 
 target_include_directories(simcore_websocket PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -85,6 +99,16 @@ target_include_directories(simcore_websocket PUBLIC
 
 target_link_libraries(simcore_websocket PUBLIC
     Boost::system
+)
+
+add_library(simcore_runtime_options
+    src/runtime_cli_parser.cpp
+    src/runtime_config_loader.cpp
+    src/runtime_options.cpp
+)
+
+target_include_directories(simcore_runtime_options PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
 if(SIMCORE_ENABLE_ZMQ_OBSERVER)
@@ -103,6 +127,8 @@ endif()
 
 add_library(simcore_host_core
     src/simulation_host.cpp
+    src/simulation_host_npc.cpp
+    src/simulation_host_session.cpp
 )
 
 target_include_directories(simcore_host_core PUBLIC
@@ -111,6 +137,7 @@ target_include_directories(simcore_host_core PUBLIC
 
 target_link_libraries(simcore_host_core PUBLIC
     simcore_physics
+    simcore_traffic
     simcore_protocol
     Boost::system
 )
@@ -125,6 +152,7 @@ target_include_directories(simcore_publisher PRIVATE
 
 target_link_libraries(simcore_publisher PRIVATE
     simcore_host_core
+    simcore_runtime_options
     simcore_websocket
 )
 
@@ -149,6 +177,22 @@ endif()
 include(CTest)
 
 if(BUILD_TESTING)
+    add_executable(npc_host_tests tests/npc_host_test.cpp)
+    target_link_libraries(npc_host_tests PRIVATE simcore_host_core)
+    target_compile_definitions(npc_host_tests PRIVATE
+        SIMCORE_TEST_VIRTUAL_CITY_MAP_PACKAGE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../map_packages/virtual_city_v1"
+    )
+    add_test(NAME npc_host_tests COMMAND npc_host_tests)
+    add_executable(npc_lane_follower_tests tests/npc_lane_follower_test.cpp)
+    target_link_libraries(npc_lane_follower_tests PRIVATE simcore_traffic)
+    add_test(NAME npc_lane_follower_tests COMMAND npc_lane_follower_tests)
+    add_executable(traffic_network_tests tests/traffic_network_test.cpp)
+    target_link_libraries(traffic_network_tests PRIVATE simcore_traffic)
+    target_compile_definitions(traffic_network_tests PRIVATE
+        SIMCORE_TEST_VIRTUAL_CITY_MAP_PACKAGE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../map_packages/virtual_city_v1"
+    )
+    add_test(NAME traffic_network_tests COMMAND traffic_network_tests)
+
     add_executable(vehicle_physics_tests
         tests/vehicle_physics_test.cpp
     )
@@ -157,7 +201,68 @@ if(BUILD_TESTING)
         simcore_physics
     )
 
+    target_compile_definitions(vehicle_physics_tests PRIVATE
+        SIMCORE_TEST_VEHICLE_CONFIG_PATH="${CMAKE_CURRENT_SOURCE_DIR}/config/vehicle_sedan.cfg"
+        SIMCORE_TEST_LANDSCAPE_MAP_PACKAGE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../map_packages/landscape_local_v1"
+    )
+
     add_test(NAME vehicle_physics_tests COMMAND vehicle_physics_tests)
+
+    add_executable(chassis_ground_contact_tests
+        tests/chassis_ground_contact_test.cpp
+    )
+
+    target_link_libraries(chassis_ground_contact_tests PRIVATE
+        simcore_physics
+    )
+
+    add_test(NAME chassis_ground_contact_tests COMMAND chassis_ground_contact_tests)
+
+    # Offline pedal-only characterization; emits a new CSV and never connects
+    # to or changes the interactive server/map. Not a real-car calibration.
+    add_executable(vehicle_cornering_probe tests/vehicle_cornering_probe.cpp)
+    target_link_libraries(vehicle_cornering_probe PRIVATE simcore_physics)
+    target_compile_definitions(vehicle_cornering_probe PRIVATE
+        SIMCORE_TEST_VEHICLE_CONFIG_PATH="${CMAKE_CURRENT_SOURCE_DIR}/config/vehicle_sedan.cfg"
+    )
+
+    add_executable(virtual_city_course_tests
+        tests/virtual_city_course_test.cpp
+    )
+
+    target_link_libraries(virtual_city_course_tests PRIVATE
+        simcore_physics
+    )
+
+    target_compile_definitions(virtual_city_course_tests PRIVATE
+        SIMCORE_TEST_VEHICLE_CONFIG_PATH="${CMAKE_CURRENT_SOURCE_DIR}/config/vehicle_sedan.cfg"
+        SIMCORE_TEST_VIRTUAL_CITY_MAP_PACKAGE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../map_packages/virtual_city_v1"
+    )
+
+    add_test(NAME virtual_city_course_tests COMMAND virtual_city_course_tests)
+    set_tests_properties(virtual_city_course_tests PROPERTIES
+        SKIP_RETURN_CODE 77
+        TIMEOUT 90
+    )
+
+    add_executable(signal_city_course_tests
+        tests/signal_city_course_test.cpp
+    )
+
+    target_link_libraries(signal_city_course_tests PRIVATE
+        simcore_physics
+    )
+
+    target_compile_definitions(signal_city_course_tests PRIVATE
+        SIMCORE_TEST_VEHICLE_CONFIG_PATH="${CMAKE_CURRENT_SOURCE_DIR}/config/vehicle_sedan.cfg"
+        SIMCORE_TEST_SIGNAL_CITY_MAP_PACKAGE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../map_packages/signal_city_v2"
+    )
+
+    add_test(NAME signal_city_course_tests COMMAND signal_city_course_tests)
+    set_tests_properties(signal_city_course_tests PROPERTIES
+        SKIP_RETURN_CODE 77
+        TIMEOUT 90
+    )
 
     add_executable(vehicle_config_tests
         tests/vehicle_config_test.cpp
@@ -173,6 +278,20 @@ if(BUILD_TESTING)
 
     add_test(NAME vehicle_config_tests COMMAND vehicle_config_tests)
 
+    add_executable(runtime_options_tests
+        tests/runtime_options_test.cpp
+    )
+
+    target_link_libraries(runtime_options_tests PRIVATE
+        simcore_runtime_options
+    )
+
+    target_compile_definitions(runtime_options_tests PRIVATE
+        SIMCORE_TEST_RUNTIME_CONFIG_PATH="${CMAKE_CURRENT_SOURCE_DIR}/config/runtime_server.cfg"
+    )
+
+    add_test(NAME runtime_options_tests COMMAND runtime_options_tests)
+
     add_executable(map_package_ground_query_tests
         tests/map_package_ground_query_test.cpp
     )
@@ -186,6 +305,33 @@ if(BUILD_TESTING)
     )
 
     add_test(NAME map_package_ground_query_tests COMMAND map_package_ground_query_tests)
+
+    add_executable(heightfield_ground_query_tests
+        tests/heightfield_ground_query_test.cpp
+    )
+
+    target_link_libraries(heightfield_ground_query_tests PRIVATE
+        simcore_physics
+    )
+
+    add_test(
+        NAME heightfield_ground_query_tests
+        COMMAND heightfield_ground_query_tests
+    )
+
+    add_executable(map_package_runtime_tests
+        tests/map_package_runtime_test.cpp
+    )
+
+    target_link_libraries(map_package_runtime_tests PRIVATE
+        simcore_physics
+    )
+
+    target_compile_definitions(map_package_runtime_tests PRIVATE
+        SIMCORE_TEST_MAP_PACKAGE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../map_packages/wall_broad_v1"
+    )
+
+    add_test(NAME map_package_runtime_tests COMMAND map_package_runtime_tests)
 
     add_executable(collision_world_tests
         tests/collision_world_test.cpp
@@ -274,4 +420,5 @@ if(BUILD_TESTING)
     )
 
     add_test(NAME websocket_server_tests COMMAND websocket_server_tests)
+    set_tests_properties(websocket_server_tests PROPERTIES TIMEOUT 15)
 endif()

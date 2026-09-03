@@ -108,10 +108,10 @@ namespace
 			return true;
 		}
 
-		bool ReadString(FString& Out)
+		bool ReadString(FString& Out, int32 MaxBytes = MAX_int32)
 		{
 			TArrayView<const uint8> Bytes;
-			if (!ReadMessage(Bytes)) return false;
+			if (!ReadMessage(Bytes) || Bytes.Num() > MaxBytes) return false;
 			if (Bytes.IsEmpty())
 			{
 				Out.Reset();
@@ -157,12 +157,90 @@ namespace
 			&& FMath::Abs(Vector.Z) <= MaximumMagnitude;
 	}
 
+	bool ParseTrafficSignal(TArrayView<const uint8> Data, FTrafficSignalState& State)
+	{
+		// Bound the complete message, including otherwise forward-compatible fields.
+		if (Data.Num() > 512) return false;
+		FReader Reader(Data);
+		uint32 Seen = 0;
+		while (!Reader.AtEnd())
+		{
+			uint32 Field; uint8 Wire; uint64 Integer = 0;
+			if (!Reader.ReadTag(Field, Wire)) return false;
+			if (Field <= 8)
+			{
+				const uint32 Mask = 1u << Field;
+				if (Seen & Mask) return false;
+				Seen |= Mask;
+			}
+			switch (Field)
+			{
+			case 1:
+			case 2:
+				if (Wire != 0 || !Reader.ReadVarint(Integer) || Integer == 0 || Integer > MAX_uint32) return false;
+				(Field == 1 ? State.SignalId : State.GroupId) = static_cast<uint32>(Integer);
+				break;
+			case 3:
+				if (Wire != 0 || !Reader.ReadVarint(Integer)
+					|| Integer > static_cast<uint8>(ETrafficSignalAspect::Green)) return false;
+				State.Aspect = static_cast<ETrafficSignalAspect>(Integer);
+				break;
+			case 4:
+			{
+				TArrayView<const uint8> Vector;
+				if (Wire != 2 || !Reader.ReadMessage(Vector) || Vector.Num() > 128) return false;
+				FReader VectorReader(Vector);
+				uint32 SeenCoordinates = 0;
+				while (!VectorReader.AtEnd())
+				{
+					uint32 Coordinate; uint8 CoordinateWire;
+					if (!VectorReader.ReadTag(Coordinate, CoordinateWire)) return false;
+					if (Coordinate >= 1 && Coordinate <= 3)
+					{
+						const uint32 Mask = 1u << Coordinate;
+						if (SeenCoordinates & Mask) return false;
+						SeenCoordinates |= Mask;
+						double& Value = Coordinate == 1 ? State.PositionEnu.X
+							: Coordinate == 2 ? State.PositionEnu.Y : State.PositionEnu.Z;
+						if (CoordinateWire != 1 || !VectorReader.ReadFixed64(Value)) return false;
+					}
+					else if (!VectorReader.Skip(CoordinateWire)) return false;
+				}
+				break;
+			}
+			case 5:
+				if (Wire != 5 || !Reader.ReadFixed32(State.HeadingDegrees)) return false;
+				break;
+			case 6:
+				if (Wire != 5 || !Reader.ReadFixed32(State.RemainingSeconds)) return false;
+				break;
+			case 7:
+				if (Wire != 0 || !Reader.ReadVarint(Integer)
+					|| Integer == 0 || Integer > MAX_uint32) return false;
+				State.ControllerId = static_cast<uint32>(Integer);
+				break;
+			case 8:
+				if (Wire != 0 || !Reader.ReadVarint(Integer)
+					|| Integer < static_cast<uint8>(ETrafficSignalKind::Vehicle)
+					|| Integer > static_cast<uint8>(ETrafficSignalKind::Pedestrian)) return false;
+				State.Kind = static_cast<ETrafficSignalKind>(Integer);
+				break;
+			default:
+				if (!Reader.Skip(Wire)) return false;
+				break;
+			}
+		}
+		// Proto3 may omit zero-valued coordinates, heading, countdown, and UNKNOWN.
+		return IsValidTrafficSignalState(State);
+	}
+
 	bool IsValidEntityState(const FVehicleState& State)
 	{
 		constexpr double MaxWorldCoordinateMeters = 10'000'000.0;
 		constexpr double MaxVelocityMetersPerSecond = 100'000.0;
 		constexpr double MaxAngularVelocityRadPerSecond = 10'000.0;
 		constexpr float MaxCollisionExtentMeters = 1'000.0f;
+		constexpr float MaxImpactImpulseNs = 100'000'000.0f;
 		if (State.EntityId == 0
 			|| !FMath::IsFinite(State.Timestamp)
 			|| !FMath::IsFinite(State.Latitude)
@@ -193,6 +271,8 @@ namespace
 			|| !FMath::IsFinite(State.CollisionHalfWidthMeters)
 			|| !FMath::IsFinite(State.CollisionHalfHeightMeters)
 			|| !FMath::IsFinite(State.CollisionRadiusMeters)
+			|| !FMath::IsFinite(State.DamagePercent)
+			|| !FMath::IsFinite(State.LastImpactImpulseNs)
 			|| State.CollisionHalfLengthMeters < 0.0f
 			|| State.CollisionHalfWidthMeters < 0.0f
 			|| State.CollisionHalfHeightMeters < 0.0f
@@ -200,7 +280,13 @@ namespace
 			|| State.CollisionHalfLengthMeters > MaxCollisionExtentMeters
 			|| State.CollisionHalfWidthMeters > MaxCollisionExtentMeters
 			|| State.CollisionHalfHeightMeters > MaxCollisionExtentMeters
-			|| State.CollisionRadiusMeters > MaxCollisionExtentMeters)
+			|| State.CollisionRadiusMeters > MaxCollisionExtentMeters
+			|| State.DamagePercent < 0.0f
+			|| State.DamagePercent > 100.0f
+			|| State.LastImpactImpulseNs < 0.0f
+			|| State.LastImpactImpulseNs > MaxImpactImpulseNs
+			|| static_cast<uint8>(State.DamageZone)
+				> static_cast<uint8>(EVehicleDamageZone::Underbody))
 		{
 			return false;
 		}
@@ -347,10 +433,71 @@ namespace
 			case 25: if (Wire != 5 || !Reader.ReadFixed32(State.CollisionHalfWidthMeters)) return false; break;
 			case 26: if (Wire != 5 || !Reader.ReadFixed32(State.CollisionHalfHeightMeters)) return false; break;
 			case 27: if (Wire != 5 || !Reader.ReadFixed32(State.CollisionRadiusMeters)) return false; break;
+			case 28: if (Wire != 5 || !Reader.ReadFixed32(State.DamagePercent)) return false; break;
+			case 29: if (Wire != 5 || !Reader.ReadFixed32(State.LastImpactImpulseNs)) return false; break;
+			case 30:
+				if (Wire != 0 || !Reader.ReadVarint(Integer)
+					|| Integer > static_cast<uint8>(EVehicleDamageZone::Underbody)) return false;
+				State.DamageZone = static_cast<EVehicleDamageZone>(Integer);
+				break;
+			case 31:
+				if (Wire != 0 || !Reader.ReadVarint(Integer)
+					|| Integer > MAX_uint32) return false;
+				State.CollisionEventSequence = static_cast<uint32>(Integer);
+				break;
 			default: if (!Reader.Skip(Wire)) return false; break;
 			}
 		}
 		return IsValidEntityState(State);
+	}
+
+	bool ParseHealth(TArrayView<const uint8> Data, FServerHealth& Health)
+	{
+		FReader Reader(Data);
+		FString Status;
+		while (!Reader.AtEnd())
+		{
+			uint32 Field; uint8 Wire; uint64 Integer = 0;
+			if (!Reader.ReadTag(Field, Wire)) return false;
+			switch (Field)
+			{
+			case 1:
+				if (Wire != 2 || !Reader.ReadString(Status, 64)) return false;
+				break;
+			case 2:
+				if (Wire != 0 || !Reader.ReadVarint(Integer) || Integer > MAX_uint32) return false;
+				Health.TickOverrunCount = static_cast<uint32>(Integer);
+				break;
+			case 3:
+				if (Wire != 0 || !Reader.ReadVarint(Health.LastCommandAgeNs)) return false;
+				break;
+			case 4:
+				if (Wire != 2 || !Reader.ReadString(Health.Message, 512)) return false;
+				break;
+			case 5:
+				if (Wire != 0 || !Reader.ReadVarint(Integer) || Integer > 1) return false;
+				Health.bHasControlCommand = Integer != 0;
+				break;
+			default:
+				if (!Reader.Skip(Wire)) return false;
+				break;
+			}
+		}
+		// Keep future statuses backward compatible, but never interpret them as
+		// Active. Only these exact, case-sensitive values are authoritative states.
+		if (Status.Equals(TEXT("awaiting_reset"), ESearchCase::CaseSensitive)) Health.Status = EServerHealthStatus::AwaitingReset;
+		else if (Status.Equals(TEXT("awaiting_control"), ESearchCase::CaseSensitive)) Health.Status = EServerHealthStatus::AwaitingControl;
+		else if (Status.Equals(TEXT("active"), ESearchCase::CaseSensitive)) Health.Status = EServerHealthStatus::Active;
+		else if (Status.Equals(TEXT("safe_stop"), ESearchCase::CaseSensitive)) Health.Status = EServerHealthStatus::SafeStop;
+		else if (Status.Equals(TEXT("reconnect_required"), ESearchCase::CaseSensitive)) Health.Status = EServerHealthStatus::ReconnectRequired;
+		else if (Status.Equals(TEXT("estop_latched"), ESearchCase::CaseSensitive)) Health.Status = EServerHealthStatus::EstopLatched;
+		// Prevent an untrusted reason from inserting extra HUD lines.
+		for (TCHAR& Character : Health.Message)
+		{
+			if (Character < TEXT(' ') || Character == 127) Character = TEXT(' ');
+		}
+		Health.bPresent = true;
+		return true;
 	}
 
 	bool ParseWorldState(TArrayView<const uint8> Data, uint32 TargetEntityId,
@@ -358,7 +505,12 @@ namespace
 	{
 		FReader Reader(Data);
 		bool bFoundTarget = false;
+		FServerHealth Health;
 		TSet<uint32> EntityIds;
+		TArray<FTrafficSignalState> Signals;
+		TSet<uint32> SignalIds;
+		FString TrafficChecksum;
+		bool bHasTrafficChecksum = false;
 		while (!Reader.AtEnd())
 		{
 			uint32 Field; uint8 Wire;
@@ -397,10 +549,117 @@ namespace
 				}
 				continue;
 			}
+			if (Field == 2)
+			{
+				TArrayView<const uint8> HealthData;
+				if (Wire != 2 || Health.bPresent || !Reader.ReadMessage(HealthData)
+					|| !ParseHealth(HealthData, Health))
+				{
+					OutError = TEXT("WorldState contains invalid or duplicate Health");
+					return false;
+				}
+				continue;
+			}
+			if (Field == 3)
+			{
+				TArrayView<const uint8> SignalData;
+				FTrafficSignalState Signal;
+				if (Signals.Num() >= MaxWorldStateTrafficSignals || Wire != 2
+					|| !Reader.ReadMessage(SignalData) || !ParseTrafficSignal(SignalData, Signal)
+					|| SignalIds.Contains(Signal.SignalId))
+				{
+					OutError = TEXT("WorldState contains invalid, duplicate, or too many traffic signals");
+					return false;
+				}
+				SignalIds.Add(Signal.SignalId);
+				Signals.Add(MoveTemp(Signal));
+				continue;
+			}
+			if (Field == 4)
+			{
+				if (Wire != 2 || bHasTrafficChecksum || !Reader.ReadString(TrafficChecksum, 24)
+					|| (!TrafficChecksum.IsEmpty() && !IsValidTrafficNetworkChecksum(TrafficChecksum)))
+				{
+					OutError = TEXT("WorldState contains an invalid or duplicate traffic network checksum");
+					return false;
+				}
+				bHasTrafficChecksum = true;
+				continue;
+			}
 			if (!Reader.Skip(Wire)) return false;
+		}
+		if (!Signals.IsEmpty() && !IsValidTrafficNetworkChecksum(TrafficChecksum))
+		{
+			OutError = TEXT("WorldState traffic signals require a valid network checksum");
+			return false;
+		}
+		// Controller identity is additive: legacy v1 heads default to controller 1.
+		// Group consistency and mutually-exclusive permissions are controller-local.
+		TMap<uint64, const FTrafficSignalState*> GroupStates;
+		TMap<uint32, uint32> PermissiveGroupsByController;
+		for (const FTrafficSignalState& Signal : Signals)
+		{
+			const uint64 GroupKey = (static_cast<uint64>(Signal.ControllerId) << 32)
+				| static_cast<uint64>(Signal.GroupId);
+			if (const FTrafficSignalState* const* Existing = GroupStates.Find(GroupKey))
+			{
+				if ((*Existing)->Aspect != Signal.Aspect
+					|| FMath::Abs((*Existing)->RemainingSeconds - Signal.RemainingSeconds) > 0.001f)
+				{
+					OutError = TEXT("WorldState traffic signal group disagrees on aspect or countdown");
+					return false;
+				}
+			}
+			else GroupStates.Add(GroupKey, &Signal);
+			if (Signal.Aspect == ETrafficSignalAspect::Green || Signal.Aspect == ETrafficSignalAspect::Yellow)
+			{
+				uint32& PermissiveGroup = PermissiveGroupsByController.FindOrAdd(Signal.ControllerId);
+				if (PermissiveGroup != 0 && PermissiveGroup != Signal.GroupId)
+				{
+					OutError = TEXT("WorldState contains conflicting permissive traffic signal groups");
+					return false;
+				}
+				PermissiveGroup = Signal.GroupId;
+			}
+		}
+		State.ServerHealth = Health;
+		State.TrafficSignals = Signals;
+		State.TrafficNetworkChecksum = TrafficChecksum;
+		for (FVehicleState& Entity : Entities)
+		{
+			Entity.ServerHealth = Health;
+			Entity.TrafficSignals = Signals;
+			Entity.TrafficNetworkChecksum = TrafficChecksum;
 		}
 		return bFoundTarget;
 	}
+}
+
+bool IsValidTrafficSignalState(const FTrafficSignalState& State)
+{
+	return State.SignalId != 0 && State.GroupId >= 1 && State.GroupId <= 4096
+		&& State.ControllerId >= 1 && State.ControllerId <= 64
+		&& static_cast<uint8>(State.Aspect) <= static_cast<uint8>(ETrafficSignalAspect::Green)
+		&& static_cast<uint8>(State.Kind) >= static_cast<uint8>(ETrafficSignalKind::Vehicle)
+		&& static_cast<uint8>(State.Kind) <= static_cast<uint8>(ETrafficSignalKind::Pedestrian)
+		&& IsBoundedVector(State.PositionEnu, 1'000'000.0)
+		&& FMath::IsFinite(State.HeadingDegrees)
+		&& State.HeadingDegrees >= 0.0f && State.HeadingDegrees < 360.0f
+		&& FMath::IsFinite(State.RemainingSeconds)
+		&& State.RemainingSeconds >= 0.0f
+		&& State.RemainingSeconds <= MaxTrafficSignalCountdownSeconds;
+}
+
+bool IsValidTrafficNetworkChecksum(const FString& Checksum)
+{
+	if (Checksum.Len() != 24 || !Checksum.StartsWith(TEXT("fnv1a64:"), ESearchCase::CaseSensitive)) return false;
+	for (int32 Index = 8; Index < Checksum.Len(); ++Index)
+	{
+		const TCHAR Character = Checksum[Index];
+		if (!((Character >= TEXT('0') && Character <= TEXT('9'))
+			|| (Character >= TEXT('a') && Character <= TEXT('f')))) return false;
+	}
+	return true;
 }
 
 TArray<uint8> SerializeControlEnvelope(const FControlCommand& Command, uint64 Sequence,
@@ -447,6 +706,188 @@ TArray<uint8> SerializeSimulationResetEnvelope(
 	WriteString(Envelope, 7, PlaySessionId);
 	WriteBytes(Envelope, 14, Reset);
 	return Envelope;
+}
+
+TArray<uint8> SerializeHelloEnvelope(
+	uint64 Sequence,
+	const FString& SourceId,
+	const FString& SessionId,
+	const FString& MapChecksum,
+	const FString& Build,
+	const TArray<FString>& Capabilities)
+{
+	TArray<uint8> Hello;
+	WriteString(Hello, 1, Build);
+	WriteString(Hello, 2, SchemaName);
+	for (const FString& Capability : Capabilities)
+	{
+		WriteString(Hello, 3, Capability);
+	}
+
+	TArray<uint8> Envelope;
+	WriteTag(Envelope, 1, 0); WriteVarint(Envelope, SchemaVersion);
+	WriteTag(Envelope, 2, 0); WriteVarint(Envelope, Sequence);
+	WriteString(Envelope, 4, SourceId);
+	WriteString(Envelope, 5, MapChecksum);
+	WriteString(Envelope, 6, SessionId);
+	WriteBytes(Envelope, 10, Hello);
+	return Envelope;
+}
+
+bool TryParseHelloEnvelope(
+	TArrayView<const uint8> Data,
+	FHelloInfo& OutHello,
+	bool& bOutIsHello,
+	FString& OutError)
+{
+	OutHello = {};
+	bOutIsHello = false;
+	OutError.Reset();
+
+	FReader Reader(Data);
+	uint32 Version = 0;
+	uint32 LastPayloadField = 0;
+	TArrayView<const uint8> HelloPayload;
+	while (!Reader.AtEnd())
+	{
+		uint32 Field = 0;
+		uint8 Wire = 0;
+		if (!Reader.ReadTag(Field, Wire))
+		{
+			OutError = TEXT("Invalid protobuf tag");
+			return false;
+		}
+		uint64 Integer = 0;
+		if (Field == 1 && Wire == 0)
+		{
+			if (!Reader.ReadVarint(Integer) || Integer > MAX_uint32)
+			{
+				OutError = TEXT("Invalid schema version");
+				return false;
+			}
+			Version = static_cast<uint32>(Integer);
+		}
+		else if (Field == 2 && Wire == 0)
+		{
+			if (!Reader.ReadVarint(OutHello.Sequence))
+			{
+				OutError = TEXT("Invalid envelope sequence");
+				return false;
+			}
+		}
+		else if (Field == 4 && Wire == 2)
+		{
+			if (!Reader.ReadString(OutHello.SourceId))
+			{
+				OutError = TEXT("Invalid source ID");
+				return false;
+			}
+		}
+		else if (Field == 5 && Wire == 2)
+		{
+			if (!Reader.ReadString(OutHello.MapPackageChecksum))
+			{
+				OutError = TEXT("Invalid map package checksum");
+				return false;
+			}
+		}
+		else if (Field == 6 && Wire == 2)
+		{
+			if (!Reader.ReadString(OutHello.SessionId))
+			{
+				OutError = TEXT("Invalid session ID");
+				return false;
+			}
+		}
+		else if (Field >= 10 && Field <= 14)
+		{
+			if (Wire != 2)
+			{
+				OutError = TEXT("Invalid Envelope payload wire type");
+				return false;
+			}
+			TArrayView<const uint8> Payload;
+			if (!Reader.ReadMessage(Payload))
+			{
+				OutError = TEXT("Invalid Envelope payload");
+				return false;
+			}
+			LastPayloadField = Field;
+			if (Field == 10)
+			{
+				HelloPayload = Payload;
+			}
+		}
+		else if (!Reader.Skip(Wire))
+		{
+			OutError = TEXT("Unsupported protobuf wire value");
+			return false;
+		}
+	}
+
+	if (Version != SchemaVersion)
+	{
+		OutError = FString::Printf(
+			TEXT("Schema version mismatch: expected %u, got %u"),
+			SchemaVersion,
+			Version);
+		return false;
+	}
+	if (LastPayloadField != 10)
+	{
+		return true;
+	}
+
+	FReader HelloReader(HelloPayload);
+	while (!HelloReader.AtEnd())
+	{
+		uint32 Field = 0;
+		uint8 Wire = 0;
+		if (!HelloReader.ReadTag(Field, Wire))
+		{
+			OutError = TEXT("Invalid Hello protobuf tag");
+			return false;
+		}
+		if (Field == 1 && Wire == 2)
+		{
+			if (!HelloReader.ReadString(OutHello.Build))
+			{
+				OutError = TEXT("Invalid Hello build");
+				return false;
+			}
+		}
+		else if (Field == 2 && Wire == 2)
+		{
+			if (!HelloReader.ReadString(OutHello.Schema))
+			{
+				OutError = TEXT("Invalid Hello schema");
+				return false;
+			}
+		}
+		else if (Field == 3 && Wire == 2)
+		{
+			if (OutHello.Capabilities.Num() >= 32)
+			{
+				OutError = TEXT("Hello advertises more than 32 capabilities");
+				return false;
+			}
+			FString Capability;
+			if (!HelloReader.ReadString(Capability))
+			{
+				OutError = TEXT("Invalid Hello capability");
+				return false;
+			}
+			OutHello.Capabilities.Add(MoveTemp(Capability));
+		}
+		else if (!HelloReader.Skip(Wire))
+		{
+			OutError = TEXT("Unsupported Hello protobuf wire value");
+			return false;
+		}
+	}
+
+	bOutIsHello = true;
+	return true;
 }
 
 bool ParseWorldStateEnvelope(TArrayView<const uint8> Data, uint32 TargetEntityId,

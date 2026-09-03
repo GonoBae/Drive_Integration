@@ -3,12 +3,15 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "IWebSocket.h"
+#include "SimCoreClientDiagnostics.h"
 #include "SimCoreProtocol.h"
 #include "SimCoreClientComponent.generated.h"
 
-class AStaticMeshActor;
+class AActor;
+class ASimCoreTrafficSignalActor;
 class UStaticMesh;
 
+UENUM(BlueprintType)
 enum class ESimCoreConnectionState : uint8
 {
 	Disconnected,
@@ -71,6 +74,20 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="SimCore|Runtime Entities")
 	FVector RuntimeEntityPresentationOffsetCm = FVector::ZeroVector;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="SimCore|Traffic Signals")
+	bool bShowRuntimeTrafficSignals = true;
+
+	/** Lightweight runtime overlay for PIE and packaged smoke tests. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="SimCore|Diagnostics")
+	bool bShowDebugHud = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="SimCore|Diagnostics", meta=(ClampMin="1.0", ClampMax="20.0"))
+	float DebugHudRefreshHz = 4.0f;
+
+	/** A stale snapshot must never continue to advertise an active server lease. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="SimCore|Diagnostics", meta=(ClampMin="0.01", ClampMax="1.0"))
+	float HealthStateStaleTimeoutSeconds = 0.1f;
+
 	UFUNCTION(BlueprintCallable, Category="SimCore")
 	void Connect();
 
@@ -80,15 +97,23 @@ public:
 	UFUNCTION(BlueprintPure, Category="SimCore")
 	bool IsConnected() const;
 
+	UFUNCTION(BlueprintPure, Category="SimCore|Diagnostics")
+	ESimCoreConnectionState GetConnectionState() const { return ConnectionState; }
+
+	UFUNCTION(BlueprintPure, Category="SimCore|Diagnostics")
+	FString GetConnectionStatusText() const;
+
 	// Steering is already canonical: -1=right, +1=left. Callers convert device
 	// or Unreal right-positive axes before entering this protocol boundary.
 	void SetControl(
 		float Throttle,
 		float Brake,
 		float Steering,
-		bool bHandbrake,
+		bool bSideBrake,
 		SimCoreProtocol::EVehicleGear Gear);
 	bool GetLatestState(SimCoreProtocol::FVehicleState& OutState, float& OutStateAgeSeconds) const;
+	/** Local command intent only; this is not an authoritative host acknowledgement. */
+	bool IsSideBrakeRequested() const { return PendingControl.bHandbrake; }
 
 protected:
 	virtual void BeginPlay() override;
@@ -96,6 +121,10 @@ protected:
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 private:
+	friend class FSimCoreTrafficSignalLifecycleTest;
+	friend class FSimCoreSteeringPawnPresentationTest;
+	friend class FSimCoreNpcClientLifecycleTest;
+	friend class FSimCoreDebugHudVehicleStateTest;
 	static constexpr int32 MaxIncomingMessageBytes = 1024 * 1024;
 
 	void StartConnectionAttempt();
@@ -103,6 +132,13 @@ private:
 	void TickConnection();
 	void TickControlTransmission(float DeltaTime);
 	void TickTelemetry(float DeltaTime);
+	void TickDebugHud(float DeltaTime);
+	FString BuildDebugStatusText(const SimCoreClientDiagnostics::FHealthDisplay* DisplayOverride = nullptr) const;
+	SimCoreClientDiagnostics::FHealthDisplay EvaluateHealthDisplay() const;
+	const SimCoreProtocol::FServerHealth& GetHealthSnapshotForDisplay() const;
+	bool HasHealthSnapshotForDisplay() const;
+	double GetHealthSnapshotAgeSeconds() const;
+	uint64 DebugHudMessageKey() const;
 	void ResetConnectionSession();
 	void ResetReceivedState();
 	void ResetControlSession();
@@ -110,7 +146,12 @@ private:
 	void SyncRuntimeProxyActors(
 		const TArray<SimCoreProtocol::FVehicleState>& Entities,
 		double ReceiveTimeSeconds);
+	void TickRuntimeProxyActors(float DeltaSeconds);
 	void DestroyRuntimeProxyActors();
+	void TickTrafficSignals();
+	void InvalidateTrafficSignals();
+	void DestroyTrafficSignalActors();
+	FString BuildTrafficSignalStatusText() const;
 	void ScheduleReconnect();
 	void SetConnectionState(ESimCoreConnectionState NewState);
 	bool IsCurrentSocketGeneration(uint64 Generation) const;
@@ -121,6 +162,10 @@ private:
 	bool HasMeaningfulControlChange() const;
 	bool ShouldSendControl() const;
 	void SendSimulationReset();
+	void SendHello();
+	bool ValidateServerHello(
+		const SimCoreProtocol::FHelloInfo& Hello,
+		FString& OutError) const;
 	void SendControl();
 	void ApplyConnected(uint64 Generation);
 	void ApplyConnectionError(uint64 Generation, const FString& Error);
@@ -139,10 +184,14 @@ private:
 	SimCoreProtocol::FControlCommand PendingControl;
 	SimCoreProtocol::FControlCommand LastSentControl;
 	SimCoreProtocol::FVehicleState LatestState;
-	TMap<uint32, TWeakObjectPtr<AStaticMeshActor>> RuntimeEntityActors;
+	SimCoreClientDiagnostics::FGlobalEstopHealthCache GlobalEstopHealthCache;
+	TMap<uint32, TWeakObjectPtr<AActor>> RuntimeEntityActors;
 	TMap<uint32, SimCoreProtocol::EEntityKind> RuntimeEntityActorKinds;
-	UPROPERTY(Transient)
-	TObjectPtr<UStaticMesh> RuntimeNpcMesh;
+	TMap<uint32, SimCoreProtocol::FVehicleState> RuntimeEntityStates;
+	double RuntimeEntityReceiveTimeSeconds = 0.0;
+	TMap<uint32, TWeakObjectPtr<ASimCoreTrafficSignalActor>> TrafficSignalActors;
+	FString PresentedTrafficNetworkChecksum;
+	bool bTrafficSnapshotAccepted = false;
 	UPROPERTY(Transient)
 	TObjectPtr<UStaticMesh> RuntimePedestrianMesh;
 	TArray<uint8> IncomingMessage;
@@ -157,7 +206,14 @@ private:
 	double NextReconnectTimeSeconds = 0.0;
 	float SendAccumulator = 0.0f;
 	float TelemetryAccumulator = 0.0f;
+	float DebugHudAccumulator = 0.0f;
+	FString LastDebugHudHealthStatus;
+	float LastTelemetryStateRateHz = 0.0f;
+	double LastTelemetryMaxGapMs = 0.0;
+	uint64 LastTelemetryMissingStateSequenceCount = 0;
+	uint32 LastTelemetryDroppedStateCount = 0;
 	uint32 ReceivedStateCount = 0;
+	uint64 MissingStateSequenceCount = 0;
 	uint32 DroppedOutOfOrderStateCount = 0;
 	bool bHasState = false;
 	bool bHasSentControl = false;
@@ -165,5 +221,6 @@ private:
 	bool bAutoReconnectEnabled = false;
 	bool bDiscardIncomingMessage = false;
 	bool bMapHandshakeComplete = false;
+	bool bProtocolHandshakeComplete = false;
 	ESimCoreConnectionState ConnectionState = ESimCoreConnectionState::Disconnected;
 };

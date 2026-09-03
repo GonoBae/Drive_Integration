@@ -176,7 +176,9 @@ Envelope{ world_state }
 Envelope{ health }
 ```
 
-목표 흐름에서는 연결 직후 `Hello`로 build·schema·capability를 협상하고, 실행 중 `Health`로 tick overrun·command age·오류 상태를 전달한다. 그 뒤 ControlCommand와 WorldState가 각각 별도 Envelope frame으로 오간다.
+현재 흐름에서는 연결 직후 양방향 `Hello`로 source/build·schema·map checksum·capability를
+검증한다. handshake 뒤 ControlCommand와 WorldState가 각각 별도 Envelope frame으로 오간다.
+실행 중 tick overrun·command age·오류 상태를 전달할 authoritative `Health`는 목표 상태다.
 
 현재 runtime 구현은 이 목표 중 일부만 완료됐다.
 
@@ -184,25 +186,31 @@ Envelope{ health }
 |---|---|---|
 | `ControlCommand` | 완료 | Unreal→C++ 구현 |
 | `WorldState` | 완료 | C++→Unreal WebSocket 구현 |
-| `Hello` | 완료 | application handshake 미구현 |
+| `Hello` | 완료 | C++↔Unreal 양방향 application handshake 구현 |
 | `Health` | 완료 | runtime 발행·표시 미구현 |
 
-현재 WebSocket의 HTTP 101 handshake는 transport 연결을 여는 절차일 뿐 Protobuf `Hello` handshake가 아니다. 연결 직후 C++는 현재 WorldState를 보내며, `Hello`와 `Health`를 생성하거나 파싱하는 runtime 코드는 아직 없다.
+WebSocket의 HTTP 101 handshake는 transport 연결을 여는 절차일 뿐 Protobuf `Hello`
+handshake가 아니다. HTTP 101 뒤 C++는 server Hello를, Unreal은 client Hello를 보내고 양쪽이
+이를 승인한 뒤에만 ordinary state/reset/control이 흐른다. `Health` runtime 발행·표시는 아직
+없다.
 
 현재 schema v2 runtime은 R1 WebSocket의 `Envelope.schema_version`을 정확히 검사한다.
 C++는 v1 ControlCommand를 적용하지 않고 Unreal 소스는 v1 WorldState를 incompatible
 상태로 처리하도록 맞춰져 있다. 동결된 Python relay는 version field가 없는 legacy
 `EntityStatePacket`을 읽으므로 이 exact gate에 포함되지 않는다. 이는 R1 packet
-호환성 차단선이지 build·capability·map을 협상하는 `Hello` 구현은 아니다.
+호환성 차단선에 더해 현재 Hello가 source/build·capability·map checksum을 교차 검증한다.
 
-현재 학습에서는 다음까지만 이해한다.
+현재 학습에서는 다음을 실제 구현과 시험으로 추적한다.
 
 - `Hello`와 `Health`가 Envelope의 선택 가능한 payload라는 점
 - `Hello`는 application-level 호환성 협상, `Health`는 runtime 진단이라는 책임
 - HTTP 101 handshake와 Protobuf Hello의 차이
-- 현재 구현되지 않았으므로 실제 호출 흐름과 시험은 아직 없다는 점
+- server/client Hello 순서, 필수 capability·schema·map checksum 실패와 pre-Hello payload
+  차단 시험
 
-handshake 상태기계, capability 협상, Health 발행 주기, Unreal HUD와 오류 시험은 구현 코드와 테스트가 생길 때 다시 학습한다. 존재하지 않는 구현을 추측해서 한 줄 분석하지 않는다.
+Hello handshake 상태기계·capability 협상과 diagnostics HUD는 현재 구현 코드와 시험으로
+학습한다. Health 발행 주기와 authoritative SafeStop/Health HUD는 구현 뒤 다시 학습하며,
+존재하지 않는 Health 흐름을 추측하지 않는다.
 
 ## 7. 첫 손 추적
 

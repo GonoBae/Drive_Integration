@@ -217,11 +217,33 @@ MapPackageGroundQuery::MapPackageGroundQuery(
 
 void MapPackageGroundQuery::build_spatial_index()
 {
+    ground_bounds_enu_.minimum = {
+        std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::infinity()};
+    ground_bounds_enu_.maximum = {
+        -std::numeric_limits<double>::infinity(),
+        -std::numeric_limits<double>::infinity(),
+        -std::numeric_limits<double>::infinity()};
     grid_min_east_m_ = std::numeric_limits<double>::infinity();
     grid_min_north_m_ = std::numeric_limits<double>::infinity();
     grid_max_east_m_ = -std::numeric_limits<double>::infinity();
     grid_max_north_m_ = -std::numeric_limits<double>::infinity();
     for (const auto& triangle : triangles_) {
+        for (const auto& vertex : triangle.vertices) {
+            ground_bounds_enu_.minimum.east_m = std::min(
+                ground_bounds_enu_.minimum.east_m, vertex.east_m);
+            ground_bounds_enu_.minimum.north_m = std::min(
+                ground_bounds_enu_.minimum.north_m, vertex.north_m);
+            ground_bounds_enu_.minimum.up_m = std::min(
+                ground_bounds_enu_.minimum.up_m, vertex.up_m);
+            ground_bounds_enu_.maximum.east_m = std::max(
+                ground_bounds_enu_.maximum.east_m, vertex.east_m);
+            ground_bounds_enu_.maximum.north_m = std::max(
+                ground_bounds_enu_.maximum.north_m, vertex.north_m);
+            ground_bounds_enu_.maximum.up_m = std::max(
+                ground_bounds_enu_.maximum.up_m, vertex.up_m);
+        }
         const auto bounds = conservative_horizontal_bounds(triangle);
         grid_min_east_m_ = std::min(
             grid_min_east_m_, bounds.minimum_east_m);

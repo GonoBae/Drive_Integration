@@ -55,7 +55,7 @@
 - `wheel_index` 0~3 위치 계약
 - `repeated` 목록
 - 각 message의 역할과 Envelope 왕복
-- Hello·Health의 목표 역할과 현재 미구현 상태
+- Hello·Health의 목표 역할과 당시 미구현 상태(현재 Hello는 구현, Health는 후속)
 
 오늘은 새로운 범위로 넘어가지 않는다. 아래 통합 Teach-back 하나만 수행하고 종료한다.
 
@@ -133,7 +133,7 @@ R1 이후 합계는 30회·45시간이다. 8월 8회·4시간을 더한 공식 �
 |---|---|---|---|---|
 | S00 | 8/20 | 완료 후 D+7·D+30 산정 | 대기 | 프로세스 표와 Teach-back 미수집 |
 | S01-P1 | 8/20 | 8/26, 9/18 | 대기 | 첫 Quiz 답변 미수집 |
-| S01-P3 Hello·Health 심화 | NET-004/UE-006 구현 시작 시 | 구현 완료 후 D+7 | 보류 | 현재 schema 정의만 있고 runtime 코드·시험이 없음 |
+| S01-P3 Hello·Health 심화 | Hello 구현 복습 시작 | Hello 복습 완료 후 D+7; Health 구현 뒤 별도 | 부분 준비 | 양방향 Hello runtime·시험과 diagnostics HUD는 구현; authoritative Health 발행·표시는 후속 |
 
 ## 9. 매일 학습 알림
 
