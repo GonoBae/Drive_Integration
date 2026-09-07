@@ -89,6 +89,13 @@ add_library(simcore_traffic
     src/traffic/traffic_network.cpp
     src/traffic/traffic_network_hot_reloader.cpp
     src/traffic/npc_lane_follower.cpp
+    src/traffic/npc_horn_policy.cpp
+    src/traffic/npc_route_planner.cpp
+    src/traffic/npc_lane_change.cpp
+    src/traffic/impact_recovery.cpp
+    src/traffic/pedestrian_impact.cpp
+    src/traffic/impact_tumble.cpp
+    src/collision/structure_damage.cpp
 )
 target_include_directories(simcore_traffic PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(simcore_traffic PUBLIC simcore_physics Boost::property_tree)
@@ -126,6 +133,8 @@ if(SIMCORE_ENABLE_ZMQ_OBSERVER)
 endif()
 
 add_library(simcore_host_core
+    src/player_vehicle_profile.cpp
+    src/replay/physics_replay.cpp
     src/simulation_host.cpp
     src/simulation_host_npc.cpp
     src/simulation_host_session.cpp
@@ -177,15 +186,56 @@ endif()
 include(CTest)
 
 if(BUILD_TESTING)
+    add_executable(physics_replay_tests tests/physics_replay_test.cpp)
+    target_link_libraries(physics_replay_tests PRIVATE simcore_host_core simcore_runtime_options)
+    add_test(NAME physics_replay_tests COMMAND physics_replay_tests)
+    set_tests_properties(physics_replay_tests PROPERTIES TIMEOUT 20)
     add_executable(npc_host_tests tests/npc_host_test.cpp)
     target_link_libraries(npc_host_tests PRIVATE simcore_host_core)
     target_compile_definitions(npc_host_tests PRIVATE
         SIMCORE_TEST_VIRTUAL_CITY_MAP_PACKAGE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../map_packages/virtual_city_v1"
     )
     add_test(NAME npc_host_tests COMMAND npc_host_tests)
+    add_test(NAME npc_return_curve_tests COMMAND npc_host_tests --return-curve)
+    add_test(NAME npc_lateral_recovery_tests COMMAND npc_host_tests --lateral-recovery)
+    set_tests_properties(npc_lateral_recovery_tests PROPERTIES TIMEOUT 40)
+    add_executable(npc_navigation_host_tests tests/npc_navigation_host_test.cpp)
+    target_link_libraries(npc_navigation_host_tests PRIVATE simcore_host_core)
+    target_compile_definitions(npc_navigation_host_tests PRIVATE
+        SIMCORE_TEST_SIGNAL_CITY_MAP_PACKAGE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../map_packages/signal_city_v2"
+    )
+    add_test(NAME npc_navigation_host_tests COMMAND npc_navigation_host_tests)
+    set_tests_properties(npc_navigation_host_tests PROPERTIES TIMEOUT 45)
+    add_test(NAME npc_delayed_crash_bypass_tests COMMAND npc_navigation_host_tests --delayed-crash)
+    set_tests_properties(npc_delayed_crash_bypass_tests PROPERTIES TIMEOUT 30)
+    add_test(NAME npc_mixed_fleet_tests COMMAND npc_navigation_host_tests --mixed-fleet)
+    set_tests_properties(npc_mixed_fleet_tests PROPERTIES TIMEOUT 15)
+    add_test(NAME npc_close_escape_tests COMMAND npc_navigation_host_tests --close-escape)
+    set_tests_properties(npc_close_escape_tests PROPERTIES TIMEOUT 30)
     add_executable(npc_lane_follower_tests tests/npc_lane_follower_test.cpp)
     target_link_libraries(npc_lane_follower_tests PRIVATE simcore_traffic)
     add_test(NAME npc_lane_follower_tests COMMAND npc_lane_follower_tests)
+    add_executable(npc_horn_policy_tests tests/npc_horn_policy_test.cpp)
+    target_link_libraries(npc_horn_policy_tests PRIVATE simcore_traffic)
+    add_test(NAME npc_horn_policy_tests COMMAND npc_horn_policy_tests)
+    add_executable(npc_route_planner_tests tests/npc_route_planner_test.cpp)
+    target_link_libraries(npc_route_planner_tests PRIVATE simcore_traffic)
+    add_test(NAME npc_route_planner_tests COMMAND npc_route_planner_tests)
+    add_executable(npc_lane_change_tests tests/npc_lane_change_test.cpp)
+    target_link_libraries(npc_lane_change_tests PRIVATE simcore_traffic)
+    add_test(NAME npc_lane_change_tests COMMAND npc_lane_change_tests)
+    add_executable(impact_recovery_tests tests/impact_recovery_test.cpp)
+    target_link_libraries(impact_recovery_tests PRIVATE simcore_traffic)
+    add_test(NAME impact_recovery_tests COMMAND impact_recovery_tests)
+    add_executable(pedestrian_impact_tests tests/pedestrian_impact_test.cpp)
+    target_link_libraries(pedestrian_impact_tests PRIVATE simcore_traffic)
+    add_test(NAME pedestrian_impact_tests COMMAND pedestrian_impact_tests)
+    add_executable(impact_tumble_tests tests/impact_tumble_test.cpp)
+    target_link_libraries(impact_tumble_tests PRIVATE simcore_traffic)
+    add_test(NAME impact_tumble_tests COMMAND impact_tumble_tests)
+    add_executable(structure_damage_tests tests/structure_damage_test.cpp)
+    target_link_libraries(structure_damage_tests PRIVATE simcore_traffic)
+    add_test(NAME structure_damage_tests COMMAND structure_damage_tests)
     add_executable(traffic_network_tests tests/traffic_network_test.cpp)
     target_link_libraries(traffic_network_tests PRIVATE simcore_traffic)
     target_compile_definitions(traffic_network_tests PRIVATE

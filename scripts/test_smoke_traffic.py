@@ -159,6 +159,20 @@ class TrafficSmokeHelpersTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(AssertionError, "one controller"):
             network_expectations(json.dumps(malformed).encode())
 
+    def test_exclusive_pedestrian_groups_may_walk_together_without_vehicle_permission(self):
+        source = json.loads(fixture_v2_bytes())
+        source["signals"][1]["kind"] = "pedestrian"
+        source["signals"].append({"id": 5, "group_id": 103, "controller_id": 7,
+                                  "kind": "pedestrian", "position_enu": [11, 32, 0], "heading_deg": 0})
+        source["signal_plans"][0]["groups"].append(103)
+        source["signal_plans"][0]["phases"][3]["green_groups"].append(103)
+        expected = network_expectations(json.dumps(source).encode())
+        self.assertEqual(expected.pedestrian_only_groups, frozenset({(7, 102), (7, 103)}))
+        validate_world(world_state(expected, elapsed_ns=4 * SECOND_NS), expected)
+        source["signals"][-1]["kind"] = "vehicle"
+        with self.assertRaisesRegex(AssertionError, "conflicting groups"):
+            network_expectations(json.dumps(source).encode())
+
     def test_exact_phase_boundaries_large_time_and_disabled(self):
         phases = [(0, pb.TRAFFIC_SIGNAL_RED, pb.TRAFFIC_SIGNAL_RED),
                   (2, pb.TRAFFIC_SIGNAL_GREEN, pb.TRAFFIC_SIGNAL_RED),

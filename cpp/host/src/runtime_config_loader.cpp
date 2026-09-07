@@ -57,6 +57,8 @@ void apply_values(
         parse_npc_route(values.at("npc_alternate_route"));
     if (values.contains("npc_route_loop")) options.npc_route_loop = parse_boolean(
         "npc_route_loop", values.at("npc_route_loop"));
+    if (values.contains("npc_autonomous")) options.npc_autonomous = parse_boolean(
+        "npc_autonomous", values.at("npc_autonomous"));
     if (values.contains("npc_start_offset_m")) options.npc_start_offset_m = parse_finite_double(
         "npc_start_offset_m", values.at("npc_start_offset_m"));
     if (values.contains("npc_max_speed_mps")) options.npc_max_speed_mps = parse_finite_double(
@@ -254,7 +256,7 @@ RuntimeOptions load_runtime_config(
             && key != "npc_route" && key != "npc_alternate_route"
             && key != "npc_route_loop" && key != "npc_start_offset_m"
             && key != "npc_max_speed_mps" && key != "npc_count"
-            && key != "npc_spacing_m") {
+            && key != "npc_spacing_m" && key != "npc_autonomous") {
             throw std::runtime_error(
                 "Unknown runtime configuration key '" + key + "'");
         }

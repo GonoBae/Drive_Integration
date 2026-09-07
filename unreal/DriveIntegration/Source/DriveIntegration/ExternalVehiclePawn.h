@@ -13,8 +13,10 @@ class USceneComponent;
 class USimCoreClientComponent;
 class USimCoreExhaustComponent;
 class USimCoreDriveReplayComponent;
+class USimCoreDriverPresentation;
 class USimCoreSensorRigComponent;
 class USimCoreVehicleAudioComponent;
+class USimCoreVehicleHornComponent;
 class USpringArmComponent;
 class UStaticMeshComponent;
 
@@ -29,6 +31,14 @@ public:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaSeconds) override;
 	virtual void SetupPlayerInputComponent(UInputComponent* PlayerInputComponent) override;
+	SimCoreProtocol::ETurnIndicator GetManualIndicator() const { return ManualIndicator; }
+	bool AreHazardLightsEnabled() const { return bHazardLights; }
+	SimCoreProtocol::ERuntimeVehicleClass GetDisplayedVehicleClass() const
+	{
+		return DisplayedVehicleClass;
+	}
+	int32 GetVisibleWheelCount() const;
+	void SelectPlayerVehicleClass(SimCoreProtocol::ERuntimeVehicleClass VehicleClass);
 
 protected:
 	// Unit-scale actor root. Body-only visual scaling must never propagate into
@@ -68,6 +78,14 @@ protected:
 	// Client-side sonification of authoritative RPM, speed, contact and slip.
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Vehicle|Audio")
 	TObjectPtr<USimCoreVehicleAudioComponent> VehicleAudio;
+
+	// H plays one bounded, presentation-only positional horn pulse.
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Vehicle|Audio")
+	TObjectPtr<USimCoreVehicleHornComponent> VehicleHorn;
+
+	// Manny-based seated driver and interior; damage only changes its visible pose.
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Vehicle|Interior")
+	TObjectPtr<USimCoreDriverPresentation> DriverPresentation;
 
 	// Presentation-only plume driven by authoritative engine telemetry.
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Vehicle|Effects")
@@ -131,6 +149,21 @@ protected:
 	float KeyboardSteeringReturnRatePerSecond = 2.0f;
 
 private:
+	friend class FSimCorePlayerVehiclePresentationTest;
+	UPROPERTY(VisibleAnywhere)
+	TObjectPtr<class USimCoreDeformableBody> DeformableBody;
+	UPROPERTY(VisibleAnywhere)
+	TObjectPtr<class USimCoreTurnSignals> TurnSignals;
+	SimCoreProtocol::ETurnIndicator ManualIndicator = SimCoreProtocol::ETurnIndicator::Off;
+	bool bHazardLights = false;
+	void ToggleLeftIndicator();
+	void ToggleRightIndicator();
+	void ToggleHazardLights();
+	void SelectSedan();
+	void SelectCompact();
+	void SelectTruck();
+	void SelectMotorcycle();
+	bool ConfigureVehicleClass(SimCoreProtocol::ERuntimeVehicleClass VehicleClass);
 	void OrbitCameraYaw(float Value);
 	void OrbitCameraPitch(float Value);
 	void SetCameraGamepadYaw(float Value);
@@ -178,4 +211,16 @@ private:
 	SimCoreDamagePresentation::FAccumulator DamagePresentationAccumulator;
 	uint32 LastPresentedCollisionEventSequence = 0;
 	TStaticArray<FVector, 4> SuspensionMountLocationsCm;
+	UPROPERTY()
+	TObjectPtr<UStaticMesh> SedanBodyMesh;
+	UPROPERTY()
+	TObjectPtr<UStaticMesh> CompactBodyMesh;
+	UPROPERTY()
+	TObjectPtr<UStaticMesh> TruckBodyMesh;
+	UPROPERTY()
+	TObjectPtr<UStaticMesh> MotorcycleBodyMesh;
+	UPROPERTY()
+	TObjectPtr<UStaticMesh> SharedWheelMesh;
+	SimCoreProtocol::ERuntimeVehicleClass DisplayedVehicleClass =
+		SimCoreProtocol::ERuntimeVehicleClass::Unspecified;
 };

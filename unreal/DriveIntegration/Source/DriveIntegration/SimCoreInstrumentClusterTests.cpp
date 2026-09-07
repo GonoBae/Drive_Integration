@@ -22,7 +22,8 @@ bool FSimCoreInstrumentClusterDisplayTest::RunTest(const FString& Parameters)
 	State.Gear = SimCoreProtocol::EVehicleGear::Reverse;
 
 	FDisplayState Display = BuildDisplayState(
-		ESimCoreConnectionState::Connected, true, State, 0.02, 0.10, true);
+		ESimCoreConnectionState::Connected, true, State, 0.02, 0.10, true,
+		SimCoreProtocol::ETurnIndicator::Off, true);
 	bool Ok = true;
 	Ok &= TestTrue(TEXT("fresh connected values are authoritative"), Display.bAuthoritative);
 	Ok &= TestEqual(TEXT("reverse speed uses unsigned road-speed magnitude"), Display.SpeedText, FString(TEXT("045")));
@@ -30,14 +31,21 @@ bool FSimCoreInstrumentClusterDisplayTest::RunTest(const FString& Parameters)
 	Ok &= TestEqual(TEXT("authoritative reverse gear is shown"), Display.GearText, FString(TEXT("R")));
 	Ok &= TestEqual(TEXT("authoritative fuel is rounded for display"), Display.FuelText, FString(TEXT("74")));
 	Ok &= TestTrue(TEXT("local side-brake command is visibly requested"), Display.bSideBrakeRequested);
+	Ok &= TestTrue(TEXT("X hazard request remains clearly visible on the instrument cluster"),
+		Display.bHazardLightsRequested
+		&& Display.ManualIndicator == SimCoreProtocol::ETurnIndicator::Off);
 	Ok &= TestEqual(TEXT("fresh status is explicit"), Display.StatusText, FString(TEXT("LIVE")));
 
 	State.SpeedMps = 10.0f;
 	State.LinearVelocityEnu = FVector3d(10.0, 3.0, 0.0);
 	Display = BuildDisplayState(
-		ESimCoreConnectionState::Connected, true, State, 0.02, 0.10, false);
+		ESimCoreConnectionState::Connected, true, State, 0.02, 0.10, false,
+		SimCoreProtocol::ETurnIndicator::Left, false);
 	Ok &= TestEqual(TEXT("speedometer uses complete ground path speed during cornering"),
 		Display.SpeedText, FString(TEXT("038")));
+	Ok &= TestTrue(TEXT("manual Q/E direction remains an explicit local dashboard state"),
+		!Display.bHazardLightsRequested
+		&& Display.ManualIndicator == SimCoreProtocol::ETurnIndicator::Left);
 	State.LinearVelocityEnu = FVector3d::ZeroVector;
 
 	Display = BuildDisplayState(

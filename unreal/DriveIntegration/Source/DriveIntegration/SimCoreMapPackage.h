@@ -14,6 +14,11 @@ namespace SimCoreMapPackage
 		FString CollisionChecksum;
 	};
 
+	/** Absolute, idempotent package path, even when UE supplies a relative ProjectDir. */
+	DRIVEINTEGRATION_API FString ResolvePackageDirectory(
+		const FString& PackageDirectory,
+		const FString& ProjectDirectory = FString());
+
 	/**
 	 * Load a strict MapPackage manifest and verify every declared collision file
 	 * against its FNV-1a identity. No undeclared collision artifact is consumed.

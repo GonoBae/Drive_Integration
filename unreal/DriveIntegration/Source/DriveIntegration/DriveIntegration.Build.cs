@@ -16,8 +16,10 @@ public class DriveIntegration : ModuleRules
 			"InputCore",
 			"AudioMixer",
 			"PhysicsCore",
+			"ProceduralMeshComponent",
 			"WebSockets"
 		});
 		PrivateDependencyModuleNames.Add("Json");
+		PrivateDependencyModuleNames.AddRange(new string[] { "RenderCore", "RHI" });
 	}
 }

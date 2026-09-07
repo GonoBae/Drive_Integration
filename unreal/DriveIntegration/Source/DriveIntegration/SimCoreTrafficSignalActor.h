@@ -20,6 +20,7 @@ namespace SimCoreTrafficSignals
 		SimCoreProtocol::ETrafficSignalAspect Aspect = SimCoreProtocol::ETrafficSignalAspect::Unknown;
 		SimCoreProtocol::ETrafficSignalKind Kind = SimCoreProtocol::ETrafficSignalKind::Vehicle;
 		bool bVerified = false;
+		bool bOutOfService = false;
 		float RemainingSeconds = 0.0f;
 		// UNKNOWN is physically all-red, never a dark/inferred green indication.
 		bool bRed = true;
@@ -37,6 +38,9 @@ namespace SimCoreTrafficSignals
 	DRIVEINTEGRATION_API FTransform BuildPoleTransform(
 		const SimCoreProtocol::FTrafficSignalState& Signal,
 		const FVector& PresentationOffsetCm = FVector::ZeroVector);
+	DRIVEINTEGRATION_API FTransform BuildDamagedPoleTransform(
+		const SimCoreProtocol::FStructureState& Structure,
+		const FVector& PresentationOffsetCm = FVector::ZeroVector);
 }
 
 /** Ephemeral game-world presentation, never collision or map authoring geometry. */
@@ -52,6 +56,9 @@ public:
 		bool bNetworkReady, bool bAcceptedSnapshot, double SnapshotAgeSeconds,
 		const FVector& PresentationOffsetCm = FVector::ZeroVector);
 	void SetFailSafe();
+	void ApplyStructureDamage(const SimCoreProtocol::FStructureState& Structure,
+		const FVector& PresentationOffsetCm = FVector::ZeroVector);
+	void ClearStructureDamage();
 	const SimCoreTrafficSignals::FDisplayState& GetDisplayState() const { return Display; }
 	uint32 GetSignalId() const { return SignalId; }
 	UStaticMeshComponent* GetLamp(int32 Index) const;
@@ -85,4 +92,6 @@ private:
 	SimCoreTrafficSignals::FDisplayState Display;
 	uint32 SignalId = 0;
 	uint32 GroupId = 0;
+	bool bHasStructureDamage = false;
+	bool bBroken = false;
 };

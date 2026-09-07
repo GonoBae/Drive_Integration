@@ -21,6 +21,16 @@ enum class TrafficSignalKind : std::uint32_t {
     Pedestrian = 2,
 };
 
+// Authored, same-direction parallel window. Stations are 3D polyline arc
+// lengths, not world coordinates; both ends exclude intersections/merge fans.
+struct TrafficLaneChange {
+    std::uint32_t target_lane_id = 0;
+    double source_begin_m = 0.0;
+    double source_end_m = 0.0;
+    double target_begin_m = 0.0;
+    double target_end_m = 0.0;
+};
+
 struct TrafficLane {
     std::uint32_t id = 0;
     double width_m = 0.0;
@@ -30,6 +40,8 @@ struct TrafficLane {
     bool terminal = false;
     std::vector<GroundPointEnu> points;
     std::vector<std::uint32_t> successors;
+    // Additive, optional JSON metadata. Old v1/v2 packages retain no changes.
+    std::vector<TrafficLaneChange> lane_changes;
 };
 
 struct TrafficSignal {
@@ -56,6 +68,7 @@ struct TrafficSignalSnapshot {
     // Kept last for compatibility with existing six-field aggregate fixtures.
     std::uint32_t controller_id = 1;
     TrafficSignalKind kind = TrafficSignalKind::Vehicle;
+    bool out_of_service = false;
 };
 
 // format_version 2 stores phase timing in the network instead of relying on

@@ -1,11 +1,17 @@
 #pragma once
 
 #include <cstddef>
+#include <numbers>
 #include <string>
 #include <variant>
 #include <vector>
 
 namespace simcore_host {
+
+// Shared by authored traffic motion and the finite-body solver. Commanded
+// rotation must fit this budget before contact deltas are measured.
+inline constexpr double kMaximumFiniteProxyHeadingRateRadS =
+    4.0 * std::numbers::pi_v<double>;
 
 // Collision geometry uses map_enu coordinates: X=east, Y=north, Z=up.
 // heading_rad follows the vehicle/navigation convention: North=0 and positive
@@ -73,6 +79,17 @@ struct KinematicCollisionProxy {
     // the legacy unbounded kinematic contract. Managed traffic always supplies
     // a positive bound.
     double maximum_linear_speed_mps = 0.0;
+    // Explicit eligibility only; VehiclePhysics still establishes actual tire
+    // contact, height and clearance before suppressing Ego's planar response.
+    bool tire_support_candidate = false;
+    // A finite breakaway body starts anchored. Contact first spends this
+    // normal-impulse budget against its base, then releases into the ordinary
+    // finite-mass solve within that same microstep. Zero is the normal proxy.
+    double breakaway_impulse_n_s = 0.0;
+    bool breakaway_released = false;
+    // A pedestrian resting above one verified hood/roof must not also collide
+    // with that vehicle's roof-height planar prism. Other pairs stay enabled.
+    std::string supported_vehicle_id;
 };
 
 struct PlanarRigidBody {
@@ -100,6 +117,11 @@ struct CollisionContact {
     double accumulated_normal_impulse_n_s = 0.0;
 };
 
+struct RuntimeProxyContact {
+    std::string proxy_id; // body receiving this contact, never the Ego
+    CollisionContact contact; // normal points the other proxy -> this body
+};
+
 struct CollisionStepResult {
     PlanarRigidBody body;
     std::vector<CollisionContact> contacts;
@@ -107,6 +129,7 @@ struct CollisionStepResult {
     // position/velocity/yaw response; legacy infinite proxies contain their
     // prescribed motion advanced through the accepted microsteps.
     std::vector<KinematicCollisionProxy> resolved_dynamic_proxies;
+    std::vector<RuntimeProxyContact> runtime_proxy_contacts;
     std::size_t substep_count = 0;
     bool motion_clamped = false;
     std::size_t broad_phase_query_count = 0;

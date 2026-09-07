@@ -42,7 +42,7 @@ from smoke_traffic import (SECOND_NS, ROOT, TrafficController, heartbeat,
 
 FIRST_NPC_ID = 1001
 FIRST_PEDESTRIAN_ID = 2001
-EXPECTED_NPC_COUNT = 4
+EXPECTED_NPC_COUNT = 10
 EXPECTED_PEDESTRIAN_COUNT = 8
 NPC_HALF_EXTENTS_M = (2.2, 1.0, 0.75)
 PEDESTRIAN_RADIUS_M = 0.35
@@ -73,6 +73,10 @@ class SignalCitySpec:
     command_timeout_ms: int
     hard_command_timeout_ms: int
     map_id: str
+    npc_autonomous: bool = False
+    authored_segments: tuple = ()
+    lane_change_cells: tuple = ()
+    authored_segment_index: object = None
 
     @property
     def npc_ids(self):
@@ -161,6 +165,35 @@ def finite_point(value, context):
     return tuple(float(component) for component in value)
 
 
+def validate_npc_spawn_offsets(network, routes, count, start_offset, spacing):
+    """Mirror the host's alternating-route/reset stop clearance before connecting."""
+    lanes = {lane["id"]: lane for lane in network["lanes"]}
+    route_spans = []
+    for route in routes:
+        spans = []
+        station = 0.0
+        for identity in route:
+            lane = lanes[identity]
+            length = sum(math.dist(a, b) for a, b in zip(lane["points"], lane["points"][1:]))
+            spans.append((identity, station, station + length, lane.get("signal_group_id", 0)))
+            station += length
+        require(station > 0, "NPC spawn route must have positive length")
+        route_spans.append(spans)
+    result = []
+    # NpcLaneFollowerConfig: 2.2m body-front extent plus 0.5m stopping margin.
+    clearance = NPC_HALF_EXTENTS_M[0] + 0.5
+    for index in range(count):
+        spans = route_spans[index % len(routes)]
+        offset = (start_offset + (index // len(routes)) * spacing) % spans[-1][2]
+        identity, begin, end, group = next(span for span in spans if span[1] <= offset < span[2])
+        require(not group or offset <= end - clearance + 1e-9,
+                f"NPC {FIRST_NPC_ID + index} spawn enters controlled stopping margin: "
+                f"lane={identity}, route_offset={offset:.3f}m, "
+                f"remaining={end - offset:.3f}m, required={clearance:.3f}m")
+        result.append((FIRST_NPC_ID + index, identity, offset - begin))
+    return tuple(result)
+
+
 def build_spec(runtime_config):
     runtime_config = runtime_config.resolve()
     values = parse_key_value(runtime_config)
@@ -179,6 +212,9 @@ def build_spec(runtime_config):
     require(values["npc_route_loop"].lower() == "true", "Signal City NPC routes must loop")
     require(values["demo_entities"].lower() == "false",
             "legacy demo entities must be disabled for Signal City")
+    autonomous_value = values.get("npc_autonomous", "false").lower()
+    require(autonomous_value in ("true", "false"), "npc_autonomous must be true or false")
+    npc_autonomous = autonomous_value == "true"
 
     map_package = config_path(runtime_config, values["map_package"])
     traffic_network = config_path(runtime_config, values["traffic_network"])
@@ -246,8 +282,16 @@ def build_spec(runtime_config):
     require(len(crossings) * 2 == EXPECTED_PEDESTRIAN_COUNT,
             f"Signal City requires four crossings/eight pedestrians; got {len(crossings)}/"
             f"{len(crossings) * 2}")
-    require(set(crossings) == expected_traffic.group_keys,
-            "each planned controller/group must have one pedestrian crossing")
+    require(set(crossings).issubset(expected_traffic.group_keys),
+            "each pedestrian crossing must belong to its authored controller/group")
+    for plan in network.get("signal_plans", []):
+        vehicle_groups = {head["group_id"] for head in network["signals"]
+                          if head["controller_id"] == plan["id"] and head["kind"] == "vehicle"}
+        pedestrian_groups = {key[1] for key in crossings if key[0] == plan["id"]}
+        for phase in plan["phases"]:
+            active = set(phase["green_groups"]) | set(phase["yellow_groups"])
+            require(not (active & vehicle_groups and active & pedestrian_groups),
+                    "dedicated-lane WALK must not overlap vehicle-turn authority")
 
     lanes = {}
     for lane in network.get("lanes", []):
@@ -272,12 +316,15 @@ def build_spec(runtime_config):
 
     npc_count = integer_value(values, "npc_count", 1)
     require(npc_count == EXPECTED_NPC_COUNT,
-            f"Signal City acceptance requires npc_count=4; got {npc_count}")
+            f"Signal City acceptance requires npc_count=10; got {npc_count}")
     npc_max_speed = float_value(values, "npc_max_speed_mps")
     require(0 < npc_max_speed <= 25, "npc_max_speed_mps must be in (0,25]")
     require(float_value(values, "npc_spacing_m") >= 8, "npc_spacing_m must be >= 8")
     require(float_value(values, "npc_start_offset_m") >= 0,
             "npc_start_offset_m must be non-negative")
+    validate_npc_spawn_offsets(network, routes, npc_count,
+                               float_value(values, "npc_start_offset_m"),
+                               float_value(values, "npc_spacing_m"))
     soft_timeout = integer_value(values, "command_timeout_ms", 1)
     hard_timeout = integer_value(values, "hard_command_timeout_ms", 1)
     require(hard_timeout >= soft_timeout + 250,
@@ -285,10 +332,16 @@ def build_spec(runtime_config):
 
     require(hasattr(pb.TrafficSignalState(), "signal_kind"),
             "Python protobuf is stale; regenerate vehicle_pb2.py")
+    authored_segments = tuple((start, end) for points in lanes.values()
+                              for start, end in zip(points, points[1:]))
+    lane_change_cells = (build_lane_change_cells(network, lanes)
+                         if npc_autonomous else ())
     return SignalCitySpec(runtime_config, map_package, traffic_network,
                           expected_traffic, signal_kinds, crossings, routes,
                           tuple(route_segments), npc_count, npc_max_speed,
-                          soft_timeout, hard_timeout, map_id)
+                          soft_timeout, hard_timeout, map_id, npc_autonomous,
+                          authored_segments, lane_change_cells,
+                          build_segment_index(authored_segments) if npc_autonomous else None)
 
 
 def position(entity):
@@ -313,11 +366,141 @@ def distance_to_route(point, segments):
     return min(distance_to_segment(point, start, end) for start, end in segments)
 
 
+PATH_TOLERANCE_M = 0.03
+SEGMENT_INDEX_CELL_M = 8.0
+
+
+def build_segment_index(segments):
+    """Conservative AABB broadphase; the original exact distance is the gate."""
+    index = {}
+    for start, end in segments:
+        x0 = math.floor((min(start[0], end[0]) - PATH_TOLERANCE_M) / SEGMENT_INDEX_CELL_M)
+        x1 = math.floor((max(start[0], end[0]) + PATH_TOLERANCE_M) / SEGMENT_INDEX_CELL_M)
+        y0 = math.floor((min(start[1], end[1]) - PATH_TOLERANCE_M) / SEGMENT_INDEX_CELL_M)
+        y1 = math.floor((max(start[1], end[1]) + PATH_TOLERANCE_M) / SEGMENT_INDEX_CELL_M)
+        for x in range(x0, x1 + 1):
+            for y in range(y0, y1 + 1):
+                index.setdefault((x, y), []).append((start, end))
+    return {key: tuple(value) for key, value in index.items()}
+
+
+def point_near_route(point, segments, index=None):
+    if index is not None:
+        key = (math.floor(point[0] / SEGMENT_INDEX_CELL_M),
+               math.floor(point[1] / SEGMENT_INDEX_CELL_M))
+        segments = index.get(key, ())
+    for start, end in segments:
+        if (point[0] < min(start[0], end[0]) - PATH_TOLERANCE_M
+                or point[0] > max(start[0], end[0]) + PATH_TOLERANCE_M
+                or point[1] < min(start[1], end[1]) - PATH_TOLERANCE_M
+                or point[1] > max(start[1], end[1]) + PATH_TOLERANCE_M):
+            continue
+        if distance_to_segment(point, start, end) < PATH_TOLERANCE_M:
+            return True
+    return False
+
+
+def point_at_station(points, station):
+    require(math.isfinite(station) and station >= 0, "invalid lane-change station")
+    for start, end in zip(points, points[1:]):
+        length = math.dist(start, end)
+        require(length > 0, "lane-change lane contains a zero-length segment")
+        if station <= length + 1e-8:
+            fraction = min(1.0, station / length)
+            return tuple(a + (b - a) * fraction for a, b in zip(start, end))
+        station -= length
+    raise AssertionError("lane-change station exceeds its authored lane")
+
+
+def build_lane_change_cells(network, lanes):
+    """Exact piecewise-linear station windows, not a blanket lane-width tolerance."""
+    cells = []
+    for lane in network.get("lanes", []):
+        source = lanes[lane["id"]]
+        for change in lane.get("lane_changes", []):
+            target_id = change.get("target_lane_id")
+            require(target_id in lanes, "lane-change target is absent")
+            target = lanes[target_id]
+            sb, se, tb, te = (change.get(key) for key in
+                              ("source_begin_m", "source_end_m",
+                               "target_begin_m", "target_end_m"))
+            require(all(type(value) in (int, float) and math.isfinite(value)
+                        for value in (sb, se, tb, te))
+                    and 0 <= sb < se and 0 <= tb < te,
+                    "invalid authored lane-change station window")
+            # Split at EVERY source/target polyline vertex in the window. Each
+            # resulting ruled strip is exactly a quad, even for curved lanes.
+            cuts = {0.0, 1.0}
+            for points, begin, end in ((source, sb, se), (target, tb, te)):
+                station = 0.0
+                for start, finish in zip(points, points[1:]):
+                    station += math.dist(start, finish)
+                    if begin < station < end:
+                        cuts.add((station - begin) / (end - begin))
+            cuts = sorted(cuts)
+            for begin, end in zip(cuts, cuts[1:]):
+                cells.append((point_at_station(source, sb + (se - sb) * begin),
+                              point_at_station(source, sb + (se - sb) * end),
+                              point_at_station(target, tb + (te - tb) * end),
+                              point_at_station(target, tb + (te - tb) * begin)))
+    return tuple(cells)
+
+
+def inside_lane_change(point, cells):
+    def cross(a, b, c):
+        return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+    def triangle(a, b, c):
+        signs = (cross(a, b, point), cross(b, c, point), cross(c, a, point))
+        return (min(signs) >= 0 or max(signs) <= 0) and abs(cross(a, b, c)) > 1e-12
+
+    for a, b, c, d in cells:
+        if (point[0] < min(a[0], b[0], c[0], d[0]) - PATH_TOLERANCE_M
+                or point[0] > max(a[0], b[0], c[0], d[0]) + PATH_TOLERANCE_M
+                or point[1] < min(a[1], b[1], c[1], d[1]) - PATH_TOLERANCE_M
+                or point[1] > max(a[1], b[1], c[1], d[1]) + PATH_TOLERANCE_M):
+            continue
+        if triangle(a, b, c) or triangle(a, c, d):
+            return True
+        if any(planar_distance(start, end) > 1e-9
+               and distance_to_segment(point, start, end) < 0.03
+               for start, end in ((a, b), (b, c), (c, d), (d, a))):
+            return True
+    return False
+
+
+def validate_npc_path(entity, spec):
+    point = position(entity)
+    if spec.npc_autonomous:
+        on_lane = point_near_route(point, spec.authored_segments,
+                                  getattr(spec, "authored_segment_index", None))
+        changing_lane = not on_lane and inside_lane_change(point, spec.lane_change_cells)
+        if not on_lane and not changing_lane:
+            route_distance = distance_to_route(point, spec.authored_segments)
+            raise AssertionError(
+                f"NPC {entity.entity_id} left authored lanes/lane-change windows: "
+                f"{route_distance:.6f} m")
+    else:
+        route_index = (entity.entity_id - FIRST_NPC_ID) % len(spec.routes)
+        segments = spec.route_segments[route_index]
+        if not point_near_route(point, segments):
+            route_distance = distance_to_route(point, segments)
+            raise AssertionError(
+                f"NPC {entity.entity_id} left its configured route: {route_distance:.6f} m")
+        changing_lane = False
+    # Only measured lateral motion inside an authored transition may add up to
+    # 10% to the longitudinal limit. Normal lanes retain the original bound.
+    speed_limit = spec.npc_max_speed_mps * (1.1 if changing_lane else 1.0) + 0.05
+    require(0 <= entity.speed <= speed_limit,
+            f"NPC {entity.entity_id} exceeded configured speed: "
+            f"{entity.speed:.6f} m/s > {speed_limit:.6f} m/s")
+
+
 def runtime_entities(message, spec):
     entities = [entity for entity in message.world_state.entities
                 if entity.entity_kind != pb.ENTITY_KIND_EGO_VEHICLE]
     require([entity.entity_id for entity in entities] == list(spec.runtime_ids),
-            "runtime entity IDs/order changed; expected four NPCs then eight pedestrians")
+            "runtime entity IDs/order changed; expected ten NPCs then eight pedestrians")
     for entity in entities:
         require(entity.HasField("position_enu") and entity.HasField("linear_velocity_enu"),
                 f"entity {entity.entity_id} omitted ENU pose/velocity")
@@ -335,23 +518,13 @@ def runtime_entities(message, spec):
         if entity.entity_id in spec.npc_ids:
             require(entity.entity_kind == pb.ENTITY_KIND_NPC_VEHICLE,
                     f"entity {entity.entity_id} is not an NPC vehicle")
-            npc_speed_limit = spec.npc_max_speed_mps + 0.05
-            require(0 <= entity.speed <= npc_speed_limit,
-                    f"NPC {entity.entity_id} exceeded configured speed: "
-                    f"{entity.speed:.6f} m/s > "
-                    f"{npc_speed_limit:.6f} m/s")
+            validate_npc_path(entity, spec)
             actual = (entity.collision_half_length, entity.collision_half_width,
                       entity.collision_half_height)
             require(all(abs(value - expected) < 1e-5
                         for value, expected in zip(actual, NPC_HALF_EXTENTS_M))
                     and abs(entity.collision_radius) < 1e-8,
                     f"NPC {entity.entity_id} collision shape changed")
-            route_index = (entity.entity_id - FIRST_NPC_ID) % len(spec.routes)
-            route_distance = distance_to_route(position(entity),
-                                               spec.route_segments[route_index])
-            require(route_distance < 0.03,
-                    f"NPC {entity.entity_id} left its configured route: "
-                    f"{route_distance:.6f} m")
         else:
             require(entity.entity_kind == pb.ENTITY_KIND_PEDESTRIAN,
                     f"entity {entity.entity_id} is not a pedestrian")
@@ -396,7 +569,10 @@ def assign_pedestrian_crossings(entities, spec):
                       spec.crossings[candidate].end))
         distance = distance_to_segment(point, spec.crossings[key].start,
                                        spec.crossings[key].end)
-        require(distance <= 0.56,
+        # Server paths run 0.60m beside the signal-head segment so the 0.35m
+        # body capsule no longer starts inside the 0.14m pole. Allow 0.11m for
+        # collision displacement/serialization, as the prior 0.45+0.11 bound did.
+        require(distance <= 0.71,
                 f"pedestrian {identity} did not spawn beside an authored crossing")
         assignments[identity] = key
         counts[key] += 1
@@ -410,7 +586,7 @@ def require_pedestrians_on_crossings(entities, assignments, spec):
         crossing = spec.crossings[key]
         distance = distance_to_segment(position(entities[identity]), crossing.start,
                                        crossing.end)
-        require(distance <= 0.56,
+        require(distance <= 0.71,
                 f"pedestrian {identity} left authored crossing {key}: "
                 f"{distance:.6f} m")
 
@@ -517,10 +693,12 @@ async def observe_active_cycle(controller, baseline, assignments, spec):
         with suppress(asyncio.CancelledError):
             await sender
 
-    all_aspects = {pb.TRAFFIC_SIGNAL_RED, pb.TRAFFIC_SIGNAL_YELLOW,
-                   pb.TRAFFIC_SIGNAL_GREEN}
-    require(all(aspects == all_aspects for aspects in seen.values()),
-            "one or more vehicle/pedestrian heads did not publish a complete R/Y/G cycle")
+    for identity, aspects in seen.items():
+        expected = {pb.TRAFFIC_SIGNAL_RED, pb.TRAFFIC_SIGNAL_GREEN}
+        if spec.signal_kinds[identity] == pb.TRAFFIC_SIGNAL_KIND_VEHICLE:
+            expected.add(pb.TRAFFIC_SIGNAL_YELLOW)
+        require(aspects == expected,
+                f"signal {identity} did not publish its complete vehicle R/Y/G or pedestrian STOP/WALK cycle")
     require(moved_npcs == set(spec.npc_ids),
             f"not all configured NPCs moved: {sorted(moved_npcs)}")
     require(moved_pedestrians == set(spec.pedestrian_ids),
@@ -554,7 +732,7 @@ async def verify_safe_stop_and_recovery(controller, assignments, spec):
                     and abs(entity.linear_velocity_enu.y) < 1e-10
                     and position(entity) == frozen[identity],
                     f"entity {identity} did not freeze atomically in SafeStop")
-    print("PASS SafeStop: all 12 dynamic entities frozen and all signals red", flush=True)
+    print(f"PASS SafeStop: all {len(spec.runtime_ids)} dynamic entities frozen and all signals red", flush=True)
 
     await controller.control()
     sender = asyncio.create_task(heartbeat(controller))
@@ -626,7 +804,7 @@ async def exercise(url, process, source, spec):
                     f"fresh PIE did not reset entity {identity} to its initial state")
         require(assign_pedestrian_crossings(reset_entities, spec) == assignments,
                 "fresh PIE changed pedestrian/crossing ownership")
-        print("PASS fresh PIE reset: all 4 NPCs/8 pedestrians restored to initial state",
+        print("PASS fresh PIE reset: all 10 NPCs/8 pedestrians restored to initial state",
               flush=True)
     finally:
         await connection.close()

@@ -3,9 +3,17 @@
 #include "control/control_lease.hpp"
 #include "physics/vehicle_physics.hpp"
 #include "protocol/vehicle_messages.hpp"
+#include "replay/physics_replay.hpp"
 #include "simulation_clock.hpp"
 #include "terrain/map_package_runtime.hpp"
+#include "traffic/npc_horn_policy.hpp"
 #include "traffic/npc_lane_follower.hpp"
+#include "traffic/npc_lane_change.hpp"
+#include "traffic/npc_route_planner.hpp"
+#include "traffic/impact_recovery.hpp"
+#include "traffic/impact_tumble.hpp"
+#include "traffic/pedestrian_impact.hpp"
+#include "collision/structure_damage.hpp"
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/steady_timer.hpp>
@@ -47,10 +55,13 @@ struct SimulationHostConfig {
     std::vector<std::uint32_t> npc_route;
     std::vector<std::uint32_t> npc_alternate_route;
     bool npc_route_loop = false;
+    bool npc_autonomous = false;
     double npc_start_offset_m = 0.0;
     double npc_max_speed_mps = 6.0;
     std::uint32_t npc_count = 1;
     double npc_spacing_m = 120.0;
+    // Optional offline-verifiable recording of actual applied fixed-tick input.
+    std::shared_ptr<simcore_host::PhysicsReplayRecorder> physics_replay;
 };
 
 struct SimulationHostCallbacks {
@@ -71,6 +82,30 @@ enum class ClientMessageResult {
 };
 
 using ControlMessageResult = ClientMessageResult;
+
+// Local diagnostics, intentionally not a new wire-protocol requirement.
+struct NpcNavigationSnapshot {
+    std::uint32_t entity_id = 0;
+    std::uint32_t lane_id = 0;
+    std::uint32_t destination_lane_id = 0;
+    std::uint64_t destinations_selected = 0;
+    std::uint64_t reroutes = 0;
+    std::uint64_t lane_changes_completed = 0;
+    bool changing_lane = false;
+    std::vector<std::uint32_t> route;
+    std::string collision_state = "driving";
+    double collision_damage_percent = 0.0;
+    double collision_hold_remaining_s = 0.0;
+    double lane_offset_m = 0.0;
+    double route_distance_travelled_m = 0.0;
+    std::string lane_change_wait_reason;
+    bool preserving_bypass_space = false;
+    // Local graph-planner diagnostics. "backing" is a bounded reverse on the
+    // current lane, never a reverse graph edge or free-space autonomous drive.
+    std::string avoidance_phase = "none";
+    double avoidance_reverse_remaining_m = 0.0;
+    std::string vehicle_profile = "sedan";
+};
 
 // Application-level simulation coordinator. Network transports are injected as
 // callbacks, so command arbitration and the fixed-step loop can be exercised
@@ -118,6 +153,7 @@ public:
         return runtime_entities_;
     }
     bool running() const { return running_; }
+    std::vector<NpcNavigationSnapshot> npc_navigation() const;
     const std::string& map_package_checksum() const {
         return config_.map_package_checksum;
     }
@@ -128,6 +164,11 @@ public:
     }
 
 private:
+    void apply_vehicle_input(const VehicleInput& input)
+    {
+        applied_input_ = input;
+        physics_.set_input(input);
+    }
     static VehicleInput make_safe_stop_input();
     static std::string make_play_session_key(std::string_view source_id,
                                              std::string_view play_session_id);
@@ -149,18 +190,35 @@ private:
     std::vector<simcore_host::KinematicCollisionProxy>
         make_runtime_collision_snapshot() const;
     void advance_runtime_entities(double dt_seconds);
+    void finish_runtime_impact_contacts(const std::vector<simcore_host::CollisionContact>& contacts);
+    void rebuild_structure_damage();
+    std::vector<simcore_host::TrafficSignalSnapshot> current_traffic_signals(bool enabled) const;
     void rebuild_lane_npc();
     void prepare_lane_npc(double dt_seconds, Clock::time_point now);
     struct LaneNpcRuntime;
+    bool choose_npc_destination(LaneNpcRuntime& npc);
+    void update_npc_navigation(LaneNpcRuntime& npc, double dt_seconds);
+    std::optional<simcore_host::NpcLaneSample> sample_lane_npc(
+        const LaneNpcRuntime& npc, double distance_m) const;
+    bool npc_sample_blocked(const LaneNpcRuntime& npc,
+        const simcore_host::NpcLaneSample& sample, bool stationary_only = false,
+        const simcore_host::ObbPrism* collision_shape = nullptr,
+        bool ignore_ego = false) const;
+    bool try_npc_lane_change(LaneNpcRuntime& npc);
+    bool npc_reverse_path_clear(const LaneNpcRuntime& npc, double distance_m) const;
+    bool begin_npc_escape_reverse(LaneNpcRuntime& npc, double obstruction_distance_m);
     std::optional<double> lane_npc_blocked_distance(
-        const LaneNpcRuntime& npc, double lookahead_m) const;
+        const LaneNpcRuntime& npc, double lookahead_m, bool stationary_only = false,
+        bool route_end_is_blocker = true) const;
     void rebuild_pedestrians();
     void prepare_pedestrians(double dt_seconds, Clock::time_point now);
     void schedule_tick();
     void run_tick();
     bool apply_pending_map_package_reload(Clock::time_point tick_started_at);
+    void reset_player_vehicle(simcore_host::RuntimeVehicleClass vehicle_class);
 
     SimulationHostConfig config_;
+    VehicleParameters base_vehicle_parameters_;
     SimulationHostCallbacks callbacks_;
     VehiclePhysics physics_;
     SimulationClock simulation_clock_;
@@ -171,6 +229,7 @@ private:
     std::uint64_t message_sequence_ = 1;
     std::vector<simcore_host::RuntimeEntityState> initial_runtime_entities_;
     std::vector<simcore_host::RuntimeEntityState> runtime_entities_;
+    simcore_host::StructureDamageRuntime structure_damage_;
     struct RuntimeCollisionReaction {
         simcore_host::CollisionVector2 offset_enu_m;
         simcore_host::CollisionVector2 velocity_enu_mps;
@@ -178,15 +237,71 @@ private:
         double heading_offset_rad = 0.0;
         double heading_rate_rad_s = 0.0;
         double nominal_heading_rate_rad_s = 0.0;
-        std::uint32_t hold_ticks = 0;
+        simcore_host::ImpactRecoveryState recovery;
+        double return_speed_mps = 0.0;
+        double return_yaw_speed_rad_s = 0.0;
+        // The UE driver presentation needs this fixed interval to close the
+        // door and sit down before the NPC begins its self-driven return.
+        double return_departure_grace_remaining_s = 0.0;
+        // A recoverable vehicle follows one fixed body-aligned cubic back to
+        // its paused route pose. Keeping the plan stable prevents per-tick
+        // forward/reverse flips and world-space "UFO" translations.
+        bool vehicle_return_path_initialized = false;
+        int vehicle_return_direction = 0;
+        double vehicle_return_progress = 0.0;
+        simcore_host::CollisionVector2 vehicle_return_p0;
+        simcore_host::CollisionVector2 vehicle_return_p1;
+        simcore_host::CollisionVector2 vehicle_return_p2;
+        std::uint32_t presented_event_sequence = 0;
+        double presented_impact_impulse_n_s = 0.0;
+        simcore_host::CollisionVector2 impact_direction_enu;
+        VehicleDamageZone damage_zone = VehicleDamageZone::None;
+        std::vector<simcore_host::VehicleDentPatch> dent_patches;
+        simcore_host::ImpactRecoveryPhase reported_phase = simcore_host::ImpactRecoveryPhase::Driving;
     };
     struct LaneNpcRuntime {
+        enum class AvoidancePhase : std::uint8_t {
+            None,
+            WaitingForStop,
+            Backing,
+            ReadyToPass,
+        };
         std::uint32_t entity_id = 0;
         double start_offset_m = 0.0;
+        std::uint32_t vehicle_profile_index = 0;
+        const char* vehicle_profile_name = "sedan";
+        double body_half_length_m = 2.2;
+        double body_half_width_m = 1.0;
+        double body_half_height_m = 0.75;
+        double mass_kg = 1500.0;
+        double yaw_inertia_kg_m2 = 2600.0;
+        double maximum_reaction_speed_mps = 30.0;
+        simcore_host::ImpactTumbleDimensions tumble_dimensions{
+            2.2, 1.0, 0.75, 1500.0, 0.35};
         simcore_host::NpcLaneFollower follower;
         std::optional<simcore_host::RuntimeEntityState> pending;
         std::optional<simcore_host::RuntimeEntityState> nominal_pending;
         RuntimeCollisionReaction reaction;
+        simcore_host::ImpactTumbleState tumble;
+        simcore_host::NpcHornPolicy horn;
+        std::vector<std::uint32_t> navigation_route;
+        std::uint32_t destination_lane_id = 0;
+        std::uint64_t destinations_selected = 0;
+        std::uint64_t reroutes = 0;
+        std::uint64_t lane_changes_completed = 0;
+        double navigation_cooldown_s = 0.0;
+        double obstruction_seconds = 0.0;
+        AvoidancePhase avoidance_phase = AvoidancePhase::None;
+        double avoidance_reverse_remaining_m = 0.0;
+        double avoidance_reverse_speed_mps = 0.0;
+        double avoidance_reverse_total_m = 0.0;
+        // Absolute travelled distance at which to wait, leaving steering room
+        // around a persistent crash while an adjacent traffic gap opens.
+        std::optional<double> avoidance_stop_distance_m;
+        std::string lane_change_wait_reason;
+        std::optional<simcore_host::NpcLaneChangePlan> lane_change;
+        bool lane_change_fault_reported = false;
+        std::vector<std::uint32_t> lane_change_route;
     };
     struct PedestrianRuntime {
         std::uint32_t entity_id = 0;
@@ -200,8 +315,10 @@ private:
         std::optional<simcore_host::RuntimeEntityState> pending;
         std::optional<simcore_host::RuntimeEntityState> nominal_pending;
         RuntimeCollisionReaction reaction;
+        simcore_host::PedestrianImpactState body;
     };
     std::vector<LaneNpcRuntime> lane_npcs_;
+    std::optional<simcore_host::NpcRoutePlanner> npc_route_planner_;
     std::vector<PedestrianRuntime> pedestrians_;
     std::unordered_set<std::string> seen_play_sessions_;
     enum class ClientPayloadKind : std::uint8_t {
@@ -231,6 +348,8 @@ private:
     std::string active_play_session_id_;
     std::string active_controller_source_id_;
     std::string active_connection_session_id_;
+    simcore_host::RuntimeVehicleClass active_vehicle_class_ =
+        simcore_host::RuntimeVehicleClass::Sedan;
     std::uint64_t active_connection_generation_ = 0;
     std::uint64_t lifecycle_highest_sequence_ = 0;
     std::uint64_t lifecycle_last_client_time_ns_ = 0;
@@ -240,6 +359,8 @@ private:
     std::uint32_t last_reported_overrun_count_ = 0;
     Clock::time_point last_overrun_log_time_ = Clock::time_point::min();
     VehicleInput last_logged_input_;
+    // Unlike last_logged_input_, this never drops sub-0.001 input changes.
+    VehicleInput applied_input_;
     Clock::time_point last_control_change_time_ = Clock::time_point::min();
     std::uint64_t control_change_revision_ = 0;
     std::uint64_t reported_control_change_revision_ = 0;

@@ -3,6 +3,7 @@
 #include "Engine/Canvas.h"
 #include "Engine/Engine.h"
 #include "Engine/Font.h"
+#include "ExternalVehiclePawn.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 
@@ -65,10 +66,14 @@ SimCoreInstrumentCluster::FDisplayState SimCoreInstrumentCluster::BuildDisplaySt
 	const SimCoreProtocol::FVehicleState& State,
 	const double StateAgeSeconds,
 	const double StaleTimeoutSeconds,
-	const bool bSideBrakeRequested)
+	const bool bSideBrakeRequested,
+	const SimCoreProtocol::ETurnIndicator ManualIndicator,
+	const bool bHazardLightsRequested)
 {
 	FDisplayState Display;
 	Display.bSideBrakeRequested = bSideBrakeRequested;
+	Display.ManualIndicator = ManualIndicator;
+	Display.bHazardLightsRequested = bHazardLightsRequested;
 
 	const bool bAgeValid = FMath::IsFinite(StateAgeSeconds)
 		&& FMath::IsFinite(StaleTimeoutSeconds)
@@ -127,6 +132,9 @@ void ASimCoreInstrumentClusterHud::DrawHUD()
 	float StaleTimeoutSeconds = 0.1f;
 	bool bHasState = false;
 	bool bSideBrakeRequested = false;
+	SimCoreProtocol::ETurnIndicator ManualIndicator =
+		SimCoreProtocol::ETurnIndicator::Off;
+	bool bHazardLightsRequested = false;
 
 	const APlayerController* Controller = GetOwningPlayerController();
 	const APawn* Pawn = Controller != nullptr ? Controller->GetPawn() : nullptr;
@@ -140,6 +148,11 @@ void ASimCoreInstrumentClusterHud::DrawHUD()
 		StaleTimeoutSeconds = Client->HealthStateStaleTimeoutSeconds;
 		bSideBrakeRequested = Client->IsSideBrakeRequested();
 	}
+	if (const AExternalVehiclePawn* Vehicle = Cast<AExternalVehiclePawn>(Pawn))
+	{
+		ManualIndicator = Vehicle->GetManualIndicator();
+		bHazardLightsRequested = Vehicle->AreHazardLightsEnabled();
+	}
 
 	DrawCluster(SimCoreInstrumentCluster::BuildDisplayState(
 		ConnectionState,
@@ -147,7 +160,9 @@ void ASimCoreInstrumentClusterHud::DrawHUD()
 		State,
 		StateAgeSeconds,
 		StaleTimeoutSeconds,
-		bSideBrakeRequested));
+		bSideBrakeRequested,
+		ManualIndicator,
+		bHazardLightsRequested));
 }
 
 void ASimCoreInstrumentClusterHud::DrawCluster(const SimCoreInstrumentCluster::FDisplayState& Display)
@@ -164,6 +179,7 @@ void ASimCoreInstrumentClusterHud::DrawCluster(const SimCoreInstrumentCluster::F
 	const FLinearColor Muted(0.36f, 0.48f, 0.58f, 1.0f);
 	const FLinearColor Cyan(0.08f, 0.76f, 1.0f, 1.0f);
 	const FLinearColor Amber(1.0f, 0.58f, 0.08f, 1.0f);
+	const FLinearColor HazardRed(1.0f, 0.16f, 0.08f, 1.0f);
 
 	DrawRect(Panel, X, Y, Width, Height);
 	DrawRect(PanelEdge, X, Y, Width, 2.0f * Scale);
@@ -183,6 +199,26 @@ void ASimCoreInstrumentClusterHud::DrawCluster(const SimCoreInstrumentCluster::F
 	DrawRect(FLinearColor(Display.StatusColor.R, Display.StatusColor.G, Display.StatusColor.B, 0.15f),
 		CenterX - StatusWidth * 0.5f, Y + 10.0f * Scale, StatusWidth, 22.0f * Scale);
 	DrawCenteredText(Display.StatusText, Display.StatusColor, CenterX, Y + 12.0f * Scale, Small, 0.82f * Scale);
+	const bool bLeftSelected = Display.bHazardLightsRequested
+		|| Display.ManualIndicator == SimCoreProtocol::ETurnIndicator::Left;
+	const bool bRightSelected = Display.bHazardLightsRequested
+		|| Display.ManualIndicator == SimCoreProtocol::ETurnIndicator::Right;
+	const float IndicatorY = Y + 14.0f * Scale;
+	const float LeftIndicatorX = CenterX - 92.0f * Scale;
+	const float RightIndicatorX = CenterX + 92.0f * Scale;
+	DrawRect(FLinearColor(Amber.R, Amber.G, Amber.B, bLeftSelected ? 0.24f : 0.04f),
+		LeftIndicatorX - 25.0f * Scale, Y + 9.0f * Scale, 50.0f * Scale, 25.0f * Scale);
+	DrawRect(FLinearColor(Amber.R, Amber.G, Amber.B, bRightSelected ? 0.24f : 0.04f),
+		RightIndicatorX - 25.0f * Scale, Y + 9.0f * Scale, 50.0f * Scale, 25.0f * Scale);
+	DrawCenteredText(TEXT("< Q"), bLeftSelected ? Amber : Muted,
+		LeftIndicatorX, IndicatorY, Small, 0.82f * Scale);
+	DrawCenteredText(TEXT("E >"), bRightSelected ? Amber : Muted,
+		RightIndicatorX, IndicatorY, Small, 0.82f * Scale);
+	if (Display.bHazardLightsRequested)
+	{
+		DrawCenteredText(TEXT("X HAZARD"), HazardRed, CenterX,
+			Y + 34.0f * Scale, Small, 0.70f * Scale);
+	}
 
 	// Left: an RPM sweep with a thin redline segment. The raw number remains authoritative.
 	const FVector2D TachCenter(X + 170.0f * Scale, Y + 133.0f * Scale);
@@ -222,7 +258,8 @@ void ASimCoreInstrumentClusterHud::DrawCluster(const SimCoreInstrumentCluster::F
 		FuelX + 43.0f * Scale, Y + 166.0f * Scale, 114.0f * Scale, 24.0f * Scale);
 	DrawCenteredText(Display.bSideBrakeRequested ? TEXT("SIDE BRAKE") : TEXT("SIDE BRAKE OFF"),
 		BrakeColor, FuelX + 100.0f * Scale, Y + 170.0f * Scale, Small, 0.72f * Scale);
-	DrawCenteredText(TEXT("SIMCORE"), Muted, CenterX, Y + Height - 22.0f * Scale, Small, 0.60f * Scale);
+	DrawCenteredText(TEXT("Q LEFT   X HAZARD   E RIGHT"), Muted,
+		CenterX, Y + Height - 22.0f * Scale, Small, 0.60f * Scale);
 }
 
 void ASimCoreInstrumentClusterHud::DrawCenteredText(

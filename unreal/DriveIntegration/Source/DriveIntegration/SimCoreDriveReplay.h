@@ -10,7 +10,8 @@ class ASimCoreNpcPresentationActor;
 namespace SimCoreDriveReplay
 {
 	inline constexpr int32 MaxFrames = 36000;
-	inline constexpr TCHAR FormatName[] = TEXT("simcore-drive-replay-v1");
+	inline constexpr TCHAR FormatName[] = TEXT("simcore-drive-replay-v2");
+	inline constexpr TCHAR LegacyFormatName[] = TEXT("simcore-drive-replay-v1");
 
 	struct FFrame
 	{
@@ -25,6 +26,8 @@ namespace SimCoreDriveReplay
 		float CollisionHalfLengthMeters = 0.0f;
 		float CollisionHalfWidthMeters = 0.0f;
 		float CollisionHalfHeightMeters = 0.0f;
+		SimCoreProtocol::ERuntimeVehicleClass RuntimeVehicleClass =
+			SimCoreProtocol::ERuntimeVehicleClass::Sedan;
 	};
 
 	struct FTrack

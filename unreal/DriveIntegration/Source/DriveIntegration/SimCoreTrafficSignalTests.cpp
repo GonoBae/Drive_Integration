@@ -3,6 +3,7 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "SimCoreClientComponent.h"
+#include "IWebSocket.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/World.h"
 #include "Materials/MaterialInterface.h"
@@ -14,6 +15,44 @@ namespace
 using namespace SimCoreProtocol;
 const FString TrafficChecksum = TEXT("fnv1a64:0123456789abcdef");
 const FString MapChecksum = TEXT("fnv1a64:fedcba9876543210");
+
+class FFragmentTestSocket final : public IWebSocket
+{
+public:
+	void Connect() override { bConnected = true; }
+	void Close(int32 Code, const FString& Reason) override { bConnected = false; }
+	bool IsConnected() override { return bConnected; }
+	void Send(const FString& Data) override {}
+	void Send(const void* Data, SIZE_T Size, bool bIsBinary) override {}
+	void SetTextMessageMemoryLimit(uint64 Limit) override {}
+	FWebSocketConnectedEvent& OnConnected() override { return Connected; }
+	FWebSocketConnectionErrorEvent& OnConnectionError() override { return ConnectionError; }
+	FWebSocketClosedEvent& OnClosed() override { return Closed; }
+	FWebSocketMessageEvent& OnMessage() override { return MessageEvent; }
+	FWebSocketBinaryMessageEvent& OnBinaryMessage() override { return Binary; }
+	FWebSocketRawMessageEvent& OnRawMessage() override { return Raw; }
+	FWebSocketMessageSentEvent& OnMessageSent() override { return Sent; }
+	void DeliverFrame(const void* Data, SIZE_T Size, bool bFinal)
+	{
+		// Each individual frame can have zero raw bytes remaining even while
+		// the complete WebSocket message continues in subsequent frames.
+		Raw.Broadcast(Data, Size, 0);
+		Binary.Broadcast(Data, Size, bFinal);
+	}
+	void DeliverClosed() { bConnected = false; Closed.Broadcast(1000, TEXT("test close"), true); }
+	bool bConnected = true;
+private:
+	DECLARE_DERIVED_EVENT(FFragmentTestSocket, IWebSocket::FWebSocketBinaryMessageEvent, FBinaryEvent);
+	DECLARE_DERIVED_EVENT(FFragmentTestSocket, IWebSocket::FWebSocketRawMessageEvent, FRawEvent);
+	DECLARE_DERIVED_EVENT(FFragmentTestSocket, IWebSocket::FWebSocketClosedEvent, FClosedEvent);
+	FBinaryEvent Binary;
+	FRawEvent Raw;
+	FClosedEvent Closed;
+	FWebSocketConnectedEvent Connected;
+	FWebSocketConnectionErrorEvent ConnectionError;
+	FWebSocketMessageEvent MessageEvent;
+	FWebSocketMessageSentEvent Sent;
+};
 
 void Varint(TArray<uint8>& Out, uint64 Value)
 {
@@ -60,7 +99,35 @@ TArray<uint8> SignalBytes(const FTrafficSignalState& State)
 	Message(Out, 4, Position); Number(Out, 5, State.HeadingDegrees); Number(Out, 6, State.RemainingSeconds);
 	Integer(Out, 7, State.ControllerId);
 	Integer(Out, 8, static_cast<uint8>(State.Kind));
+	Integer(Out, 9, State.bOutOfService ? 1 : 0);
 	return Out;
+}
+
+TArray<uint8> FragmentedDamageWorldExtra()
+{
+	TArray<uint8> World;
+	const auto Vector = [](TArray<uint8>& Out, uint32 Field, const FVector3d& Value)
+	{
+		TArray<uint8> Bytes; Number(Bytes, 1, Value.X); Number(Bytes, 2, Value.Y); Number(Bytes, 3, Value.Z);
+		Message(Out, Field, Bytes);
+	};
+	for (int32 Index = 0; Index <= 40; ++Index)
+	{
+		const bool bPole = Index == 40;
+		TArray<uint8> Structure;
+		Text(Structure, 1, bPole ? TEXT("signal-pole-1") : FString::Printf(TEXT("building-fragment-%d"), Index));
+		Integer(Structure, 2, static_cast<uint8>(bPole ? EStructureKind::SignalPole : EStructureKind::Building));
+		if (bPole) Integer(Structure, 3, 1);
+		Number(Structure, 4, bPole ? 100.0f : 25.0f); Integer(Structure, 5, Index + 1);
+		Vector(Structure, 6, FVector3d(10, 20, 1)); Vector(Structure, 7, FVector3d(-1, 0, 0));
+		Vector(Structure, 8, FVector3d(12, 20, .24));
+		if (bPole)
+		{
+			Number(Structure, 10, 1.0f); Vector(Structure, 11, FVector3d(1, 0, 0)); Integer(Structure, 12, 1);
+		}
+		Message(World, 5, Structure);
+	}
+	return World;
 }
 TArray<uint8> WorldEnvelope(const TArray<TArray<uint8>>& Signals,
 	const FString& Checksum = TrafficChecksum, bool bSignalsFirst = false,
@@ -138,6 +205,18 @@ bool FSimCoreTrafficSignalProtocolTest::RunTest(const FString& Parameters)
 		ParseWorldStateEnvelope(WorldEnvelope({SignalBytes(Pedestrian)}), 1, State, Error)
 		&& State.TrafficSignals.Num() == 1
 		&& State.TrafficSignals[0].Kind == ETrafficSignalKind::Pedestrian);
+	auto PedestrianOtherGroup = Pedestrian;
+	PedestrianOtherGroup.SignalId = 102; PedestrianOtherGroup.GroupId = 2;
+	Ok &= TestTrue(TEXT("exclusive all-WALK interval permits separate pedestrian groups"),
+		ParseWorldStateEnvelope(WorldEnvelope({SignalBytes(Pedestrian), SignalBytes(PedestrianOtherGroup)}), 1, State, Error));
+	for (bool bVehicleFirst : {false, true})
+	{
+		TArray<TArray<uint8>> Mixed = {SignalBytes(Pedestrian), SignalBytes(PedestrianOtherGroup)};
+		if (bVehicleFirst) Mixed.Insert(SignalBytes(Signal(200)), 0);
+		else Mixed.Add(SignalBytes(Signal(200)));
+		Ok &= TestFalse(TEXT("vehicle cannot enter a multi-group all-WALK interval, independent of wire order"),
+			ParseWorldStateEnvelope(WorldEnvelope(Mixed),1,State,Error));
+	}
 	Ok &= TestTrue(TEXT("Different controllers may be simultaneously permissive"),
 		ParseWorldStateEnvelope(WorldEnvelope({SignalBytes(Signal(1, 1)),
 			SignalBytes(Signal(2, 2, ETrafficSignalAspect::Green, 2))}), 1, State, Error)
@@ -355,12 +434,12 @@ bool FSimCoreTrafficSignalLifecycleTest::RunTest(const FString& Parameters)
 	Client->ConnectionState = ESimCoreConnectionState::Connected;
 	Client->SocketGeneration = 7; Client->bProtocolHandshakeComplete = true; Client->bMapHandshakeComplete = true;
 	Client->PlaySessionId = TEXT("traffic-test-play"); Client->MapPackageChecksum = MapChecksum;
-	Client->ApplyRawMessage(7, WorldEnvelope({SignalBytes(Signal())}), 0, false);
+	Client->ApplyBinaryMessage(7, WorldEnvelope({SignalBytes(Signal())}), true, false);
 	Ok &= TestTrue(TEXT("only accepted envelope installs atomic traffic snapshot"), Client->bHasState && Client->bTrafficSnapshotAccepted
 		&& Client->LatestState.TrafficSignals.Num() == 1 && Client->LatestState.TrafficNetworkChecksum == TrafficChecksum);
 	const double Arrival = Client->LatestStateReceiveTimeSeconds;
-	Client->ApplyRawMessage(6, WorldEnvelope({SignalBytes(Signal(1, 1, ETrafficSignalAspect::Red))}, TrafficChecksum, false, {}, 21), 0, false);
-	Client->ApplyRawMessage(7, WorldEnvelope({SignalBytes(Signal(1, 1, ETrafficSignalAspect::Red))}, TrafficChecksum, false, {}, 19), 0, false);
+	Client->ApplyBinaryMessage(6, WorldEnvelope({SignalBytes(Signal(1, 1, ETrafficSignalAspect::Red))}, TrafficChecksum, false, {}, 21), true, false);
+	Client->ApplyBinaryMessage(7, WorldEnvelope({SignalBytes(Signal(1, 1, ETrafficSignalAspect::Red))}, TrafficChecksum, false, {}, 19), true, false);
 	Ok &= TestTrue(TEXT("old generation/sequence cannot replace or refresh accepted signals"), Client->LatestState.Sequence == 20
 		&& Client->LatestStateReceiveTimeSeconds == Arrival && Client->LatestState.TrafficSignals[0].Aspect == ETrafficSignalAspect::Green);
 	FActorSpawnParameters Spawn; Spawn.ObjectFlags |= RF_Transient;
@@ -369,16 +448,16 @@ bool FSimCoreTrafficSignalLifecycleTest::RunTest(const FString& Parameters)
 	Client->TrafficSignalActors.Add(1, Head);
 	Head->ApplyAuthoritativeSignal(Signal(), true, true, 0.0);
 	AddExpectedMessage(TEXT("Ignored SimCore packet:"), ELogVerbosity::Warning);
-	Client->ApplyRawMessage(7, WorldEnvelope({SignalBytes(Signal()), SignalBytes(Signal())}, TrafficChecksum, false, {}, 21), 0, false);
+	Client->ApplyBinaryMessage(7, WorldEnvelope({SignalBytes(Signal()), SignalBytes(Signal())}, TrafficChecksum, false, {}, 21), true, false);
 	Ok &= TestTrue(TEXT("malformed packet revokes green immediately without replacing pose"), !Client->bTrafficSnapshotAccepted
 		&& Head->GetDisplayState().bRed && Client->LatestState.Sequence == 20);
-	Client->ApplyRawMessage(7, WorldEnvelope({SignalBytes(Signal())}, TrafficChecksum, false, {}, 22), 0, false);
+	Client->ApplyBinaryMessage(7, WorldEnvelope({SignalBytes(Signal())}, TrafficChecksum, false, {}, 22), true, false);
 	Ok &= TestTrue(TEXT("next accepted packet can restore eligibility"), Client->bTrafficSnapshotAccepted && Client->LatestState.Sequence == 22);
-	Client->ApplyRawMessage(7, WorldEnvelope({SignalBytes(Signal())}, TrafficChecksum, false, {}, 23, TEXT("old-play")), 0, false);
+	Client->ApplyBinaryMessage(7, WorldEnvelope({SignalBytes(Signal())}, TrafficChecksum, false, {}, 23, TEXT("old-play")), true, false);
 	Ok &= TestTrue(TEXT("wrong play cannot refresh or restore permissive state"), !Client->bTrafficSnapshotAccepted && Client->LatestState.Sequence == 22 && Head->GetDisplayState().bRed);
 	auto MovedSignal = Signal(); MovedSignal.PositionEnu.X += 10.0;
 	const FString NewNetwork = TEXT("fnv1a64:aaaaaaaaaaaaaaaa");
-	Client->ApplyRawMessage(7, WorldEnvelope({SignalBytes(MovedSignal)}, NewNetwork, false, {}, 24), 0, false);
+	Client->ApplyBinaryMessage(7, WorldEnvelope({SignalBytes(MovedSignal)}, NewNetwork, false, {}, 24), true, false);
 	Ok &= TestTrue(TEXT("accepted network replacement resynchronizes reused IDs and discards old geometry"),
 		Head->IsActorBeingDestroyed() && Client->PresentedTrafficNetworkChecksum == NewNetwork
 		&& Client->LatestState.TrafficSignals[0].PositionEnu.X == MovedSignal.PositionEnu.X);
@@ -387,8 +466,8 @@ bool FSimCoreTrafficSignalLifecycleTest::RunTest(const FString& Parameters)
 	Client->TrafficSignalActors.Add(1, Replacement);
 	Replacement->ApplyAuthoritativeSignal(MovedSignal, true, true, 0.0);
 	AddExpectedMessage(TEXT("MapPackage mismatch;"), ELogVerbosity::Error);
-	Client->ApplyRawMessage(7, WorldEnvelope({SignalBytes(Signal())}, NewNetwork, false, {}, 25,
-		TEXT("traffic-test-play"), TrafficChecksum), 0, false);
+	Client->ApplyBinaryMessage(7, WorldEnvelope({SignalBytes(Signal())}, NewNetwork, false, {}, 25,
+		TEXT("traffic-test-play"), TrafficChecksum), true, false);
 	Ok &= TestTrue(TEXT("map mismatch revokes all signals and destroys transient heads"),
 		!Client->bHasState && !Client->bTrafficSnapshotAccepted && Client->TrafficSignalActors.IsEmpty()
 		&& Replacement->IsActorBeingDestroyed());
@@ -398,9 +477,114 @@ bool FSimCoreTrafficSignalLifecycleTest::RunTest(const FString& Parameters)
 		&& Client->PresentedTrafficNetworkChecksum.IsEmpty() && Head->IsActorBeingDestroyed());
 	Client->ConnectionState = ESimCoreConnectionState::Connected;
 	Client->bProtocolHandshakeComplete = true; Client->bMapHandshakeComplete = true;
-	Client->ApplyRawMessage(Client->SocketGeneration, WorldEnvelope({}, TEXT(""), false, {}, 26), 0, false);
+	Client->ApplyBinaryMessage(Client->SocketGeneration, WorldEnvelope({}, TEXT(""), false, {}, 26), true, false);
 	Ok &= TestTrue(TEXT("old server / empty newer snapshot leaves no heads"), Client->LatestState.TrafficSignals.IsEmpty() && Client->TrafficSignalActors.IsEmpty());
 	Client->Disconnect();
+	return Ok;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSimCoreBinaryMessageFramingTest,
+	"DriveIntegration.TrafficSignals.BinaryMessageFragmentAssembly",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FSimCoreBinaryMessageFramingTest::RunTest(const FString& Parameters)
+{
+	FTrafficQaWorld Scene;
+	if (!TestNotNull(TEXT("fragment QA world"), Scene.World)) return false;
+	auto* Owner = Scene.World->SpawnActor<AActor>();
+	if (!Owner) return false;
+	auto* Client = NewObject<USimCoreClientComponent>(Owner);
+	const auto Socket = MakeShared<FFragmentTestSocket>();
+	Client->Socket = Socket;
+	Client->ConnectionState = ESimCoreConnectionState::Connected;
+	Client->SocketGeneration = 7; Client->bProtocolHandshakeComplete = true; Client->bMapHandshakeComplete = true;
+	Client->PlaySessionId = TEXT("traffic-test-play"); Client->MapPackageChecksum = MapChecksum;
+	Client->BindSocketDelegates(7);
+	bool Ok = TestTrue(TEXT("bind true binary FIN only, not per-frame raw completion"),
+		Socket->OnBinaryMessage().IsBound() && !Socket->OnRawMessage().IsBound());
+	auto FallenSignal = Signal(1, 1, ETrafficSignalAspect::Red);
+	FallenSignal.bOutOfService = true; FallenSignal.RemainingSeconds = 0.0f;
+	const auto Packet = WorldEnvelope({SignalBytes(FallenSignal)}, TrafficChecksum, false, FragmentedDamageWorldExtra());
+	if (!TestTrue(TEXT("valid signal/structure damage packet crosses a 4KiB frame"), Packet.Num() > 4096)) return false;
+	Socket->DeliverFrame(Packet.GetData(), 4096, false);
+	Ok &= TestTrue(TEXT("frame end is not message end: partial protobuf is never parsed"),
+		!Client->bHasState && Client->IncomingMessage.Num() == 4096
+		&& Client->ConnectionState == ESimCoreConnectionState::Connected);
+	Socket->DeliverFrame(Packet.GetData() + 4096, Packet.Num() - 4096, true);
+	Ok &= TestTrue(TEXT("true FIN accepts one intact damaged signal/structure snapshot"),
+		Client->bHasState && Client->LatestState.Sequence == 20 && Client->LatestState.Structures.Num() == 41
+		&& Client->LatestState.TrafficSignals.Num() == 1 && Client->LatestState.TrafficSignals[0].bOutOfService
+		&& Client->IncomingMessage.IsEmpty() && Client->ConnectionState == ESimCoreConnectionState::Connected);
+	const auto Next = WorldEnvelope({SignalBytes(Signal())}, TrafficChecksum, false, {}, 21);
+	Socket->DeliverFrame(Next.GetData(), Next.Num(), true);
+	Ok &= TestTrue(TEXT("consecutive complete messages cannot concatenate or retain prior damage"),
+		Client->LatestState.Sequence == 21 && Client->LatestState.Structures.IsEmpty()
+		&& !Client->LatestState.TrafficSignals[0].bOutOfService && Client->IncomingMessage.IsEmpty());
+	Client->Disconnect();
+	Ok &= TestFalse(TEXT("shutdown removes the binary delegate"), Socket->OnBinaryMessage().IsBound());
+	return Ok;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSimCoreBinaryMessageBoundarySafetyTest,
+	"DriveIntegration.TrafficSignals.BinaryMessageBoundarySafety",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FSimCoreBinaryMessageBoundarySafetyTest::RunTest(const FString& Parameters)
+{
+	FTrafficQaWorld Scene;
+	if (!TestNotNull(TEXT("boundary QA world"), Scene.World)) return false;
+	auto* Owner = Scene.World->SpawnActor<AActor>();
+	if (!Owner) return false;
+	auto* Client = NewObject<USimCoreClientComponent>(Owner);
+	const auto Socket = MakeShared<FFragmentTestSocket>();
+	const auto Arm = [&]
+	{
+		Client->Socket = Socket; Socket->bConnected = true;
+		Client->ConnectionState = ESimCoreConnectionState::Connected;
+		Client->bProtocolHandshakeComplete = true; Client->bMapHandshakeComplete = true;
+		Client->PlaySessionId = TEXT("traffic-test-play"); Client->MapPackageChecksum = MapChecksum;
+	};
+	Client->SocketGeneration = 7; Arm(); Client->BindSocketDelegates(7);
+	Client->bAutoReconnectEnabled = true;
+	const auto Packet = WorldEnvelope({SignalBytes(Signal())});
+	Socket->DeliverFrame(Packet.GetData(), 12, false);
+	// AddExpectedMessage interprets Contains patterns as regex by default; an
+	// unescaped '(' cannot match this real callback warning. Match literal text.
+	AddExpectedMessagePlain(TEXT("Connection closed (1000, clean=true): test close"), ELogVerbosity::Warning);
+	Socket->DeliverClosed();
+	bool Ok = TestTrue(TEXT("remote close immediately discards partial message"),
+		Client->IncomingMessage.IsEmpty() && !Client->bDiscardIncomingMessage);
+	Ok &= TestTrue(TEXT("real close callback transitions the disconnected transport to reconnect"),
+		!Socket->IsConnected() && Client->ConnectionState == ESimCoreConnectionState::WaitingToReconnect);
+	Client->UnbindSocketDelegates();
+	++Client->SocketGeneration; Client->ResetConnectionSession(); Arm();
+	Client->BindSocketDelegates(Client->SocketGeneration);
+	Client->ApplyBinaryMessage(7, Packet, true, false);
+	Ok &= TestTrue(TEXT("delayed old-generation final frame cannot contaminate reconnect"),
+		!Client->bHasState && Client->IncomingMessage.IsEmpty());
+	Socket->DeliverFrame(Packet.GetData(), Packet.Num(), true);
+	Ok &= TestTrue(TEXT("fresh generation starts at a clean complete message"), Client->LatestState.Sequence == 20);
+	TArray<uint8> Large;
+	Large.SetNumZeroed(Client->MaxIncomingMessageBytes);
+	Socket->DeliverFrame(Large.GetData(), Large.Num(), false);
+	Ok &= TestEqual(TEXT("partial message can reach, but cannot exceed, the existing memory cap"),
+		Client->IncomingMessage.Num(), Client->MaxIncomingMessageBytes);
+	const uint8 Extra = 1;
+	AddExpectedMessage(TEXT("Rejected oversized SimCore message"), ELogVerbosity::Error);
+	Socket->DeliverFrame(&Extra, 1, false);
+	Ok &= TestTrue(TEXT("overflow drops accumulated bytes and discards the rest of that message"),
+		Client->IncomingMessage.IsEmpty() && Client->bDiscardIncomingMessage && Client->LatestState.Sequence == 20);
+	Socket->DeliverFrame(Packet.GetData(), Packet.Num(), false);
+	Ok &= TestTrue(TEXT("non-final fragment cannot end oversized-message discard"), Client->bDiscardIncomingMessage);
+	Socket->DeliverFrame(nullptr, 0, true);
+	Ok &= TestFalse(TEXT("true FIN completes oversized-message discard"), Client->bDiscardIncomingMessage);
+	const auto Next = WorldEnvelope({SignalBytes(Signal())}, TrafficChecksum, false, {}, 21);
+	Socket->DeliverFrame(Next.GetData(), Next.Num(), true);
+	Ok &= TestTrue(TEXT("next independent message remains valid after overflow"), Client->LatestState.Sequence == 21);
+	Socket->DeliverFrame(Packet.GetData(), 12, false);
+	Client->Disconnect();
+	Ok &= TestTrue(TEXT("explicit shutdown clears partial bytes and discard state"),
+		Client->IncomingMessage.IsEmpty() && !Client->bDiscardIncomingMessage && !Socket->OnBinaryMessage().IsBound());
 	return Ok;
 }
 

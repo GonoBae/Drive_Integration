@@ -22,6 +22,19 @@ void ApplyOnGameThread(CallbackType&& Callback)
 
 	AsyncTask(ENamedThreads::GameThread, Forward<CallbackType>(Callback));
 }
+
+const TCHAR* VehicleClassText(
+	const SimCoreProtocol::ERuntimeVehicleClass VehicleClass)
+{
+	switch (VehicleClass)
+	{
+	case SimCoreProtocol::ERuntimeVehicleClass::Sedan: return TEXT("SEDAN");
+	case SimCoreProtocol::ERuntimeVehicleClass::Compact: return TEXT("COMPACT");
+	case SimCoreProtocol::ERuntimeVehicleClass::Truck: return TEXT("TRUCK");
+	case SimCoreProtocol::ERuntimeVehicleClass::Motorcycle: return TEXT("MOTORCYCLE");
+	default: return TEXT("WAIT");
+	}
+}
 }
 
 USimCoreClientComponent::USimCoreClientComponent()
@@ -37,10 +50,12 @@ void USimCoreClientComponent::BeginPlay()
 	Super::BeginPlay();
 	PlaySessionId = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
 	Connect();
+	PerformanceCapture.StartFromCommandLine(GetWorld(), MapPackageChecksum);
 }
 
 void USimCoreClientComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	PerformanceCapture.Stop();
 	if (GEngine != nullptr)
 	{
 		GEngine->RemoveOnScreenDebugMessage(DebugHudMessageKey());
@@ -59,6 +74,7 @@ void USimCoreClientComponent::TickComponent(
 	TickControlTransmission(DeltaTime);
 	TickRuntimeProxyActors(DeltaTime);
 	TickTrafficSignals();
+	TickStructureDamage(DeltaTime);
 	TickTelemetry(DeltaTime);
 	TickDebugHud(DeltaTime);
 }
@@ -181,6 +197,24 @@ void USimCoreClientComponent::StartConnectionAttempt()
 
 	BindSocketDelegates(Generation);
 	Socket->Connect();
+}
+
+bool USimCoreClientComponent::SelectVehicleClass(
+	const SimCoreProtocol::ERuntimeVehicleClass VehicleClass)
+{
+	if (VehicleClass < SimCoreProtocol::ERuntimeVehicleClass::Sedan
+		|| VehicleClass > SimCoreProtocol::ERuntimeVehicleClass::Motorcycle
+		|| VehicleClass == SelectedVehicleClass)
+	{
+		return false;
+	}
+
+	SelectedVehicleClass = VehicleClass;
+	PlaySessionId = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
+	PendingControl = {};
+	bAutoReconnectEnabled = true;
+	StartConnectionAttempt();
+	return true;
 }
 
 FString USimCoreClientComponent::GetConnectionStatusText() const
@@ -392,9 +426,13 @@ FString USimCoreClientComponent::BuildDebugStatusText(
 			FMath::RadiansToDegrees(LatestState.SteeringAngleRad),
 			FMath::RadiansToDegrees(LatestState.YawRateRad))
 		: TEXT("speed=-- km/h (-- m/s) gear=-- steering=-- deg yaw=-- deg/s");
+	const SimCoreProtocol::ERuntimeVehicleClass DisplayClass =
+		bVehicleStateDisplayable
+			&& LatestState.RuntimeVehicleClass != SimCoreProtocol::ERuntimeVehicleClass::Unspecified
+		? LatestState.RuntimeVehicleClass : SelectedVehicleClass;
 	return FString::Printf(
 		TEXT("SimCore %s | hello=%s map=%s controlTx=%s\n")
-		TEXT("vehicle %s\n")
+		TEXT("vehicle %s | class=%s [1 sedan / 2 compact / 3 truck / 4 motorcycle]\n")
 		TEXT("serverHealth=%s%s | healthLocal=%.1f ms commandAge@server=%s overruns=%s\n")
 		TEXT("reason: %s\n")
 		TEXT("network state rate=%.1f Hz seq=%llu local=%.1f ms server=%.1f ms gap=%.1f ms missing=%llu old=%u\n")
@@ -404,6 +442,7 @@ FString USimCoreClientComponent::BuildDebugStatusText(
 		bMapHandshakeComplete ? TEXT("ok") : TEXT("wait"),
 		IsConnected() && bProtocolHandshakeComplete && bMapHandshakeComplete ? TEXT("ready") : TEXT("blocked"),
 		*VehicleStateText,
+		VehicleClassText(DisplayClass),
 		*HealthDisplay.Status,
 		GlobalEstopHealthCache.HasEstopHealth() ? TEXT(" (global)") : TEXT(""),
 		HealthLocalAgeMs,
@@ -442,6 +481,7 @@ void USimCoreClientComponent::ResetReceivedState()
 {
 	DestroyRuntimeProxyActors();
 	DestroyTrafficSignalActors();
+	DestroyStructureDamageActors();
 	bTrafficSnapshotAccepted = false;
 	GlobalEstopHealthCache.Reset();
 	LatestState = {};
@@ -477,6 +517,8 @@ void USimCoreClientComponent::ResetTelemetry()
 
 void USimCoreClientComponent::ScheduleReconnect()
 {
+	IncomingMessage.Reset();
+	bDiscardIncomingMessage = false;
 	DestroyRuntimeProxyActors();
 	GlobalEstopHealthCache.Reset();
 	if (!bAutoReconnectEnabled)
@@ -549,8 +591,10 @@ void USimCoreClientComponent::BindSocketDelegates(uint64 Generation)
 			};
 			ApplyOnGameThread(MoveTemp(Apply));
 		});
-	RawMessageDelegateHandle = Socket->OnRawMessage().AddLambda(
-		[WeakThis, Generation](const void* Data, SIZE_T Size, SIZE_T BytesRemaining)
+	// OnRawMessage's BytesRemaining counts bytes in the current WS frame, not
+	// the complete message. Only the binary event carries the true message FIN.
+	BinaryMessageDelegateHandle = Socket->OnBinaryMessage().AddLambda(
+		[WeakThis, Generation](const void* Data, SIZE_T Size, bool bIsLastFragment)
 		{
 			const bool bFragmentTooLarge = Size > static_cast<SIZE_T>(MAX_int32)
 				|| Size > static_cast<SIZE_T>(MaxIncomingMessageBytes)
@@ -565,15 +609,15 @@ void USimCoreClientComponent::BindSocketDelegates(uint64 Generation)
 				WeakThis,
 				Generation,
 				Fragment = MoveTemp(Fragment),
-				BytesRemaining,
+				bIsLastFragment,
 				bFragmentTooLarge]() mutable
 			{
 				if (USimCoreClientComponent* Self = WeakThis.Get())
 				{
-					Self->ApplyRawMessage(
+					Self->ApplyBinaryMessage(
 						Generation,
 						MoveTemp(Fragment),
-						BytesRemaining,
+						bIsLastFragment,
 						bFragmentTooLarge);
 				}
 			};
@@ -597,16 +641,16 @@ void USimCoreClientComponent::UnbindSocketDelegates()
 		{
 			Socket->OnClosed().Remove(ClosedDelegateHandle);
 		}
-		if (RawMessageDelegateHandle.IsValid())
+		if (BinaryMessageDelegateHandle.IsValid())
 		{
-			Socket->OnRawMessage().Remove(RawMessageDelegateHandle);
+			Socket->OnBinaryMessage().Remove(BinaryMessageDelegateHandle);
 		}
 	}
 
 	ConnectedDelegateHandle = FDelegateHandle();
 	ConnectionErrorDelegateHandle = FDelegateHandle();
 	ClosedDelegateHandle = FDelegateHandle();
-	RawMessageDelegateHandle = FDelegateHandle();
+	BinaryMessageDelegateHandle = FDelegateHandle();
 }
 
 void USimCoreClientComponent::ReleaseSocket(
@@ -687,6 +731,7 @@ void USimCoreClientComponent::SendSimulationReset()
 	const TArray<uint8> Message = SimCoreProtocol::SerializeSimulationResetEnvelope(
 		PlaySessionId,
 		ClientTimeNs,
+		SelectedVehicleClass,
 		OutgoingSequence++,
 		SourceId,
 		SessionId,
@@ -695,9 +740,10 @@ void USimCoreClientComponent::SendSimulationReset()
 	UE_LOG(
 		LogSimCoreClient,
 		Log,
-		TEXT("Requested simulation reset for play_session=%s connection_session=%s"),
+		TEXT("Requested simulation reset for play_session=%s connection_session=%s vehicle=%d"),
 		*PlaySessionId,
-		*SessionId);
+		*SessionId,
+		static_cast<int32>(SelectedVehicleClass));
 }
 
 void USimCoreClientComponent::SendHello()
@@ -707,6 +753,7 @@ void USimCoreClientComponent::SendHello()
 		TEXT("world-state.v2"),
 		TEXT("control.v2"),
 		TEXT("simulation-reset.v1"),
+		TEXT("player-vehicle-selection.v1"),
 		TEXT("map-package-checksum.v1"),
 		TEXT("ground-heightfield.v1"),
 		TEXT("runtime-entities.v1"),
@@ -755,6 +802,7 @@ bool USimCoreClientComponent::ValidateServerHello(
 		TEXT("world-state.v2"),
 		TEXT("control.v2"),
 		TEXT("simulation-reset.v1"),
+		TEXT("player-vehicle-selection.v1"),
 		TEXT("map-package-checksum.v1"),
 	};
 	for (const TCHAR* Required : RequiredCapabilities)
@@ -814,10 +862,10 @@ void USimCoreClientComponent::ApplyClosed(
 	ScheduleReconnect();
 }
 
-void USimCoreClientComponent::ApplyRawMessage(
+void USimCoreClientComponent::ApplyBinaryMessage(
 	uint64 Generation,
 	TArray<uint8> Fragment,
-	SIZE_T BytesRemaining,
+	bool bIsLastFragment,
 	bool bFragmentTooLarge)
 {
 	if (!IsCurrentSocketGeneration(Generation)
@@ -829,7 +877,7 @@ void USimCoreClientComponent::ApplyRawMessage(
 
 	if (bDiscardIncomingMessage)
 	{
-		if (BytesRemaining == 0)
+		if (bIsLastFragment)
 		{
 			bDiscardIncomingMessage = false;
 		}
@@ -844,12 +892,12 @@ void USimCoreClientComponent::ApplyRawMessage(
 		InvalidateTrafficSignals();
 		UE_LOG(LogSimCoreClient, Error, TEXT("Rejected oversized SimCore message"));
 		IncomingMessage.Reset();
-		bDiscardIncomingMessage = BytesRemaining != 0;
+		bDiscardIncomingMessage = !bIsLastFragment;
 		return;
 	}
 
 	IncomingMessage.Append(Fragment);
-	if (BytesRemaining != 0) return;
+	if (!bIsLastFragment) return;
 
 	TArray<uint8> CompleteMessage = MoveTemp(IncomingMessage);
 	IncomingMessage.Reset();
@@ -1008,6 +1056,7 @@ void USimCoreClientComponent::ApplyRawMessage(
 	const double UnixNowSeconds = (FDateTime::UtcNow() - UnixEpoch).GetTotalSeconds();
 	LatestStateWallAgeMs = (UnixNowSeconds - Parsed.Timestamp) * 1000.0;
 	LastStateArrivalTimeSeconds = ArrivalTimeSeconds;
+	PerformanceCapture.ObserveAcceptedState(ArrivalTimeSeconds, Parsed.Sequence);
 	++ReceivedStateCount;
 	LatestState = MoveTemp(Parsed);
 	LatestStateReceiveTimeSeconds = ArrivalTimeSeconds;
@@ -1015,4 +1064,5 @@ void USimCoreClientComponent::ApplyRawMessage(
 	bTrafficSnapshotAccepted = true;
 	SyncRuntimeProxyActors(ParsedEntities, ArrivalTimeSeconds);
 	TickTrafficSignals();
+	TickStructureDamage(0.0f);
 }

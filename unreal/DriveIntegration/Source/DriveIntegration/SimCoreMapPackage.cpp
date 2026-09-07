@@ -141,14 +141,18 @@ namespace
 		return true;
 	}
 
-	FString ResolvePackageDirectory(const FString& PackageDirectory)
-	{
-		FString Resolved = FPaths::IsRelative(PackageDirectory)
-			? FPaths::ConvertRelativePathToFull(FPaths::ProjectDir(), PackageDirectory)
-			: FPaths::ConvertRelativePathToFull(PackageDirectory);
-		FPaths::NormalizeDirectoryName(Resolved);
-		return Resolved;
-	}
+}
+
+FString ResolvePackageDirectory(const FString& PackageDirectory, const FString& ProjectDirectory)
+{
+	// Editor -game can return a ProjectDir relative to the executable. The
+	// two-argument conversion does not make a relative base absolute for us.
+	// Without this first conversion, every reconnect prepends ProjectDir again.
+	const FString AbsoluteProjectDirectory = FPaths::ConvertRelativePathToFull(
+		ProjectDirectory.IsEmpty() ? FPaths::ProjectDir() : ProjectDirectory);
+	FString Resolved = FPaths::ConvertRelativePathToFull(AbsoluteProjectDirectory, PackageDirectory);
+	FPaths::NormalizeDirectoryName(Resolved);
+	return Resolved;
 }
 
 bool ComputeCollisionChecksum(

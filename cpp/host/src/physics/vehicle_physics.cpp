@@ -2,6 +2,7 @@
 
 #include "coordinates/body_frame_adapter.hpp"
 #include "physics/chassis_ground_contact.hpp"
+#include "physics/runtime_tire_support.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -39,19 +40,7 @@ constexpr double GROUND_QUERY_DEPTH_M = 20.0;
 // not near-vertical walls. Bound a discontinuous four-wheel support fit before
 // it can rotate the chassis basis into a singular ground-query pose.
 constexpr double MAX_WHEEL_SUPPORT_ATTITUDE_RAD = 60.0 * DEG2RAD;
-// R1 collision uses a conservative sedan OBB derived from wheel geometry.
-// These fixed body-envelope additions stay outside tire-force configuration;
-// they can become explicit vehicle-config values when multiple body classes land.
-constexpr double COLLISION_BODY_OVERHANG_M = 0.80;
-constexpr double COLLISION_BODY_SIDE_PADDING_M = 0.15;
 constexpr double COLLISION_BODY_GROUND_CLEARANCE_M = 0.10;
-constexpr double COLLISION_BODY_HALF_HEIGHT_M = 0.75;
-// The authored sedan shell spans -0.29m..+0.96m from the CG. Ground contact
-// follows that visible body instead of the taller conservative wall prism;
-// retaining 0.26m upright clearance also preserves the supported 0.24m curb
-// contract and its real front/rear approach clearance.
-constexpr double CHASSIS_SHELL_CENTER_UP_OFFSET_M = 0.335;
-constexpr double CHASSIS_SHELL_HALF_HEIGHT_M = 0.625;
 // Below roughly a 6 km/h rigid-body delta-v, contacts are treated as ordinary
 // parking/curb loads. Stronger impacts accumulate visible body damage.
 constexpr double DAMAGE_IMPULSE_THRESHOLD_N_S = 2500.0;
@@ -473,7 +462,7 @@ float effective_surface_friction_multiplier(
 
 bool valid_vehicle_parameters(const VehicleParameters& parameters)
 {
-    const std::array<float, 52> finite_values{
+    const std::array<float, 57> finite_values{
         parameters.mass_kg,
         parameters.wheelbase_m,
         parameters.max_steering_angle_rad,
@@ -525,6 +514,11 @@ bool valid_vehicle_parameters(const VehicleParameters& parameters)
         parameters.wheel_inertia_kg_m2,
         parameters.wheel_free_spin_damping_n_m_s,
         parameters.low_speed_slip_reference_mps,
+        parameters.collision_body_overhang_m,
+        parameters.collision_body_side_padding_m,
+        parameters.collision_body_half_height_m,
+        parameters.chassis_shell_center_up_offset_m,
+        parameters.chassis_shell_half_height_m,
         parameters.suspension.rest_length_m,
     };
     if (!std::all_of(finite_values.begin(), finite_values.end(),
@@ -596,6 +590,12 @@ bool valid_vehicle_parameters(const VehicleParameters& parameters)
         && parameters.wheel_inertia_kg_m2 > 0.f
         && parameters.wheel_free_spin_damping_n_m_s >= 0.f
         && parameters.low_speed_slip_reference_mps > 0.f
+        && parameters.collision_body_overhang_m > 0.f
+        && parameters.collision_body_side_padding_m > 0.f
+        && parameters.collision_body_half_height_m > 0.f
+        && parameters.chassis_shell_half_height_m > 0.f
+        && std::abs(parameters.chassis_shell_center_up_offset_m)
+            < parameters.collision_body_half_height_m * 2.f
         && simcore_host::valid_suspension_parameters(parameters.suspension);
 }
 
@@ -668,6 +668,9 @@ void VehiclePhysics::reset()
     ground_friction_multiplier_by_wheel_.fill(1.f);
     last_resolved_dynamic_proxies_.clear();
     last_collision_contacts_.clear();
+    last_runtime_proxy_contacts_.clear();
+
+    runtime_tire_supports_.clear();
 
     state_.lat = origin_lat_;
     state_.lon = origin_lon_;
@@ -676,12 +679,12 @@ void VehiclePhysics::reset()
     state_.rpm = parameters_.idle_rpm;
     state_.position_enu = {0.0, 0.0, parameters_.cg_height_m};
     state_.collision_half_length_m = static_cast<float>(
-        parameters_.wheelbase_m * 0.5 + COLLISION_BODY_OVERHANG_M);
+        parameters_.wheelbase_m * 0.5 + parameters_.collision_body_overhang_m);
     state_.collision_half_width_m = static_cast<float>(
         std::max(parameters_.front_track_m, parameters_.rear_track_m) * 0.5
-        + COLLISION_BODY_SIDE_PADDING_M);
+        + parameters_.collision_body_side_padding_m);
     state_.collision_half_height_m = static_cast<float>(
-        COLLISION_BODY_HALF_HEIGHT_M);
+        parameters_.collision_body_half_height_m);
     for (std::size_t index = 0; index < state_.wheels.size(); ++index) {
         auto& wheel = state_.wheels[index];
         wheel.wheel_index = static_cast<std::uint32_t>(index);
@@ -746,6 +749,15 @@ void VehiclePhysics::replace_environment(
     reset();
 }
 
+void VehiclePhysics::replace_parameters(VehicleParameters parameters)
+{
+    if (!valid_vehicle_parameters(parameters)) {
+        throw std::invalid_argument("Vehicle parameters are invalid");
+    }
+    parameters_ = std::move(parameters);
+    reset();
+}
+
 void VehiclePhysics::set_input(const VehicleInput& input) {
     std::lock_guard lock(input_mutex_);
     input_ = input;
@@ -768,6 +780,31 @@ VehicleState VehiclePhysics::update(double dt)
     return update(dt, {});
 }
 
+void VehiclePhysics::refresh_runtime_tire_supports(
+    const std::vector<simcore_host::KinematicCollisionProxy>& proxies)
+{
+    runtime_tire_supports_.clear();
+    for (const auto& proxy : proxies) {
+        if (!simcore_host::is_low_tire_obstacle(proxy, *ground_query_, parameters_.tire_radius_m)) continue;
+        const auto& shape = std::get<simcore_host::ObbPrism>(proxy.shape);
+        const double lateral = (shape.center_enu.east_m-east_m_)*std::cos(heading_rad_)
+            - (shape.center_enu.north_m-north_m_)*std::sin(heading_rad_);
+        const double angle = shape.heading_rad-heading_rad_;
+        const double half_span = shape.half_length_m*std::abs(std::sin(angle))
+            + shape.half_width_m*std::abs(std::cos(angle));
+        const double half_track = std::min(parameters_.front_track_m,parameters_.rear_track_m)*.5;
+        const bool reaches_tires = std::abs(std::abs(lateral)-half_track) <= half_span+.12;
+        // If both tire tracks straddle an object taller than the actual belly
+        // clearance, preserve its collision. A low rounded label alone is not
+        // permission for a torso to pass through the underside of the chassis.
+        const double belly_clearance = parameters_.cg_height_m
+            + parameters_.chassis_shell_center_up_offset_m
+            - parameters_.chassis_shell_half_height_m;
+        if (reaches_tires || 2.0*shape.half_height_m+.06 <= belly_clearance+1e-6)
+            runtime_tire_supports_.push_back(proxy);
+    }
+}
+
 VehicleState VehiclePhysics::update(
     double dt,
     std::vector<simcore_host::KinematicCollisionProxy> dynamic_proxies)
@@ -783,11 +820,14 @@ VehicleState VehiclePhysics::update(
     }
 
     const float fdt = static_cast<float>(dt);
+    refresh_runtime_tire_supports(dynamic_proxies);
     last_resolved_dynamic_proxies_.clear();
     last_collision_contacts_.clear();
+    last_runtime_proxy_contacts_.clear();
     std::vector<simcore_host::KinematicCollisionProxy>
         accepted_resolved_dynamic_proxies;
     std::vector<simcore_host::CollisionContact> accepted_collision_contacts;
+    std::vector<simcore_host::RuntimeProxyContact> accepted_runtime_proxy_contacts;
     std::array<double, 4> tick_hard_stop_impulses{};
     wheel_contact_support_ = {};
     const auto previous_hard_stop_normal_force_n =
@@ -1499,10 +1539,10 @@ VehicleState VehiclePhysics::update(
 
     if (collision_world_) {
         const double collision_half_length =
-            parameters_.wheelbase_m * 0.5 + COLLISION_BODY_OVERHANG_M;
+            parameters_.wheelbase_m * 0.5 + parameters_.collision_body_overhang_m;
         const double collision_half_width =
             std::max(parameters_.front_track_m, parameters_.rear_track_m) * 0.5
-            + COLLISION_BODY_SIDE_PADDING_M;
+            + parameters_.collision_body_side_padding_m;
         std::vector<std::string> tire_supported_curb_ids;
         const auto support_height = [&](double east, double north)
             -> std::optional<double> {
@@ -1695,8 +1735,8 @@ VehicleState VehiclePhysics::update(
         const double swept_body_bottom = std::min(
             start_body_bottom, predicted_body_bottom);
         const double swept_body_top = std::max(
-            start_body_bottom + COLLISION_BODY_HALF_HEIGHT_M * 2.0,
-            predicted_body_bottom + COLLISION_BODY_HALF_HEIGHT_M * 2.0);
+            start_body_bottom + parameters_.collision_body_half_height_m * 2.0,
+            predicted_body_bottom + parameters_.collision_body_half_height_m * 2.0);
         simcore_host::PlanarRigidBody collision_body{
             "ego",
             {
@@ -1712,13 +1752,18 @@ VehicleState VehiclePhysics::update(
             parameters_.mass_kg,
             parameters_.yaw_inertia_kg_m2,
         };
+        std::vector<std::string> tire_supported_proxy_ids;
+        for (const auto& proxy : runtime_tire_supports_) tire_supported_proxy_ids.push_back(proxy.proxy_id);
         const auto collision_result = collision_world_
             ->integrate_with_tire_supported_curbs(
                 std::move(collision_body), dt, std::move(dynamic_proxies),
-                std::move(tire_supported_curb_ids));
+                std::move(tire_supported_curb_ids), std::move(tire_supported_proxy_ids));
         accepted_resolved_dynamic_proxies =
             collision_result.resolved_dynamic_proxies;
+        // Final wheel constraints must use the accepted moving prop position.
+        refresh_runtime_tire_supports(accepted_resolved_dynamic_proxies);
         accepted_collision_contacts = collision_result.contacts;
+        accepted_runtime_proxy_contacts = collision_result.runtime_proxy_contacts;
         const auto strongest_contact = std::max_element(
             collision_result.contacts.begin(),
             collision_result.contacts.end(),
@@ -1734,6 +1779,10 @@ VehicleState VehiclePhysics::update(
             const double impulse =
                 strongest_contact->accumulated_normal_impulse_n_s;
             state_.last_impact_impulse_n_s = static_cast<float>(impulse);
+            for (const auto& contact : collision_result.contacts) {
+                simcore_host::record_vehicle_dent(state_.dent_patches,
+                    collision_result.body.shape, contact);
+            }
             state_.damage_percent = std::clamp(
                 state_.damage_percent + static_cast<float>(
                     (impulse - DAMAGE_IMPULSE_THRESHOLD_N_S)
@@ -2040,6 +2089,7 @@ VehicleState VehiclePhysics::update(
     last_resolved_dynamic_proxies_ =
         std::move(accepted_resolved_dynamic_proxies);
     last_collision_contacts_ = std::move(accepted_collision_contacts);
+    last_runtime_proxy_contacts_ = std::move(accepted_runtime_proxy_contacts);
     return state_;
 }
 
@@ -2068,10 +2118,10 @@ bool VehiclePhysics::resolve_non_penetrating_ground_contacts(
             tick_hard_stop_impulses);
 
         const double collision_half_length =
-            parameters_.wheelbase_m * 0.5 + COLLISION_BODY_OVERHANG_M;
+            parameters_.wheelbase_m * 0.5 + parameters_.collision_body_overhang_m;
         const double collision_half_width =
             std::max(parameters_.front_track_m, parameters_.rear_track_m) * 0.5
-            + COLLISION_BODY_SIDE_PADDING_M;
+            + parameters_.collision_body_side_padding_m;
         const GroundBasis local_ground_basis = make_ground_basis(
             heading_rad_, ground_pitch_rad_, ground_roll_rad_);
         const double normal_up = std::max(
@@ -2090,10 +2140,10 @@ bool VehiclePhysics::resolve_non_penetrating_ground_contacts(
                     roll_rate_rad_s_,
                 },
                 {
-                    CHASSIS_SHELL_CENTER_UP_OFFSET_M,
+                    parameters_.chassis_shell_center_up_offset_m,
                     collision_half_length,
                     collision_half_width,
-                    CHASSIS_SHELL_HALF_HEIGHT_M,
+                    parameters_.chassis_shell_half_height_m,
                     parameters_.mass_kg,
                     parameters_.roll_inertia_kg_m2,
                     parameters_.pitch_inertia_kg_m2,
@@ -2182,7 +2232,8 @@ bool VehiclePhysics::update_wheel_contacts(
             {mount_east, mount_north,
              mount_up + GROUND_PENETRATION_RECOVERY_M},
             GROUND_QUERY_DEPTH_M + GROUND_PENETRATION_RECOVERY_M};
-        const auto hit = ground_query_->query_down(request);
+        const auto hit = simcore_host::runtime_tire_contact(request,
+            ground_query_->query_down(request), parameters_.tire_radius_m, runtime_tire_supports_);
 
         // GroundHit::distance_m is measured from the lifted query origin.
         // Suspension travel and penetration recovery use the real mount pose.

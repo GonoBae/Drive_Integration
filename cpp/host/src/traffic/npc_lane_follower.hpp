@@ -68,10 +68,26 @@ public:
     // endpoints within the loader's 0.15m tolerance are joined continuously.
     // Invalid topology/config/start offsets throw invalid_argument and leave
     // this follower cleared, never driving an old topology after a failed swap.
-    // An open route must end at an explicit terminal. A loop validates last->first.
+    // An open route must end at an explicit terminal unless destination_end is
+    // explicitly requested for a planned trip. A loop validates last->first.
     void rebuild(const TrafficNetwork& network, const GroundQuery& ground,
                  std::vector<std::uint32_t> route_lane_ids,
-                 bool loop = false, double start_offset_m = 0.0);
+                 bool loop = false, double start_offset_m = 0.0,
+                 bool destination_end = false);
+    // Install a new legal suffix beginning at the CURRENT lane. Position,
+    // offset, speed, total travelled distance and valid stopline commitment
+    // survive. A committed entry cannot switch its immediate connector. Invalid
+    // requests throw invalid_argument and leave this follower unchanged.
+    void reroute(const TrafficNetwork& network,
+                 std::vector<std::uint32_t> route_lane_ids,
+                 bool loop = false, bool destination_end = true);
+    // Only the host's completed, collision-checked lateral blend may call this.
+    // Requires an authored same-direction lane-change window with matching arc
+    // stations, no active stopline commitment and supported target geometry.
+    // Preserves speed/travelled distance; false leaves all state unchanged.
+    [[nodiscard]] bool complete_lane_change(
+        const TrafficNetwork& network, std::vector<std::uint32_t> target_route,
+        double target_lane_offset_m, bool destination_end = true);
     void reset(double start_offset_m = 0.0);
     void clear() noexcept;
 
@@ -92,9 +108,20 @@ public:
     [[nodiscard]] const NpcLaneFollowerState& state() const noexcept { return state_; }
     [[nodiscard]] const NpcLaneFollowerConfig& config() const noexcept { return config_; }
     [[nodiscard]] double route_length_m() const noexcept { return route_length_m_; }
+    [[nodiscard]] bool destination_reached() const noexcept {
+        return destination_end_ && state_.stopped
+            && state_.stop_reason == NpcLaneStopReason::Terminal;
+    }
     // Geometry/ground-only lookahead for the host's collision guard; this does
     // not authorize movement through signals or mutate controller progress.
     [[nodiscard]] std::optional<NpcLaneSample> sample_ahead(double distance_m) const;
+    // Host-authorized low-speed escape only. This moves a stopped follower
+    // backwards on its current authored lane without crossing a lane boundary
+    // or an active stop-line commitment. The host must sweep the body against
+    // rear traffic/static collision before calling it. It is deliberately not
+    // a graph edge and therefore cannot invent reverse travel through a junction.
+    [[nodiscard]] std::optional<NpcLaneSample> sample_behind(double distance_m) const;
+    [[nodiscard]] bool retreat_for_obstacle(double distance_m);
 
 private:
     struct RouteLane {
@@ -125,6 +152,7 @@ private:
     std::vector<SignalIdentity> signal_identities_;
     const GroundQuery* ground_ = nullptr;
     bool loop_ = false;
+    bool destination_end_ = false;
     double route_length_m_ = 0.0;
     double progress_m_ = 0.0;
     double reset_progress_m_ = 0.0;

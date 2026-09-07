@@ -4,9 +4,9 @@
 
 | 항목 | 값 |
 |---|---|
-| 버전 | 3.16 |
+| 버전 | 3.20 |
 | 작성일 | 2026-08-19 |
-| 최종 수정 | 2026-09-02 |
+| 최종 수정 | 2026-09-07 |
 | 대상 | R1 수동운전 및 R2/R3 자율주행 확장 기반 |
 | 관련 문서 | [일정표](./01_schedule.md), [기능표](./02_feature_matrix.md), [전체 리팩터링 구조](./refactoring.md) |
 
@@ -40,14 +40,36 @@ flowchart LR
 
 현재 구현과 남은 경계는 다음과 같다.
 
+- 9/5 기준 플레이어는 `1`~`4`로 세단·경차·트럭·오토바이를 선택한다. Unreal은 입력을
+  비우고 새 PlaySession으로 연결한 뒤 `SimulationReset.requested_vehicle_class`를 보낸다.
+  서버 Hello의 필수 capability `player-vehicle-selection.v1`을 확인해야 reset을 허용한다.
+  C++ `player_vehicle_profile`이 질량·구동·제동·조향·서스펜션·충돌 크기를 선택하고
+  `VehiclePhysics`의 parameter를 lifecycle 경계에서 교체한다. Unreal은 서버가 확정해 보낸
+  Ego `runtime_vehicle_class`를 읽어 외형·바퀴·램프 위치를 바꾼다. 같은 Play 재연결은
+  차종과 자세를 보존하며 같은 Play에서 차종만 바꾸는 요청은 거부한다.
+- 차종은 C++ physics replay의 `RESET`과 Unreal 주행 CSV v2에도 기록한다. 이전 차종 없는
+  `RESET`과 CSV v1은 세단으로 읽는다. 새 Play에서는 SensorRig의 sequence와 센서별 capture
+  cadence도 초기화한다. 오토바이는 두 바퀴 외형을 사용하는 네 접점 축약 물리이며,
+  실제 이륜 균형·기울기 모델은 아니다. 세단 이외 차종의 세단용 실내·운전자 표시는 끈다.
+- NPC10대는 네 차종의 크기·질량·관성·가속/제동 profile을 사용한다. C++는 0.25초마다
+  신호, 장애물, 인접 차로 간격과 목적지 도달 가능성을 다시 평가한다. 차선 변경 공간이
+  부족하면 정지 후 현재 차선 안에서 제한 후진해 공간을 만들고 안전한 인접 차로로
+  진행한다. 사고 복귀도 충돌 검사를 거친 저속 전·후진 곡선 주행이다. 이 판단은 저작된
+  LaneGraph 안에서 수행하며 자유공간 자율주행이나 NPC별 전체 타이어 동역학은 아니다.
+- 9/4~5 표시 후속에는 투명 세단 유리·실내·분리된 운전석 문, 절차적 하차·항의·복귀,
+  비상등과 경적, 비충돌 원경 배경, 커브 차선 v3를 포함한다. C++가 충돌·손상·보행 몸통·
+  구조물 전도를 확정하고 UE는 국부 정점 변형, 부분 래그돌, 문 힌지와 파편을 표시한다.
+  문·팔다리·파편의 표시 계산은 서버 차량 물리에 되먹이지 않는다. 최신 커브 수정은
+  비충돌 도색만 교체해 아래 map/traffic checksum을 유지했다.
 - C++ `VehiclePhysics`는 네 바퀴의 독립 tire contact와 1D spring/damper 반력으로 tire load,
   차체 heave·pitch·roll을 계산한다. 경사면 tangent 힘과 ENU XY/yaw도 C++가 소유하며,
   `GroundQuery`는 legacy ENU triangle 또는 `SIMGHF1/2` heightfield를 조회한다. v2는 cell
   material ID·terrain friction multiplier를 차량 설정의 surface scale과 결합한다.
   surface scale은 차량 설정 v5에서 도입됐으며 현재 소스의 strict 차량 설정 v7에서도 유지한다.
 - chassis shell의 underside·side·roof ground contact가 rollover 관통을 막고, collision impulse에서
-  누적 damage/impact zone을 만든다. Unreal은 이를 6개 차체 구역의 최대 12cm WPO 변형과
-  `F3` overlay로 표시한다. 변형은 시각 효과이며 collision shell을 바꾸지 않는다.
+  누적 damage/impact zone과 접촉별 dent patch를 만든다. Unreal은 최대16개의 접촉 위치·방향을
+  최대28cm 국부 CPU 정점 변형과 `F3` overlay로 표시한다. 면 전체 WPO는 끄고 원본 자산과
+  collision shell은 보존한다. 한 사고의 여러 접촉 충격도 합산값으로 반영한다.
 - `CollisionWorld`는 8m deterministic broad phase와 정적 OBB-prism, NPC OBB, 보행자 vertical
   capsule의 접촉·projection·상대속도 impulse를 계산한다. 동적 proxy는 질량을 opt-in하면
   Ego와 질량비에 따른 반대 impulse를 받고, 질량 0은 기존 무한질량 호환 경로를 유지한다.
@@ -73,9 +95,9 @@ flowchart LR
   거부하고, 거부 frame의 높은 sequence는 high-water를 오염시키지 않는다. 그 뒤 Unreal이
   authoritative checksum 일치 후 `SimulationReset`을 보낸다.
 - `SimulationHost`는 authoritative runtime entity와 signal clock/reset을 소유한다. 8/31
-  `virtual_city_v1` 25lane/차량3head 이력을 보존하며, 현재 `signal_city_v2`는 42lane,
-  차량8+보행8 head, controller2, NPC4·보행자8을 발행한다. map/traffic checksum은
-  `fnv1a64:7446108adad3e25b` / `fnv1a64:dfcb5e4541d71adf`다. 사용자 PIE는 후속이다.
+  `virtual_city_v1` 25lane/차량3head 이력을 보존하며, 현재 `signal_city_v2`는 58lane,
+  차량8+보행8 head, controller2, NPC10·보행자8을 발행한다. map/traffic checksum은
+  `fnv1a64:86c3103f3e2c7a5b` / `fnv1a64:b19c15afba6936d7`다. 사용자 PIE는 후속이다.
 - `traffic_network.json`은 Unreal이 저장 맵의 실제 도로 충돌과 대조해 별도로 내보내는
   versioned sidecar다. v1의 고정 schedule과 v2의 controller별 데이터 기반 phase plan/offset을
   구분하며 각 head의 additive `controller_id`로 소유 controller를 식별한다. C++는
@@ -102,6 +124,11 @@ Hello·control·reset 처리는 `simulation_host_session.cpp`와 내부 detail�
 presentation과 DriveReplay format/runtime을 분리했다. 세 Windows server wrapper는 공통
 launcher를 사용한다. 공개 계약과 검증 결과는
 [전체 리팩터링 구조](./refactoring.md)에 기록한다.
+
+9/4~5 후속 구현과 저장 맵 반영은 [9/4 작업일지](./worklogs/2026-09-04.md)와
+[9/5 작업일지](./worklogs/2026-09-05.md)에 기록했다. 최신 검증은 CTest 34/34와 후속
+관련 검사 4/4, UE Automation 84/84 통과다. 자동 검사는 최신 수정본의 주행 감각·표시
+자연스러움, 패키징, 1080p 60fps·30분 연속 주행 인수를 대신하지 않는다.
 
 ### 3.2 목표 구조
 
@@ -205,8 +232,8 @@ Python은 차량 동역학과 월드 충돌을 계산하지 않는다. 자율주
 | 상태 | 권한 소유자 | 다른 컴포넌트의 사용 방식 |
 |---|---|---|
 | Ego pose/velocity/wheel | C++ | Unreal과 Python은 읽기 전용 |
-| NPC 물리 pose | C++ | Unreal AI가 intent를 보내고 결과를 표시 |
-| 보행자 collision pose | C++ | Unreal이 경로 intent·animation을 제공하고 결과를 표시 |
+| NPC 물리 pose | C++ | 현재 C++ LaneGraph 판단·경로 진행 결과를 Unreal이 표시 |
+| 보행자 collision pose | C++ | 현재 C++ 횡단 경로·충돌 결과를 Unreal이 animation·부분 래그돌로 표시 |
 | 신호 상태 | C++ `TrafficNetwork::signals_at` / `SimulationHost` | 차량과 동일 simulation clock·reset, WorldState 원자 발행; UE는 표시 전용(ADR-014) |
 | LaneGraph·통행 제한 | MapPackage | 세 프로세스가 같은 버전 읽기 |
 | editor scene 지면 측정 | Unreal | 높이·법선·유효 cell을 MapPackage snapshot으로 고정 |
@@ -792,7 +819,7 @@ schema-v2 `EntityState`의 기존 1~21번 필드 의미는 유지한다. runtime
 | `AgentIntent` | Unreal→C++ | entity, target lane, target speed, stop/continue |
 | `WorldState` | C++→소비자 | Ego와 runtime entity의 ID 순 pose, velocity, collision metadata; Ego wheel/contact |
 | `SignalState` | Unreal→C++/Python | signal group, phase, effective tick |
-| `SimulationReset` | Unreal→C++ | play session ID, client time; 새 PIE의 configured spawn·clock·lease 초기화 |
+| `SimulationReset` | Unreal→C++ | play session ID, client time, requested vehicle class; 새 PIE·차종 선택의 configured spawn·clock·lease 초기화 |
 | `LifecycleCommand` (목표) | Unreal→C++ | spawn, despawn, map load 등 향후 범용 생명주기 명령 |
 | `Health` | C++→Unreal (`WorldState` 내부) | authoritative safety status, tick overrun count, 마지막 승인 command age, command 존재 여부, reason; queue depth는 아직 없음 |
 | `SensorMetadata` | Unreal→Python/Recorder | sensor, frame, pose, sim time, payload reference |
@@ -801,7 +828,9 @@ schema-v2 `EntityState`의 기존 1~21번 필드 의미는 유지한다. runtime
 
 - C++는 매 physics tick에 immutable snapshot을 생성한다.
 - 현재 Unreal 구현은 snapshot 수신 시각과 body-frame 선·각속도로 render frame의 pose를 예측한다.
-- multi-entity snapshot의 NPC OBB와 보행자 capsule은 transient Cube/Cylinder actor로 생성·갱신되며, frame에서 사라진 ID, kind 변경, disconnect와 EndPlay 때 제거한다. 이 actor의 collision은 비활성화하고 C++ 결과만 표시한다.
+- multi-entity snapshot의 NPC는 권한 차종에 맞는 저장 메시·바퀴, 보행자는 Manny/Quinn으로
+  표시한다. frame에서 사라진 ID, kind 변경, disconnect와 EndPlay 때 정리한다. 서버 OBB·
+  보행 충돌체는 F3로 별도 확인하며 UE 표시 actor가 서버 충돌을 다시 해결하지 않는다.
 - Ego 표시 휠의 spin은 authoritative body longitudinal speed를 타이어 반지름으로 나눈
   시각 각속도로 계산한다. 후진에서는 회전 부호를 반대로 하고 정지에서는 0으로 고정한다.
   물리 `WheelState.angular_speed`와 slip은 타이어 힘 진단용 권한 상태로 남기되, 출발 순간의
@@ -893,7 +922,7 @@ schema-v2 `EntityState`의 기존 1~21번 필드 의미는 유지한다. runtime
 규칙 기반 AI와 물리를 분리한다. 아래 Director/AgentIntent는 후속 통합 목표다.
 현재 신호 시간은 [ADR-014](./decisions/ADR-014-server-clock-traffic-signals.md)에 따라
 C++ `TrafficNetwork`가 simulation clock에서 계산한다. `virtual_city_v1`의 단일 교차로
-고정 schedule은 호환 이력으로 남고, 현재 `signal_city_v2`는 방향 차선 42개·차량/보행
+고정 schedule은 호환 이력으로 남고, 현재 `signal_city_v2`는 방향 차선 46개·차량/보행
 head 각8개·독립 controller 2개와 sidecar의 데이터 기반 phase plan/offset을 사용한다. 각 head의
 additive `controller_id`까지 차량·Health와 같은
 `WorldState`에 담는다. Unreal은 받아서 표시하며 자체 phase timer를 돌리지 않는다.
@@ -912,27 +941,52 @@ sequenceDiagram
 ```
 
 - TrafficDirector는 LaneGraph, 신호, 선행 차량을 보고 target lane과 target speed를 정한다.
-- 현재 `signal_city_v2`에서 NPC4대·보행자8명의 deterministic ID·spawn·runtime state를
+- 현재 `signal_city_v2`에서 NPC10대·보행자8명의 deterministic ID·spawn·runtime state를
   소유한다. 같은 proxy를 collision과 `WorldState`에 사용하고 새 PIE reset에서 복원한다.
 - C++는 NPC 차량을 R1용 제한된 route follower+유한질량 OBB로 진행시키고 충돌 상태를
   확정한다. Ego 충돌의 equal-and-opposite impulse로 NPC·보행자 위치와 속도가 변하며,
-  짧은 reaction hold와 감쇠를 적용해 다음 follower tick에서 즉시 원위치로 snapback하지 않는다.
+  충돌 중 경로 진행을 동결한다. 잔여 운동 정착 후 2~5초 대기·저속 복귀하며 강한 충격은
+  자동 운행 중단 상태를 유지한다. 다음 follower tick에 원위치로 끌어당기지 않는다.
 - PedestrianDirector는 경로와 대기/횡단 intent를 정한다.
-- C++는 보행자의 capsule pose를 tick에 맞춰 진행시켜 Ego 충돌과 화면 위치가 같은 상태를 참조하게 한다.
-- NPC는 고정 route/차량 신호, 보행자는 지정 crosswalk/보행 신호를 따른다. 일반 경로 탐색,
-  복잡한 군중 회피와 교통 수요 모델은 R1에 포함하지 않는다.
-- impulse 기반 damage와 전/후/좌/우/roof/underbody Unreal 국부 WPO 변형은 구현했지만,
+- C++는 서 있는 보행자의 capsule과 충돌 뒤 몸통 중심·회전 투영 OBB를 tick에 맞춰 진행한다.
+- NPC는 `npc_autonomous`에서 목적지 선택·successor 경로 탐색·동일 목적지 우회와 저작된
+  같은 방향 차선 변경을 수행하고 차량 신호를 따른다. cfg route는 초기 배치에 사용하며
+  legacy fixed 모드는 유지한다. 보행자는 지정 crosswalk/보행 신호를 유지하고,
+  Ego FSD·복잡한 군중 회피·교통 수요 모델은 포함하지 않는다.
+- impulse 기반 damage와 전/후/좌/우/roof/underbody Unreal 실제 정점 변형은 구현했지만,
   collision shape 변형·파편·부품 분리·fracture는 포함하지 않는다.
 
-### 11.1 NPC runtime 구현(2026-08-31, 2026-09-02 후속)
+9/3 구조물 후속: `StructureDamageRuntime`은 Wall 접촉의 부분 피해와 traffic 기둥의
+충격량·중력 힌지 전도를 계산한다. 기둥은 runtime collision proxy로 추가하며 같은 tick의
+전도 자세를 wire와 물리에 사용한다. 고장 난 controller의 all-red snapshot을 NPC·보행자와
+UE에 공통 적용한다. 건물 shell은 유지하고 UE는 외벽 균열·짧은 비충돌 파편만 표시한다.
+같은 Play 재연결은 유지, 새 Play/map·traffic reload는 복원한다. 차량 파편이나 건물 전체
+붕괴를 구현한 것은 아니다. [구조물 피해 계약](./structure_damage.md)을 따른다.
+
+### 11.1 NPC runtime 구현(2026-08-31, 2026-09-02~04 후속)
 
 `simulation_host_npc.cpp`가 검증된 lane route·signal snapshot·불변 GroundQuery를
 `NpcLaneFollower`에 공급한다. 제어기는 경로 거리·속도·정지 이유를 계산하고, 호스트는
 전방 OBB 표본으로 Ego/static/runtime 장애물을 검사한다. 이 NPC는 Ego의 네 타이어·
-서스펜션 동역학을 실행하지 않는 route follower다. 다만 collision solve에서는 NPC 1500kg,
+서스펜션 동역학을 실행하지 않는 route follower다. 다만 collision solve에서는 NPC 차종별 질량,
 보행자 80kg의 유한질량 proxy로 참여해 Ego와 반대 방향의 normal/tangent impulse를 받고,
-속도·yaw 한도와 18-tick reaction hold 안에서 authoritative pose를 갱신한다. NPC pitch/roll·
-전복, NPC끼리의 완전한 차량 동역학, 보행자 ragdoll은 아직 없다.
+속도·yaw 한도와 시간 기반 `ImpactRecoveryState`에 따라 authoritative pose를 갱신한다.
+충돌 solver의 normal impulse/mass를 250ms 창으로 합산하고, 정착→대기→복귀 동안
+follower 거리·차선 변경 진행을 동결한다. 복귀는 최대 0.35m/s·8도/s로 가속을 제한하고
+NPC의 이동 구간에 지면/OBB 검사를 적용한다. 심한 충격이나 누적 손상 100%에서는
+`Disabled`를 유지한다. 이는 데모용 사고 반응 정책이며 실제 파손 역학의 예측 모델이 아니다.
+새 Play/reset은 이 상태를 초기화한다. 9/3 후속 `ImpactTumbleState`는 충돌 angular impulse와
+상자 지지점 관성·중력·착지 감쇠를 이용한 NPC pitch/roll·전도를 추가한다. 회전된 상자의
+지지 높이와 보수적 yaw-aligned 외곽을 collision snapshot에 반영하고 기존 wire 자세로
+표시한다. 지면 구속 모델이므로 공중 비행·정밀 6자유도 접촉, NPC끼리의 완전한 차량
+동역학은 아직 없다. 보행자는 UE Manny/Quinn 스켈레탈 메시·idle/walk를 사용한다.
+9/3 사용자 피드백 후 실제 횡단 heading·runtime impact event/phase를 전송하고, UE의
+기존 PhysicsAsset 관절을 연결했다. 후속 사용자 피드백으로 매 snapshot 전체 골격 이동과
+2.5m offset 제한을 제거했다. 서버 `PedestrianImpactState`의 몸통 중심·상향 속도·낙하·전도와
+낮은 충돌 OBB를 전송하고, UE 골반만 kinematic으로 맞추며 팔다리를 simulate한다. 서 있는
+캡슐을 남기지 않으며 `F3`에서 서버 충돌체와 중심을 직접 표시한다. 동일 사건 재발사 방지와
+서버 복귀 허가 후 자세 복원은 유지한다. 서버 관절별 동역학은 아니며 UE 관절 힘은 서버에
+되먹이지 않는다. EntityState additive34/35는 downed/airborne,36은 NPC 좌·우 깜빡이 의도다.
 
 tick 시작 pose→accepted end pose의 속도를 collision proxy에 설정해 Ego 충돌을 계산한 뒤
 정확히 같은 end pose를 WorldState로 발행한다. 별도 `advance_runtime_entities()`에서
@@ -940,9 +994,20 @@ lane NPC를 중복 적분하지 않는다. NPC ID1001/proxy `lane-npc-1001`과 w
 map reload 양쪽에서 예약한다. 새 Play/lease/map·traffic reload와 ground lifetime 경계는
 [NPC 계약](./npc_lane_following.md)을 따른다.
 
-Unreal은 수신 NPC에 자체 세단/휠을 표시하고 tick별 bounded extrapolation을 적용한다.
+Unreal은 수신 NPC 차종에 맞는 자체 차체/휠을 표시하고 tick별 bounded extrapolation을 적용한다.
 외형 actor는 NoCollision이며 local stale/reset/disconnect에서 정리한다. 서버의 신호
 상태·진행이나 물리를 Unreal AI가 독립적으로 재계산하지 않는다.
+
+### 11.2 NPC 내비게이션 확장(2026-09-03)
+
+`NpcRoutePlanner`는 재방문 가능한 목적지를 entity ID/trip counter로 선택하고 저작된
+directed successor의 거리 기준 최단 경로를 계산한다. `simulation_host_npc.cpp`는 전방
+최대 80m의 정적/정차 장애물을 조회해 같은 목적지로 우회하며 신호 대기열을 제외한다.
+`NpcLaneChangePlan`은 optional `TrafficLane::lane_changes`의 같은 방향 station 구간에서
+quintic 경로를 만든다. host가 앞뒤 간격·접근 속도·전체 swept 장애물 검사를 담당하고,
+`NpcLaneFollower`의 reroute/target adoption은 진행 상태와 신호 허가를 보존한다.
+검증 실패는 tick 진행 rollback과 마지막 pose 동결로 처리한다. Unreal 지도 geometry·ground,
+공개 wire와 Ego 물리 수식을 바꾸지 않았다. [상세 계약·시험](./npc_navigation.md)을 따른다.
 
 ## 12. 센서 확장 구조
 
@@ -972,6 +1037,8 @@ R1은 SensorRig, mount config, timestamp/frame metadata와 선택적인 저주�
 
 현재 구현은 `base_link` FLU 기준 front camera10Hz·roof LiDAR20Hz config와 authoritative
 `SimulationTimeNs` metadata cadence다. 실제 image/point cloud payload는 캡처하지 않는다.
+map checksum 또는 PlaySession이 바뀌면 metadata sequence와 센서별 capture cadence를
+초기화하므로 차종 변경 뒤 이전 주행의 센서 시간이 이어지지 않는다.
 
 ## 13. 기록·재생·촬영
 
@@ -997,8 +1064,20 @@ R1은 SensorRig, mount config, timestamp/frame metadata와 선택적인 저주�
 
 현재 Unreal `F5`는 authoritative snapshot CSV를
 `Saved/DriveReplays/last_drive.csv`에 저장하고 `F6`는 collision-free visual ghost로 재생한다.
-이는 Input replay/command-event deterministic physics re-simulation이 아니므로 REC-002·AT-07은
-미완료다.
+CSV v2는 권한 차종을 함께 저장해 재생 외형에 적용하며 CSV v1은 세단으로 읽는다.
+이 화면 재생과 별도로 C++ `PhysicsReplayRecorder`가 실제 fixed tick의 `VehicleInput`,
+physics update 직전 dynamic collision proxy와 결과 상태를 기록한다. `RESET`은 offline
+physics에 기록된 차종 profile을 적용해 reset하고, reconnect/SafeStop/hard timeout/EStop은
+lifecycle marker로 보존한다. 차종이 없는 이전 `RESET`은 세단으로 해석한다.
+안전 전이의 물리 효과는 각 tick의 정확한 적용 입력으로 재현하며 원래 lease FSM이나 traffic
+AI를 offline에서 다시 실행했다고 주장하지 않는다.
+
+`--verify-physics-replay`는 같은 실행 파일 bytes·vehicle checksum·map collision checksum·
+origin/spawn/Hz를 요구하며 기록된 외부 충돌 입력으로 Ego 물리를 재계산한다. 위치 1cm와
+yaw 0.1도 및 body/wheel/damage 상태를 frame별로 검사한다. format/version/count/footer와
+유한값을 엄격히 검증하고, map/traffic reload 또는 불완전 기록을 정상 재생으로 승인하지
+않는다. F5/F6 UI와 서버 recorder는 독립적이며 실제 사용자 기록·재생 인수는 별도다.
+[실행 절차와 제한](./core_validation.md)을 따른다.
 
 ## 14. 실패 처리
 
@@ -1059,6 +1138,13 @@ SafeStop/reset을 다시 통과했다.
 - loopback과 LAN을 구분하고 timer resolution·서버 build·Unreal FPS를 결과에 함께 기록
 - NPC 수, 보행자 수, 센서 활성 상태를 결과에 함께 기록
 - 모듈형 건물·소품 밀도와 조명 품질별 비용을 측정하고, 가상 코스 전체에서 동일 성능 기준 적용
+
+9/3의 `FSimCorePerformanceCapture`는 위 전체 프로파일링 계획 중 opt-in 엔진 frame-end
+간격과 승인된 WorldState의 game-thread 간격만 계측한다. 측정 중에는 메모리에 보관하고
+종료할 때 CSV/설정 JSON을 저장한다. renderer/GPU 단독 시간과 인과관계가 있는 입력 지연은
+계측하지 않는다. `analyze_performance.py`는 malformed/truncated/nonfinite data를 거부하고
+PIE/NullRHI·해상도/제한 설정 변경·짧은 기록을 정식 패키지 측정과 구분한다. 안정성·수동
+주행 인수는 자동 승인하지 않는다. 전체 자동 검증은 `scripts/check_core.py`로 수행한다.
 
 ## 16. 배포 구성
 
@@ -1157,6 +1243,10 @@ R1 구현 의존성이나 필수 작업을 의미하지 않는다.
 
 | 버전 | 날짜 | 변경 내용 |
 |---|---|---|
+| 3.20 | 2026-09-07 | 9/4~5 구현을 현재 요약에 동기화: 플레이어 차종 reset·Hello capability·서버 profile·권한 상태·CSV v2/physics replay·SensorRig 초기화, 네 차종 NPC와 근접 후진 회피, 운전자·충돌 표시 경계 및 커브 v3. CTest34/34·후속4/4·UE84/84와 남은 수동/배포 인수를 구분 |
+| 3.19 | 2026-09-03 | 실제 정점 기반 dent, 서버 보행 몸통/UE 부분 래그돌, microstep 내 runtime pair 충돌, wire downed/airborne/indicator, 58lane·NPC10·보행 전용 WALK와 보호 현시를 반영. 시각 인수·완전한 6자유도/전신 모델과 구분 |
+| 3.18 | 2026-09-03 | NPC RoutePlanner·quintic LaneChangePlan·상태 보존 reroute/adoption과 host 안전 가드, optional lane_changes 및 현재 Signal City 46lane/16head를 반영. legacy fixed 경로·맵/ground·wire·Ego 물리 유지; 검증 결과는 별도 작업일지로 관리 |
+| 3.17 | 2026-09-03 | 서버 적용 입력·외부 충돌 입력 기반 Ego replay와 identity/strict footer, opt-in UE frame/state 캡처·분석 경계, 재접속 absolute MapPackage path 및 Core runner를 반영. CTest21/21·UE48/48·Python30/30·실제 replay480ticks 오차0 통과; 물리 수식·공개 wire·맵/에셋 유지 |
 | 3.16 | 2026-09-02 | `SimulationHost`의 Hello·control·reset session/detail과 Unreal runtime entity/traffic presentation 분리를 추가. 유한질량 OBB 입력 각속도 상한으로 partial-tick 전파를 차단하고 C++ build·CTest20/20, UE Editor/Game·Automation47/47, launcher 3 profiles, Python Proto1/1·helper10/10·Signal City 2,280-state 최종 통합 결과를 기록 |
 | 3.15 | 2026-09-02 | 동작 보존 전체 리팩터링의 runtime options cfg/CLI, traffic hot reloader, protocol encoder/decoder, Unreal sedan/control/diagnostics/replay format-runtime, 공통 Windows launcher 경계를 기록하고 별도 문서에 연결. 최종 통합 수치는 후속 검증 전 추정하지 않음 |
 | 3.14 | 2026-09-02 | 키보드 미세 조향 제곱 응답, rear mechanical side brake의 종방향 우선 마찰 배분, Ego↔NPC/보행자 유한질량 반작용과 reaction hold, 6구역 국부 WPO dent를 반영. CTest20/20·UE46/46·Editor/Game 빌드 통과; PIE 조작감·ragdoll·collision-shape 변형은 수동/후속 유지 |

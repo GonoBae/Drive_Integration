@@ -32,7 +32,9 @@ namespace
 			&& FMath::IsFinite(Frame.CollisionHalfHeightMeters)
 			&& Frame.CollisionHalfLengthMeters > 0.0f
 			&& Frame.CollisionHalfWidthMeters > 0.0f
-			&& Frame.CollisionHalfHeightMeters > 0.0f;
+			&& Frame.CollisionHalfHeightMeters > 0.0f
+			&& Frame.RuntimeVehicleClass >= SimCoreProtocol::ERuntimeVehicleClass::Sedan
+			&& Frame.RuntimeVehicleClass <= SimCoreProtocol::ERuntimeVehicleClass::Motorcycle;
 	}
 }
 
@@ -74,6 +76,9 @@ bool SimCoreDriveReplay::FTrack::Capture(const SimCoreProtocol::FVehicleState& S
 	Frame.CollisionHalfLengthMeters = State.CollisionHalfLengthMeters;
 	Frame.CollisionHalfWidthMeters = State.CollisionHalfWidthMeters;
 	Frame.CollisionHalfHeightMeters = State.CollisionHalfHeightMeters;
+	Frame.RuntimeVehicleClass =
+		State.RuntimeVehicleClass == SimCoreProtocol::ERuntimeVehicleClass::Unspecified
+		? SimCoreProtocol::ERuntimeVehicleClass::Sedan : State.RuntimeVehicleClass;
 	if (!ValidFrame(Frame)) return false;
 	Frames.Add(Frame);
 	return true;
@@ -124,6 +129,8 @@ bool SimCoreDriveReplay::Sample(
 		A.CollisionHalfWidthMeters, B.CollisionHalfWidthMeters, Alpha);
 	OutState.CollisionHalfHeightMeters = FMath::Lerp(
 		A.CollisionHalfHeightMeters, B.CollisionHalfHeightMeters, Alpha);
+	OutState.RuntimeVehicleClass = Alpha < 0.5
+		? A.RuntimeVehicleClass : B.RuntimeVehicleClass;
 	return true;
 }
 
@@ -136,13 +143,14 @@ FString SimCoreDriveReplay::SerializeCsv(const FTrack& Track)
 	for (const FFrame& Frame : Track.Frames)
 	{
 		if (!ValidFrame(Frame)) return {};
-		Result += FString::Printf(TEXT("%llu,%llu,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g\n"),
+		Result += FString::Printf(TEXT("%llu,%llu,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%u\n"),
 			Frame.SimulationTimeNs, Frame.Sequence,
 			Frame.PositionEnu.X, Frame.PositionEnu.Y, Frame.PositionEnu.Z,
 			Frame.LinearVelocityEnu.X, Frame.LinearVelocityEnu.Y, Frame.LinearVelocityEnu.Z,
 			Frame.HeadingDegrees, Frame.PitchDegrees, Frame.RollDegrees, Frame.SpeedMps,
 			Frame.CollisionHalfLengthMeters, Frame.CollisionHalfWidthMeters,
-			Frame.CollisionHalfHeightMeters);
+			Frame.CollisionHalfHeightMeters,
+			static_cast<uint32>(Frame.RuntimeVehicleClass));
 	}
 	return Result;
 }
@@ -164,7 +172,8 @@ bool SimCoreDriveReplay::ParseCsv(
 	if (Lines.Num() < 2 || Lines.Num() > MaxFrames + 1) return Fail(TEXT("Replay frame count is invalid"));
 	TArray<FString> Header;
 	Lines[0].ParseIntoArray(Header, TEXT(","), false);
-	if (Header.Num() != 3 || Header[0] != FormatName
+	const bool bLegacyV1 = Header.Num() == 3 && Header[0] == LegacyFormatName;
+	if (Header.Num() != 3 || (!bLegacyV1 && Header[0] != FormatName)
 		|| !SimCoreProtocol::IsValidTrafficNetworkChecksum(Header[1])
 		|| !SafeIdentity(Header[2])) return Fail(TEXT("Replay header is invalid"));
 	OutTrack.MapChecksum = Header[1];
@@ -173,7 +182,8 @@ bool SimCoreDriveReplay::ParseCsv(
 	{
 		TArray<FString> Fields;
 		Lines[LineIndex].ParseIntoArray(Fields, TEXT(","), false);
-		if (Fields.Num() != 15) return Fail(TEXT("Replay row field count is invalid"));
+		const int32 ExpectedFieldCount = bLegacyV1 ? 15 : 16;
+		if (Fields.Num() != ExpectedFieldCount) return Fail(TEXT("Replay row field count is invalid"));
 		FFrame Frame;
 		double Values[13]{};
 		if (!LexTryParseString(Frame.SimulationTimeNs, *Fields[0])
@@ -190,6 +200,20 @@ bool SimCoreDriveReplay::ParseCsv(
 		Frame.CollisionHalfLengthMeters = Values[10];
 		Frame.CollisionHalfWidthMeters = Values[11];
 		Frame.CollisionHalfHeightMeters = Values[12];
+		if (bLegacyV1)
+		{
+			Frame.RuntimeVehicleClass = SimCoreProtocol::ERuntimeVehicleClass::Sedan;
+		}
+		else
+		{
+			uint32 VehicleClass = 0;
+			if (!LexTryParseString(VehicleClass, *Fields[15])
+				|| VehicleClass < static_cast<uint32>(SimCoreProtocol::ERuntimeVehicleClass::Sedan)
+				|| VehicleClass > static_cast<uint32>(SimCoreProtocol::ERuntimeVehicleClass::Motorcycle))
+				return Fail(TEXT("Replay vehicle class is invalid"));
+			Frame.RuntimeVehicleClass =
+				static_cast<SimCoreProtocol::ERuntimeVehicleClass>(VehicleClass);
+		}
 		if (!ValidFrame(Frame)
 			|| (!OutTrack.Frames.IsEmpty()
 				&& (Frame.Sequence <= OutTrack.Frames.Last().Sequence

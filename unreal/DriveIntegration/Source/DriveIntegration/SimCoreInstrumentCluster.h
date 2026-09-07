@@ -13,6 +13,9 @@ namespace SimCoreInstrumentCluster
 	{
 		bool bAuthoritative = false;
 		bool bSideBrakeRequested = false;
+		bool bHazardLightsRequested = false;
+		SimCoreProtocol::ETurnIndicator ManualIndicator =
+			SimCoreProtocol::ETurnIndicator::Off;
 		FString StatusText = TEXT("OFFLINE");
 		FLinearColor StatusColor = FLinearColor(0.90f, 0.20f, 0.16f, 1.0f);
 		FString SpeedText = TEXT("---");
@@ -30,7 +33,10 @@ namespace SimCoreInstrumentCluster
 		const SimCoreProtocol::FVehicleState& State,
 		double StateAgeSeconds,
 		double StaleTimeoutSeconds,
-		bool bSideBrakeRequested);
+		bool bSideBrakeRequested,
+		SimCoreProtocol::ETurnIndicator ManualIndicator =
+			SimCoreProtocol::ETurnIndicator::Off,
+		bool bHazardLightsRequested = false);
 }
 
 /**

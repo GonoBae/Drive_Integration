@@ -33,6 +33,15 @@ namespace SimCoreProtocol
 		Pedestrian = 3,
 	};
 
+	enum class ERuntimeVehicleClass : uint8
+	{
+		Unspecified = 0,
+		Sedan = 1,
+		Compact = 2,
+		Truck = 3,
+		Motorcycle = 4,
+	};
+
 	enum class EVehicleDamageZone : uint8
 	{
 		None = 0,
@@ -45,6 +54,7 @@ namespace SimCoreProtocol
 	};
 
 	inline constexpr int32 MaxWorldStateTrafficSignals = 32;
+	inline constexpr int32 MaxWorldStateStructures = 256;
 	// Must cover the bounded format-v2 plan cycle. Version 1 still publishes
 	// its original <=30-second countdowns.
 	inline constexpr float MaxTrafficSignalCountdownSeconds = 3600.0f;
@@ -77,7 +87,36 @@ namespace SimCoreProtocol
 		FVector3d PositionEnu = FVector3d::ZeroVector;
 		float HeadingDegrees = 0.0f;
 		float RemainingSeconds = 0.0f;
+		bool bOutOfService = false;
 	};
+
+	enum class EStructureKind : uint8
+	{
+		Building = 1,
+		SignalPole = 2,
+	};
+
+	/** Damaged map structure. Empty world list means the original authored map. */
+	struct FStructureState
+	{
+		FString ColliderId;
+		EStructureKind Kind = EStructureKind::Building;
+		uint32 SignalId = 0;
+		float DamagePercent = 0.0f;
+		uint32 EventSequence = 0;
+		FVector3d ImpactPointEnu = FVector3d::ZeroVector;
+		FVector3d ImpactNormalEnu = FVector3d::ZeroVector;
+		FVector3d BasePositionEnu = FVector3d::ZeroVector;
+		double HeadingRadians = 0.0;
+		float FallAngleRadians = 0.0f;
+		FVector3d FallDirectionEnu = FVector3d::ZeroVector;
+		bool bDisabled = false;
+		float ImpactHalfWidthMeters = 0.0f;
+		float ImpactHalfHeightMeters = 0.0f;
+		float ImpactSeverity = 0.0f;
+	};
+
+	DRIVEINTEGRATION_API bool IsValidStructureState(const FStructureState& State);
 
 	DRIVEINTEGRATION_API bool IsValidTrafficSignalState(const FTrafficSignalState& State);
 	DRIVEINTEGRATION_API bool IsValidTrafficNetworkChecksum(const FString& Checksum);
@@ -114,6 +153,25 @@ namespace SimCoreProtocol
 		uint64 LastCommandAgeNs = 0;
 		bool bHasControlCommand = false;
 		FString Message;
+	};
+
+	enum class ERuntimeRecoveryPhase : uint8
+	{
+		Driving = 0, Settling = 1, Holding = 2, Recovering = 3, Disabled = 4,
+	};
+	enum class ETurnIndicator : uint8 { Off = 0, Left = 1, Right = 2 };
+
+	struct FVehicleDentPatch
+	{
+		FVector2D Position = FVector2D::ZeroVector; // normalized forward/left shell coordinates
+		FVector2D Inward = FVector2D::ZeroVector; // FLU unit force direction
+		float RadiusMeters = 0.0f;
+		float DepthMeters = 0.0f;
+		bool operator==(const FVehicleDentPatch& Other) const
+		{
+			return Position == Other.Position && Inward == Other.Inward
+				&& RadiusMeters == Other.RadiusMeters && DepthMeters == Other.DepthMeters;
+		}
 	};
 
 	struct FVehicleState
@@ -159,6 +217,7 @@ namespace SimCoreProtocol
 		// World-level data travels atomically through the same map/play/sequence fence.
 		TArray<FTrafficSignalState> TrafficSignals;
 		FString TrafficNetworkChecksum;
+		TArray<FStructureState> Structures;
 		FVector3d PositionEnu = FVector3d::ZeroVector; // map_enu polar, E/N/U meters
 		FVector3d LinearVelocityBody = FVector3d::ZeroVector; // base_link polar FLU, m/s
 		FVector3d AngularVelocityBody = FVector3d::ZeroVector; // base_link axial FLU, rad/s
@@ -171,6 +230,15 @@ namespace SimCoreProtocol
 		float LastImpactImpulseNs = 0.0f;
 		EVehicleDamageZone DamageZone = EVehicleDamageZone::None;
 		uint32 CollisionEventSequence = 0;
+		TArray<FVehicleDentPatch> DentPatches;
+		ERuntimeRecoveryPhase RuntimeRecoveryPhase = ERuntimeRecoveryPhase::Driving;
+		FVector3d ImpactDirectionEnu = FVector3d::ZeroVector;
+		bool bPedestrianDowned = false;
+		bool bPedestrianAirborne = false;
+		ETurnIndicator TurnIndicator = ETurnIndicator::Off;
+		// NPC-only monotonic event sequence; zero before the first horn this Play.
+		uint32 HornEventSequence = 0;
+		ERuntimeVehicleClass RuntimeVehicleClass = ERuntimeVehicleClass::Unspecified;
 		TArray<FWheelState> Wheels;
 	};
 
@@ -184,6 +252,7 @@ namespace SimCoreProtocol
 	DRIVEINTEGRATION_API TArray<uint8> SerializeSimulationResetEnvelope(
 		const FString& PlaySessionId,
 		uint64 ClientTimeNs,
+		ERuntimeVehicleClass RequestedVehicleClass,
 		uint64 Sequence,
 		const FString& SourceId,
 		const FString& ConnectionSessionId,

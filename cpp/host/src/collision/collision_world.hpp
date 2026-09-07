@@ -28,6 +28,11 @@ enum class CollisionBroadPhaseMode {
     const VerticalCapsule& capsule,
     CollisionVector2 preferred_relative_velocity_enu = {});
 
+// Resolve already advanced finite proxy pairs without advancing their clocks
+// a second time. Separate contacts prevent NPC/ped impacts damaging the Ego.
+[[nodiscard]] std::vector<RuntimeProxyContact> resolve_runtime_proxy_pairs(
+    std::vector<KinematicCollisionProxy>& proxies);
+
 // Deterministic, ground-bound collision core. The world owns immutable static
 // OBB prisms; tick-local dynamic proxies use the same narrow phase without
 // coupling collision code to VehiclePhysics.
@@ -56,7 +61,8 @@ public:
         PlanarRigidBody body,
         double dt_seconds,
         std::vector<KinematicCollisionProxy> dynamic_proxies,
-        std::vector<std::string> tire_supported_curb_ids) const;
+        std::vector<std::string> tire_supported_curb_ids,
+        std::vector<std::string> tire_supported_proxy_ids = {}) const;
 
     [[nodiscard]] std::size_t static_collider_count() const {
         return static_colliders_.size();

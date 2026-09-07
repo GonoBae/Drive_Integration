@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <iterator>
 #include <map>
 #include <numeric>
 #include <numbers>
@@ -30,8 +31,6 @@ constexpr double kMinimumFiniteProxyMassKg = 1.0;
 constexpr double kMaximumFiniteProxyMassKg = 100'000.0;
 constexpr double kMinimumFiniteProxyYawInertiaKgM2 = 1.0;
 constexpr double kMaximumFiniteProxyYawInertiaKgM2 = 100'000'000.0;
-constexpr double kMaximumFiniteProxyHeadingRateRadS =
-    4.0 * std::numbers::pi_v<double>;
 
 struct HorizontalAabb {
     double minimum_east_m = 0.0;
@@ -431,6 +430,7 @@ void clamp_finite_proxy_speed(KinematicCollisionProxy& proxy)
 
 void advance_proxy(KinematicCollisionProxy& proxy, double dt_seconds)
 {
+    if (proxy.breakaway_impulse_n_s > 0.0 && !proxy.breakaway_released) return;
     std::visit(
         [&](auto& shape) {
             shape.center_enu = add(
@@ -545,6 +545,27 @@ double resolve_finite_proxy_contact(
     KinematicCollisionProxy& proxy,
     const CollisionManifold& manifold)
 {
+    double anchor_impulse = 0.0;
+    if (proxy.breakaway_impulse_n_s > 0.0 && !proxy.breakaway_released) {
+        const auto offset = subtract(manifold.contact_point_enu, body.shape.center_enu);
+        const double closing = dot(contact_velocity(body, offset), manifold.normal_enu);
+        const double arm = cross(offset, manifold.normal_enu);
+        const double denominator = 1.0 / body.mass_kg + arm * arm / body.yaw_inertia_kg_m2;
+        const double required = std::max(0.0, -(1.0 + proxy.material.restitution) * closing / denominator);
+        if (required + 1e-9 < proxy.breakaway_impulse_n_s) {
+            const double applied = resolve_contact(body, proxy.material, {}, manifold);
+            proxy.breakaway_impulse_n_s = std::max(0.0, proxy.breakaway_impulse_n_s - applied);
+            return applied;
+        }
+        anchor_impulse = std::min(required, proxy.breakaway_impulse_n_s);
+        body.linear_velocity_enu_mps = add(body.linear_velocity_enu_mps,
+            multiply(manifold.normal_enu, anchor_impulse / body.mass_kg));
+        body.heading_rate_rad_s -= arm * anchor_impulse / body.yaw_inertia_kg_m2;
+        proxy.breakaway_impulse_n_s = 0.0;
+        proxy.breakaway_released = true;
+        // No full-stop solve/refund: the base absorbs only its resistance;
+        // transfer the residual collision impulse to the now finite body.
+    }
     const double body_inverse_mass = 1.0 / body.mass_kg;
     const double proxy_inverse_mass = 1.0 / proxy.mass_kg;
     const double inverse_mass_sum = body_inverse_mass + proxy_inverse_mass;
@@ -568,7 +589,7 @@ double resolve_finite_proxy_contact(
     const double normal_velocity = dot(
         relative_contact_velocity, manifold.normal_enu);
     if (normal_velocity >= 0.0) {
-        return 0.0;
+        return anchor_impulse;
     }
 
     const double body_normal_arm = cross(
@@ -632,7 +653,7 @@ double resolve_finite_proxy_contact(
     apply_proxy_impulse(
         proxy, multiply(body_tangent_impulse, -1.0), proxy_contact_offset);
     clamp_finite_proxy_speed(proxy);
-    return normal_impulse;
+    return anchor_impulse + normal_impulse;
 }
 
 bool valid_proxy_shape(const KinematicProxyShape& shape)
@@ -675,9 +696,18 @@ void validate_and_sort_dynamic_proxies(
             || !std::isfinite(proxy.mass_kg)
             || !std::isfinite(proxy.yaw_inertia_kg_m2)
             || !std::isfinite(proxy.maximum_linear_speed_mps)
+            || !std::isfinite(proxy.breakaway_impulse_n_s)
             || proxy.mass_kg < 0.0
             || proxy.yaw_inertia_kg_m2 < 0.0
-            || proxy.maximum_linear_speed_mps < 0.0) {
+            || proxy.maximum_linear_speed_mps < 0.0
+            || proxy.breakaway_impulse_n_s < 0.0 || proxy.breakaway_impulse_n_s > 1e6
+            || ((proxy.breakaway_impulse_n_s > 0.0 || proxy.breakaway_released)
+                && (proxy.mass_kg <= 0.0 || !std::holds_alternative<ObbPrism>(proxy.shape)))
+            || (proxy.breakaway_released && proxy.breakaway_impulse_n_s != 0.0)
+            || proxy.supported_vehicle_id == proxy.proxy_id
+            || proxy.supported_vehicle_id.size() > 256
+            || !std::all_of(proxy.supported_vehicle_id.begin(), proxy.supported_vehicle_id.end(),
+                [](unsigned char c) { return c >= 33 && c <= 126; })) {
             throw std::invalid_argument(
                 "Kinematic proxy is invalid: " + proxy.proxy_id);
         }
@@ -1022,7 +1052,8 @@ CollisionStepResult CollisionWorld::integrate_with_tire_supported_curbs(
     PlanarRigidBody body,
     double dt_seconds,
     std::vector<KinematicCollisionProxy> dynamic_proxies,
-    std::vector<std::string> tire_supported_curb_ids) const
+    std::vector<std::string> tire_supported_curb_ids,
+    std::vector<std::string> tire_supported_proxy_ids) const
 {
     if (body.body_id.empty() || !valid_shape(body.shape)
         || !finite_vector(body.linear_velocity_enu_mps)
@@ -1055,6 +1086,15 @@ CollisionStepResult CollisionWorld::integrate_with_tire_supported_curbs(
     }
     validate_and_sort_dynamic_proxies(
         dynamic_proxies, static_colliders_, body.body_id);
+    std::sort(tire_supported_proxy_ids.begin(), tire_supported_proxy_ids.end());
+    tire_supported_proxy_ids.erase(std::unique(tire_supported_proxy_ids.begin(),
+        tire_supported_proxy_ids.end()), tire_supported_proxy_ids.end());
+    for (const auto& id : tire_supported_proxy_ids) {
+        const auto proxy = std::lower_bound(dynamic_proxies.begin(), dynamic_proxies.end(), id,
+            [](const KinematicCollisionProxy& p, const std::string& key) { return p.proxy_id < key; });
+        if (proxy == dynamic_proxies.end() || proxy->proxy_id != id || !proxy->tire_support_candidate)
+            throw std::invalid_argument("Tire support requires an eligible dynamic proxy ID: " + id);
+    }
     const double requested_translation = std::hypot(
         body.linear_velocity_enu_mps.east_m * dt_seconds,
         body.linear_velocity_enu_mps.north_m * dt_seconds);
@@ -1068,6 +1108,19 @@ CollisionStepResult CollisionWorld::integrate_with_tire_supported_curbs(
         required_substeps = std::max(
             required_substeps,
             proxy_required_substeps(proxy, body, dt_seconds));
+    }
+    // Two proxies may approach one another faster than either approaches Ego.
+    // Bound that relative movement too before using the shared microstep loop.
+    for (std::size_t first = 0; first < dynamic_proxies.size(); ++first) {
+        if (dynamic_proxies[first].mass_kg <= 0.0) continue;
+        for (std::size_t second = first + 1; second < dynamic_proxies.size(); ++second) {
+            if (dynamic_proxies[second].mass_kg <= 0.0) continue;
+            const auto relative = subtract(dynamic_proxies[first].linear_velocity_enu_mps,
+                dynamic_proxies[second].linear_velocity_enu_mps);
+            required_substeps = std::max(required_substeps,
+                std::ceil(std::hypot(relative.east_m, relative.north_m) * dt_seconds
+                    / kMaximumTranslationPerSubstepM));
+        }
     }
 
     CollisionStepResult result;
@@ -1164,6 +1217,9 @@ CollisionStepResult CollisionWorld::integrate_with_tire_supported_curbs(
             }
             for (const std::size_t proxy_index : dynamic_candidates) {
                 auto& proxy = dynamic_proxies[proxy_index];
+                if (proxy.supported_vehicle_id == body.body_id
+                    || std::binary_search(tire_supported_proxy_ids.begin(),
+                        tire_supported_proxy_ids.end(), proxy.proxy_id)) continue;
                 const auto manifold = intersect_dynamic_proxy(body, proxy);
                 if (!manifold) {
                     continue;
@@ -1187,10 +1243,101 @@ CollisionStepResult CollisionWorld::integrate_with_tire_supported_curbs(
                 break;
             }
         }
+        // Pair contacts use the same <=0.1m bounded microsteps as Ego. A fast
+        // NPC crossing a pedestrian between tick endpoints cannot tunnel.
+        auto pair_contacts = resolve_runtime_proxy_pairs(dynamic_proxies);
+        result.runtime_proxy_contacts.insert(result.runtime_proxy_contacts.end(),
+            std::make_move_iterator(pair_contacts.begin()), std::make_move_iterator(pair_contacts.end()));
     }
 
     result.body = std::move(body);
     result.resolved_dynamic_proxies = std::move(dynamic_proxies);
+    return result;
+}
+
+std::vector<RuntimeProxyContact> resolve_runtime_proxy_pairs(
+    std::vector<KinematicCollisionProxy>& proxies)
+{
+    validate_and_sort_dynamic_proxies(proxies, {}, "__runtime_pair_solver__");
+    std::map<std::pair<std::string, std::string>, CollisionContact> contacts;
+    for (int pass = 0; pass < 4; ++pass) {
+        bool changed = false;
+        for (std::size_t a = 0; a < proxies.size(); ++a) {
+            if (proxies[a].mass_kg <= 0.0) continue;
+            for (std::size_t b = a + 1; b < proxies.size(); ++b) {
+                const auto anchored = [](const KinematicCollisionProxy& p) {
+                    return p.breakaway_impulse_n_s > 0.0 && !p.breakaway_released;
+                };
+                if (anchored(proxies[a]) && anchored(proxies[b])) continue;
+                const bool swap = anchored(proxies[a]);
+                auto& first = proxies[swap ? b : a];
+                auto& second = proxies[swap ? a : b];
+                if (second.mass_kg <= 0.0) continue;
+                if (first.supported_vehicle_id == second.proxy_id
+                    || second.supported_vehicle_id == first.proxy_id) continue;
+                const auto relative = subtract(first.linear_velocity_enu_mps, second.linear_velocity_enu_mps);
+                auto manifold = std::visit([&](const auto& lhs, const auto& rhs)
+                    -> std::optional<CollisionManifold> {
+                    using L = std::decay_t<decltype(lhs)>;
+                    using R = std::decay_t<decltype(rhs)>;
+                    if constexpr (std::is_same_v<L, ObbPrism> && std::is_same_v<R, ObbPrism>) {
+                        return intersect_obb_prisms(lhs, rhs, relative);
+                    } else if constexpr (std::is_same_v<L, ObbPrism>) {
+                        return intersect_obb_vertical_capsule(lhs, rhs, relative);
+                    } else if constexpr (std::is_same_v<R, ObbPrism>) {
+                        auto result = intersect_obb_vertical_capsule(rhs, lhs, multiply(relative, -1.0));
+                        if (result) result->normal_enu = multiply(result->normal_enu, -1.0);
+                        return result;
+                    } else {
+                        if (std::abs(lhs.center_up_m - rhs.center_up_m) >= lhs.half_height_m + rhs.half_height_m)
+                            return std::nullopt;
+                        const auto delta = subtract(lhs.center_enu, rhs.center_enu);
+                        const double distance = std::hypot(delta.east_m, delta.north_m);
+                        const double penetration = lhs.radius_m + rhs.radius_m - distance;
+                        if (penetration <= 0.0) return std::nullopt;
+                        const auto normal = distance > 1e-9 ? multiply(delta, 1.0 / distance)
+                            : CollisionVector2{1.0, 0.0};
+                        return CollisionManifold{normal,
+                            add(rhs.center_enu, multiply(normal, rhs.radius_m - penetration * 0.5)), penetration};
+                    }
+                }, first.shape, second.shape);
+                if (!manifold) continue;
+                changed = true;
+                const auto first_box = std::visit([](const auto& shape) -> ObbPrism {
+                    if constexpr (std::is_same_v<std::decay_t<decltype(shape)>, ObbPrism>) return shape;
+                    else return {shape.center_enu, shape.center_up_m, 0.0,
+                        shape.radius_m, shape.radius_m, shape.half_height_m};
+                }, first.shape);
+                PlanarRigidBody body{first.proxy_id, first_box, first.linear_velocity_enu_mps,
+                    first.heading_rate_rad_s, first.mass_kg,
+                    std::holds_alternative<ObbPrism>(first.shape) ? first.yaw_inertia_kg_m2 : 1e30};
+                const double impulse = resolve_finite_proxy_contact(body, second, *manifold);
+                std::visit([&](auto& shape) {
+                    shape.center_enu = body.shape.center_enu;
+                    if constexpr (std::is_same_v<std::decay_t<decltype(shape)>, ObbPrism>)
+                        shape.heading_rad = body.shape.heading_rad;
+                }, first.shape);
+                first.linear_velocity_enu_mps = body.linear_velocity_enu_mps;
+                first.heading_rate_rad_s = std::holds_alternative<ObbPrism>(first.shape)
+                    ? body.heading_rate_rad_s : 0.0;
+                clamp_finite_proxy_speed(first);
+                const auto accumulate = [&](const std::string& receiver, const std::string& other,
+                                            CollisionVector2 normal) {
+                    auto& contact = contacts[{receiver, other}];
+                    contact.collider_id = other;
+                    contact.normal_enu = normal;
+                    contact.contact_point_enu = manifold->contact_point_enu;
+                    contact.maximum_penetration_m = std::max(contact.maximum_penetration_m, manifold->penetration_m);
+                    contact.accumulated_normal_impulse_n_s += impulse;
+                };
+                accumulate(first.proxy_id, second.proxy_id, manifold->normal_enu);
+                accumulate(second.proxy_id, first.proxy_id, multiply(manifold->normal_enu, -1.0));
+            }
+        }
+        if (!changed) break;
+    }
+    std::vector<RuntimeProxyContact> result;
+    for (auto& [identity, contact] : contacts) result.push_back({identity.first, std::move(contact)});
     return result;
 }
 

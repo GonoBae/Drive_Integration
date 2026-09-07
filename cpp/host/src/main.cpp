@@ -1,4 +1,5 @@
 #include <chrono>
+#include <csignal>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
@@ -174,7 +175,8 @@ private:
 
 } // namespace
 
-int run_simcore(const simcore_host::RuntimeOptions& options)
+int run_simcore(const simcore_host::RuntimeOptions& options,
+                const std::filesystem::path& executable_path)
 {
     PlatformTimerResolution timer_resolution;
     std::cout << std::unitbuf;
@@ -206,6 +208,32 @@ int run_simcore(const simcore_host::RuntimeOptions& options)
     auto map_package = simcore_host::load_runtime_map_package(
         options.map_package_path);
     const std::string map_package_checksum = map_package.collision_checksum;
+    std::shared_ptr<simcore_host::PhysicsReplayRecorder> physics_replay;
+    if (options.record_physics_path || options.verify_physics_replay_path) {
+        const simcore_host::PhysicsReplayIdentity replay_identity{
+            simcore_host::physics_replay_file_checksum(executable_path),
+            loaded_vehicle.checksum, map_package_checksum,
+            options.origin_lat_deg, options.origin_lon_deg, options.origin_alt_m,
+            options.spawn_heading_deg, options.physics_frequency_hz};
+        if (options.verify_physics_replay_path) {
+            const auto result = simcore_host::verify_physics_replay(
+                *options.verify_physics_replay_path, replay_identity,
+                loaded_vehicle.parameters, map_package.ground_query,
+                map_package.collision_world);
+            std::cout << std::setprecision(12)
+                << "[Replay] PASS frames=" << result.frames << " events=" << result.events
+                << " resets=" << result.resets
+                << " dynamic_proxy_frames=" << result.dynamic_proxy_frames
+                << " maximum_position_error_m=" << result.maximum_position_error_m
+                << " maximum_yaw_error_deg=" << result.maximum_yaw_error_deg << "\n";
+            return 0;
+        }
+        physics_replay = std::make_shared<simcore_host::PhysicsReplayRecorder>(
+            *options.record_physics_path, replay_identity, options.record_ticks.value_or(3600));
+        std::cout << "[Replay] recording actual fixed-tick Ego physics to "
+                  << options.record_physics_path->string()
+                  << " frame_limit=" << options.record_ticks.value_or(3600) << "\n";
+    }
     const auto& ground_diagnostics = map_package.ground_diagnostics;
     const std::size_t reported_ground_cells =
         ground_diagnostics.payload_kind
@@ -277,8 +305,9 @@ int run_simcore(const simcore_host::RuntimeOptions& options)
 #endif
 
     SimulationHostCallbacks callbacks;
-    callbacks.broadcast_world_state = [&ws_server](const std::string& message) {
+    callbacks.broadcast_world_state = [&ws_server, &ioc, &physics_replay](const std::string& message) {
         ws_server->broadcast_binary(message);
+        if (physics_replay && physics_replay->complete()) ioc.stop();
     };
 #if defined(SIMCORE_ENABLE_ZMQ_OBSERVER)
     callbacks.publish_observer_state = [&publisher](const std::string& message) {
@@ -307,12 +336,14 @@ int run_simcore(const simcore_host::RuntimeOptions& options)
     host_config.npc_route = options.npc_route;
     host_config.npc_alternate_route = options.npc_alternate_route;
     host_config.npc_route_loop = options.npc_route_loop;
+    host_config.npc_autonomous = options.npc_autonomous;
     host_config.npc_start_offset_m = options.npc_start_offset_m;
     host_config.npc_max_speed_mps = options.npc_max_speed_mps;
     host_config.npc_count = options.npc_count;
     host_config.npc_spacing_m = options.npc_spacing_m;
     host_config.runtime_entities = std::move(runtime_entities);
     host_config.require_client_hello = true;
+    host_config.physics_replay = physics_replay;
     SimulationHost host(
         ioc,
         std::move(host_config),
@@ -373,6 +404,12 @@ int run_simcore(const simcore_host::RuntimeOptions& options)
 #endif
     std::cout << "\n";
 
+    // A capture closed through Ctrl+C has a verifiable END footer. A force-
+    // killed process intentionally leaves an incomplete, rejected recording.
+    net::signal_set shutdown_signals(ioc, SIGINT, SIGTERM);
+    shutdown_signals.async_wait([&ioc](const boost::system::error_code& error, int) {
+        if (!error) ioc.stop();
+    });
     ioc.run();
     if (traffic_watcher) {
         traffic_watcher->stop();
@@ -380,6 +417,15 @@ int run_simcore(const simcore_host::RuntimeOptions& options)
     map_reloader.stop();
     host.stop();
     ws_server->stop();
+    if (physics_replay) {
+        physics_replay->finish();
+        if (!physics_replay->valid()) {
+            std::cerr << "[Replay] INVALID: environment changed while recording\n";
+            return 1;
+        }
+        std::cout << "[Replay] saved complete recording frames="
+                  << physics_replay->frames() << "\n";
+    }
     return 0;
 }
 
@@ -395,7 +441,20 @@ int main(int argc, char* argv[])
             std::cout << simcore_host::runtime_options_help(defaults);
             return 0;
         }
-        return run_simcore(options);
+        std::filesystem::path executable_path = argv[0];
+#ifdef _WIN32
+        std::wstring module_path(32768, L'\0');
+        const DWORD length = GetModuleFileNameW(nullptr, module_path.data(),
+                                                static_cast<DWORD>(module_path.size()));
+        if (length == 0 || length >= module_path.size()) {
+            throw std::runtime_error("could not resolve running executable identity");
+        }
+        module_path.resize(length);
+        executable_path = module_path;
+#elif defined(__linux__)
+        executable_path = std::filesystem::read_symlink("/proc/self/exe");
+#endif
+        return run_simcore(options, executable_path);
     } catch (const std::exception& error) {
         std::cerr << "[SimCore] fatal error: " << error.what() << "\n";
         return 1;

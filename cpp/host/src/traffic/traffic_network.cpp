@@ -386,6 +386,7 @@ void validate_topology(const TrafficNetwork& network)
         if (!signal_near_stopline) { fail("controlled lane has no nearby signal in its stopline group"); }
     }
     for (const auto& signal : network.signals) {
+        if (signal.kind != TrafficSignalKind::Vehicle) continue;
         const bool controlled_stopline = std::any_of(network.lanes.begin(), network.lanes.end(),
             [&](const TrafficLane& lane) {
                 return lane.signal_group_id == signal.group_id
@@ -393,6 +394,109 @@ void validate_topology(const TrafficNetwork& network)
                                   signal.position_enu.north_m - lane.points.back().north_m) <= 15.0;
             });
         if (!controlled_stopline) { fail("signal has no matching nearby controlled stopline"); }
+    }
+}
+
+struct LaneSample {
+    GroundPointEnu point;
+    double east_tangent = 0.0;
+    double north_tangent = 0.0;
+};
+
+double lane_length(const TrafficLane& lane)
+{
+    double length = 0.0;
+    for (std::size_t i = 1; i < lane.points.size(); ++i) {
+        length += distance(lane.points[i - 1], lane.points[i]);
+    }
+    return length;
+}
+
+LaneSample lane_sample(const TrafficLane& lane, double station)
+{
+    for (std::size_t i = 1; i < lane.points.size(); ++i) {
+        const auto& a = lane.points[i - 1];
+        const auto& b = lane.points[i];
+        const double span = distance(a, b);
+        if (station <= span || i + 1 == lane.points.size()) {
+            const double t = std::clamp(station / span, 0.0, 1.0);
+            const double planar = std::hypot(b.east_m - a.east_m, b.north_m - a.north_m);
+            return {{a.east_m + (b.east_m - a.east_m) * t,
+                     a.north_m + (b.north_m - a.north_m) * t,
+                     a.up_m + (b.up_m - a.up_m) * t},
+                    (b.east_m - a.east_m) / planar,
+                    (b.north_m - a.north_m) / planar};
+        }
+        station -= span;
+    }
+    fail("cannot sample an empty lane");
+}
+
+void validate_lane_changes(const TrafficNetwork& network, const GroundQuery& ground,
+                           std::size_t& query_count)
+{
+    std::map<std::uint32_t, const TrafficLane*> by_id;
+    for (const auto& lane : network.lanes) { by_id.emplace(lane.id, &lane); }
+    for (const auto& lane : network.lanes) {
+        for (const auto& change : lane.lane_changes) {
+            const auto found = by_id.find(change.target_lane_id);
+            if (found == by_id.end() || change.target_lane_id == lane.id) {
+                fail("lane change references an unknown or identical lane");
+            }
+            const auto& target = *found->second;
+            const auto reciprocal = std::find_if(target.lane_changes.begin(), target.lane_changes.end(),
+                [&](const auto& other) { return other.target_lane_id == lane.id; });
+            if (reciprocal == target.lane_changes.end()
+                || std::abs(change.source_begin_m - reciprocal->target_begin_m) > 1.e-4
+                || std::abs(change.source_end_m - reciprocal->target_end_m) > 1.e-4
+                || std::abs(change.target_begin_m - reciprocal->source_begin_m) > 1.e-4
+                || std::abs(change.target_end_m - reciprocal->source_end_m) > 1.e-4) {
+                fail("lane change must have a matching reciprocal neighbor/window");
+            }
+            const double source_span = change.source_end_m - change.source_begin_m;
+            const double target_span = change.target_end_m - change.target_begin_m;
+            if (change.source_begin_m < 5.0 || change.target_begin_m < 5.0
+                || change.source_end_m > lane_length(lane) - 5.0
+                || change.target_end_m > lane_length(target) - 5.0
+                || source_span < 8.0 || target_span < 8.0
+                || std::abs(source_span - target_span) > 0.5
+                || lane.signal_group_id != target.signal_group_id) {
+                fail("lane change window must be aligned, at least 8m and clear of junctions");
+            }
+            const auto steps = static_cast<std::size_t>(std::ceil(source_span));
+            if (steps > max_ground_queries - query_count) {
+                fail("lane change sampling budget exceeded");
+            }
+            TrafficLane corridor;
+            corridor.id = lane.id;
+            double side_sign = 0.0;
+            for (std::size_t step = 0; step <= steps; ++step) {
+                const double t = static_cast<double>(step) / static_cast<double>(steps);
+                const auto a = lane_sample(lane, change.source_begin_m + source_span * t);
+                const auto b = lane_sample(target, change.target_begin_m + target_span * t);
+                const double dx = b.point.east_m - a.point.east_m;
+                const double dy = b.point.north_m - a.point.north_m;
+                const double across = a.east_tangent * dy - a.north_tangent * dx;
+                const double separation = std::hypot(dx, dy);
+                const double expected = (lane.width_m + target.width_m) * 0.5;
+                if (a.east_tangent * b.east_tangent + a.north_tangent * b.north_tangent < 0.9848
+                    || std::abs(dx * a.east_tangent + dy * a.north_tangent) > 0.5
+                    || std::abs(a.point.up_m - b.point.up_m) > 0.1
+                    || separation < expected - 0.10 || separation > expected + 0.75
+                    || (side_sign != 0.0 && across * side_sign <= 0.0)) {
+                    fail("lane change target must remain adjacent, parallel and same-direction");
+                }
+                side_sign = across;
+                corridor.width_m = std::max(corridor.width_m,
+                    separation + std::max(lane.width_m, target.width_m));
+                corridor.points.push_back({(a.point.east_m + b.point.east_m) * 0.5,
+                    (a.point.north_m + b.point.north_m) * 0.5,
+                    (a.point.up_m + b.point.up_m) * 0.5});
+            }
+            // Validate the union's two edges and middle, not only the separately
+            // supported lanes: a median, hole or raised divider is not drivable.
+            validate_ground(corridor, ground, query_count);
+        }
     }
 }
 
@@ -441,8 +545,24 @@ void validate_signal_plans(const TrafficNetwork& network)
             });
         const double crossing_length = distance(
             heads[0]->position_enu, heads[1]->position_enu);
-        if (!has_vehicle_head || crossing_length < 2.0 || crossing_length > 40.0) {
-            fail("pedestrian crossing must share a vehicle group and span 2..40m");
+        if (crossing_length < 2.0 || crossing_length > 40.0) {
+            fail("pedestrian crossing must span 2..40m");
+        }
+        if (!has_vehicle_head) {
+            const auto plan = std::find_if(network.signal_plans.begin(), network.signal_plans.end(),
+                [&](const auto& value) { return value.id == identity.first; });
+            if (plan == network.signal_plans.end()) fail("pedestrian crossing requires an owning signal plan");
+            for (const auto& phase : plan->phases) {
+                const auto active = [&](std::uint32_t group) {
+                    return std::find(phase.green_groups.begin(), phase.green_groups.end(), group) != phase.green_groups.end()
+                        || std::find(phase.yellow_groups.begin(), phase.yellow_groups.end(), group) != phase.yellow_groups.end();
+                };
+                if (!active(identity.second)) continue;
+                for (const auto& signal : network.signals) {
+                    if (signal.controller_id == identity.first && signal.kind == TrafficSignalKind::Vehicle
+                        && active(signal.group_id)) fail("exclusive pedestrian WALK requires all vehicle approaches red");
+                }
+            }
         }
     }
 }
@@ -497,8 +617,13 @@ TrafficNetwork load_traffic_network(const std::filesystem::path& path,
     std::size_t total_points = 0;
     for (const auto& child : lanes) {
         const auto& node = child.second;
-        object_fields(node, kinds, {"id", "width_m", "speed_limit_mps", "signal_group_id",
-                                   "terminal", "points", "successors"});
+        if (node.get_child_optional("lane_changes")) {
+            object_fields(node, kinds, {"id", "width_m", "speed_limit_mps", "signal_group_id",
+                                       "terminal", "points", "successors", "lane_changes"});
+        } else {
+            object_fields(node, kinds, {"id", "width_m", "speed_limit_mps", "signal_group_id",
+                                       "terminal", "points", "successors"});
+        }
         TrafficLane lane;
         lane.id = unsigned_number(node.get_child("id"), kinds);
         if (lane.id == 0 || !lane_ids.insert(lane.id).second) { fail("lane ID is zero or duplicate"); }
@@ -532,6 +657,28 @@ TrafficNetwork load_traffic_network(const std::filesystem::path& path,
             lane.successors.push_back(id);
         }
         std::sort(lane.successors.begin(), lane.successors.end());
+        if (const auto changes = node.get_child_optional("lane_changes")) {
+            kind(*changes, JsonKind::Array, kinds);
+            if (changes->size() > 2) { fail("lane has more than two lane-change neighbors"); }
+            std::set<std::uint32_t> targets;
+            for (const auto& item : *changes) {
+                const auto& change_node = item.second;
+                object_fields(change_node, kinds, {"target_lane_id", "source_begin_m",
+                    "source_end_m", "target_begin_m", "target_end_m"});
+                TrafficLaneChange change;
+                change.target_lane_id = unsigned_number(change_node.get_child("target_lane_id"), kinds);
+                if (change.target_lane_id == 0 || !targets.insert(change.target_lane_id).second) {
+                    fail("lane change target is zero or duplicate");
+                }
+                change.source_begin_m = finite_number(change_node.get_child("source_begin_m"), kinds);
+                change.source_end_m = finite_number(change_node.get_child("source_end_m"), kinds);
+                change.target_begin_m = finite_number(change_node.get_child("target_begin_m"), kinds);
+                change.target_end_m = finite_number(change_node.get_child("target_end_m"), kinds);
+                lane.lane_changes.push_back(change);
+            }
+            std::sort(lane.lane_changes.begin(), lane.lane_changes.end(),
+                [](const auto& a, const auto& b) { return a.target_lane_id < b.target_lane_id; });
+        }
         result.lanes.push_back(std::move(lane));
     }
 
@@ -657,6 +804,7 @@ TrafficNetwork load_traffic_network(const std::filesystem::path& path,
     validate_topology(result);
     std::size_t ground_queries = 0;
     for (const auto& lane : result.lanes) { validate_ground(lane, ground, ground_queries); }
+    validate_lane_changes(result, ground, ground_queries);
     return result;
 }
 

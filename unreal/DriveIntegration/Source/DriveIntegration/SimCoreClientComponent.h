@@ -4,11 +4,13 @@
 #include "Components/ActorComponent.h"
 #include "IWebSocket.h"
 #include "SimCoreClientDiagnostics.h"
+#include "SimCorePerformanceCapture.h"
 #include "SimCoreProtocol.h"
 #include "SimCoreClientComponent.generated.h"
 
 class AActor;
 class ASimCoreTrafficSignalActor;
+class ASimCoreStructureDamageActor;
 class UStaticMesh;
 
 UENUM(BlueprintType)
@@ -97,6 +99,13 @@ public:
 	UFUNCTION(BlueprintPure, Category="SimCore")
 	bool IsConnected() const;
 
+	/** Starts a fresh authoritative Play lifecycle with the selected Ego profile. */
+	bool SelectVehicleClass(SimCoreProtocol::ERuntimeVehicleClass VehicleClass);
+	SimCoreProtocol::ERuntimeVehicleClass GetSelectedVehicleClass() const
+	{
+		return SelectedVehicleClass;
+	}
+
 	UFUNCTION(BlueprintPure, Category="SimCore|Diagnostics")
 	ESimCoreConnectionState GetConnectionState() const { return ConnectionState; }
 
@@ -112,6 +121,8 @@ public:
 		bool bSideBrake,
 		SimCoreProtocol::EVehicleGear Gear);
 	bool GetLatestState(SimCoreProtocol::FVehicleState& OutState, float& OutStateAgeSeconds) const;
+	/** F3 overlay of the accepted runtime collision volumes, not presentation mesh bounds. */
+	void DrawRuntimeEntityDebug() const;
 	/** Local command intent only; this is not an authoritative host acknowledgement. */
 	bool IsSideBrakeRequested() const { return PendingControl.bHandbrake; }
 
@@ -125,6 +136,9 @@ private:
 	friend class FSimCoreSteeringPawnPresentationTest;
 	friend class FSimCoreNpcClientLifecycleTest;
 	friend class FSimCoreDebugHudVehicleStateTest;
+	friend class FSimCoreBinaryMessageFramingTest;
+	friend class FSimCoreBinaryMessageBoundarySafetyTest;
+	friend class FSimCorePlayerVehicleHelloValidationTest;
 	static constexpr int32 MaxIncomingMessageBytes = 1024 * 1024;
 
 	void StartConnectionAttempt();
@@ -151,6 +165,8 @@ private:
 	void TickTrafficSignals();
 	void InvalidateTrafficSignals();
 	void DestroyTrafficSignalActors();
+	void TickStructureDamage(float DeltaSeconds);
+	void DestroyStructureDamageActors();
 	FString BuildTrafficSignalStatusText() const;
 	void ScheduleReconnect();
 	void SetConnectionState(ESimCoreConnectionState NewState);
@@ -170,26 +186,29 @@ private:
 	void ApplyConnected(uint64 Generation);
 	void ApplyConnectionError(uint64 Generation, const FString& Error);
 	void ApplyClosed(uint64 Generation, int32 StatusCode, const FString& Reason, bool bWasClean);
-	void ApplyRawMessage(
+	void ApplyBinaryMessage(
 		uint64 Generation,
 		TArray<uint8> Fragment,
-		SIZE_T BytesRemaining,
+		bool bIsLastFragment,
 		bool bFragmentTooLarge);
 
 	TSharedPtr<IWebSocket> Socket;
 	FDelegateHandle ConnectedDelegateHandle;
 	FDelegateHandle ConnectionErrorDelegateHandle;
 	FDelegateHandle ClosedDelegateHandle;
-	FDelegateHandle RawMessageDelegateHandle;
+	FDelegateHandle BinaryMessageDelegateHandle;
 	SimCoreProtocol::FControlCommand PendingControl;
 	SimCoreProtocol::FControlCommand LastSentControl;
 	SimCoreProtocol::FVehicleState LatestState;
 	SimCoreClientDiagnostics::FGlobalEstopHealthCache GlobalEstopHealthCache;
+	FSimCorePerformanceCapture PerformanceCapture;
 	TMap<uint32, TWeakObjectPtr<AActor>> RuntimeEntityActors;
 	TMap<uint32, SimCoreProtocol::EEntityKind> RuntimeEntityActorKinds;
 	TMap<uint32, SimCoreProtocol::FVehicleState> RuntimeEntityStates;
 	double RuntimeEntityReceiveTimeSeconds = 0.0;
 	TMap<uint32, TWeakObjectPtr<ASimCoreTrafficSignalActor>> TrafficSignalActors;
+	TMap<FString, TWeakObjectPtr<ASimCoreStructureDamageActor>> StructureDamageActors;
+	FString PresentedStructureMapChecksum;
 	FString PresentedTrafficNetworkChecksum;
 	bool bTrafficSnapshotAccepted = false;
 	UPROPERTY(Transient)
@@ -197,6 +216,8 @@ private:
 	TArray<uint8> IncomingMessage;
 	FString SessionId;
 	FString PlaySessionId;
+	SimCoreProtocol::ERuntimeVehicleClass SelectedVehicleClass =
+		SimCoreProtocol::ERuntimeVehicleClass::Sedan;
 	uint64 SocketGeneration = 0;
 	uint64 OutgoingSequence = 1;
 	double LatestStateReceiveTimeSeconds = 0.0;

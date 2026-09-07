@@ -1,10 +1,10 @@
 #include "SimCoreClientComponent.h"
 
-#include "Components/StaticMeshComponent.h"
-#include "Engine/StaticMeshActor.h"
 #include "Engine/World.h"
+#include "DrawDebugHelpers.h"
+#include "SimCoreCoordinateFrames.h"
 #include "SimCoreNpcPresentationActor.h"
-#include "SimCorePresentation.h"
+#include "SimCorePedestrianPresentationActor.h"
 #include "SimCoreTrafficSignalActor.h"
 
 void USimCoreClientComponent::SyncRuntimeProxyActors(
@@ -89,23 +89,10 @@ void USimCoreClientComponent::TickRuntimeProxyActors(float DeltaSeconds)
 				Actor = World->SpawnActor<ASimCoreNpcPresentationActor>(
 					ASimCoreNpcPresentationActor::StaticClass(), FTransform::Identity, Parameters);
 			}
-			else if (RuntimePedestrianMesh)
+			else
 			{
-				AStaticMeshActor* Pedestrian = World->SpawnActor<AStaticMeshActor>(
-					AStaticMeshActor::StaticClass(), FTransform::Identity, Parameters);
-				if (Pedestrian)
-				{
-					auto* Mesh = Pedestrian->GetStaticMeshComponent();
-					Mesh->SetMobility(EComponentMobility::Movable);
-					Mesh->SetStaticMesh(RuntimePedestrianMesh);
-					Mesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-					Mesh->SetGenerateOverlapEvents(false);
-					Mesh->SetCanEverAffectNavigation(false);
-					Mesh->SetSimulatePhysics(false);
-					Pedestrian->SetActorEnableCollision(false);
-					Pedestrian->Tags.AddUnique(TEXT("SimCoreRuntimeEntity"));
-					Actor = Pedestrian;
-				}
+				Actor = World->SpawnActor<ASimCorePedestrianPresentationActor>(
+					ASimCorePedestrianPresentationActor::StaticClass(), FTransform::Identity, Parameters);
 			}
 			if (Actor)
 			{
@@ -120,18 +107,10 @@ void USimCoreClientComponent::TickRuntimeProxyActors(float DeltaSeconds)
 			bApplied = Npc->ApplySnapshot(Entity, static_cast<float>(Age), DeltaSeconds,
 				bMotionAllowed, RuntimeEntityMaxExtrapolationSeconds, RuntimeEntityPresentationOffsetCm);
 		}
-		else
+		else if (ASimCorePedestrianPresentationActor* Pedestrian = Cast<ASimCorePedestrianPresentationActor>(Actor))
 		{
-			SimCorePresentation::FRuntimeEntityPresentationSample Sample;
-			bApplied = SimCorePresentation::BuildRuntimeEntitySample(Entity,
-				bMotionAllowed ? static_cast<float>(Age) : 0.0f,
-				RuntimeEntityMaxExtrapolationSeconds, RuntimeEntityPresentationOffsetCm, Sample);
-			if (bApplied)
-			{
-				Actor->SetActorLocationAndRotation(Sample.ActorLocation, Sample.ActorRotation,
-					false, nullptr, ETeleportType::TeleportPhysics);
-				Actor->SetActorScale3D(Sample.ActorScale);
-			}
+			bApplied = Pedestrian->ApplySnapshot(Entity, static_cast<float>(Age), DeltaSeconds,
+				bMotionAllowed, RuntimeEntityMaxExtrapolationSeconds, RuntimeEntityPresentationOffsetCm);
 		}
 		if (!bApplied)
 		{
@@ -156,4 +135,44 @@ void USimCoreClientComponent::DestroyRuntimeProxyActors()
 	RuntimeEntityActorKinds.Reset();
 	RuntimeEntityStates.Reset();
 	RuntimeEntityReceiveTimeSeconds = 0.0;
+}
+
+void USimCoreClientComponent::DrawRuntimeEntityDebug() const
+{
+	UWorld* World = GetWorld();
+	const double Age = FPlatformTime::Seconds() - RuntimeEntityReceiveTimeSeconds;
+	if (!World || !World->IsGameWorld() || !bHasState || !IsConnected()
+		|| !FMath::IsFinite(Age) || Age < 0.0 || Age > SimCoreTrafficSignals::SnapshotFreshnessSeconds) return;
+	for (const auto& Pair : RuntimeEntityStates)
+	{
+		const auto& State = Pair.Value;
+		const AActor* Actor = RuntimeEntityActors.FindRef(Pair.Key).Get();
+		if (!Actor || Actor->IsHidden()) continue;
+		const FVector Centre = Actor->GetActorLocation();
+		const bool bPedestrian = State.EntityKind == SimCoreProtocol::EEntityKind::Pedestrian;
+		if (bPedestrian && !State.bPedestrianDowned)
+		{
+			DrawDebugCapsule(World, Centre, State.CollisionHalfHeightMeters * 100.0f,
+				State.CollisionRadiusMeters * 100.0f, FQuat::Identity, FColor::Cyan,
+				false, -1.0f, 0, 1.5f);
+		}
+		else
+		{
+			// Downed extents are the server's already pitch/roll-projected vertical
+			// OBB. Applying visual pitch a second time would draw a standing ghost.
+			const FQuat CollisionRotation = bPedestrian
+				? FRotator(0.0, State.HeadingDegrees, 0.0).Quaternion() : Actor->GetActorQuat();
+			DrawDebugBox(World, Centre,
+				FVector(State.CollisionHalfLengthMeters, State.CollisionHalfWidthMeters,
+					State.CollisionHalfHeightMeters) * 100.0,
+				CollisionRotation, State.bPedestrianAirborne ? FColor::Yellow : FColor::Cyan,
+				false, -1.0f, 0, 1.5f);
+		}
+		DrawDebugSphere(World, Centre, 5.0f, 8, FColor::White, false, -1.0f);
+		DrawDebugString(World, Centre + FVector::UpVector * 115.0,
+			FString::Printf(TEXT("%u %s event %u"), State.EntityId,
+				State.bPedestrianAirborne ? TEXT("AIRBORNE")
+					: (State.bPedestrianDowned ? TEXT("DOWNED") : TEXT("UPRIGHT")),
+				State.CollisionEventSequence), nullptr, FColor::White, 0.0f, false, 0.8f);
+	}
 }

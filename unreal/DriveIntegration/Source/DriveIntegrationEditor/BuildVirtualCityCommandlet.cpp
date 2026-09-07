@@ -30,6 +30,8 @@
 #include "Materials/MaterialExpressionConstant.h"
 #include "Materials/MaterialExpressionConstant3Vector.h"
 #include "Misc/FileHelper.h"
+#include "Misc/DateTime.h"
+#include "Misc/Guid.h"
 #include "Misc/PackageName.h"
 #include "Misc/Parse.h"
 #include "Misc/Paths.h"
@@ -56,6 +58,11 @@ constexpr float HeightfieldSampleSpacingCm = 50.0f;
 // support at 16 cm while the curb top was 24 cm. This exact delta is accepted
 // only by the targeted migration below; ordinary validation remains strict.
 constexpr double LegacySidewalkToCurbDeltaCm = 8.0;
+const FName ThreeLaneTag(TEXT("SimCore.SignalCity.ThreeLane.v1"));
+const FName SafeCrossingsTag(TEXT("SimCore.SignalCity.SidewalkCrossings.v1"));
+const FName CompleteLaneMarkingsTag(TEXT("SimCore.SignalCity.CompleteLaneMarkings.v1"));
+const FName NaturalLaneMarkingsV2Tag(TEXT("SimCore.SignalCity.NaturalLaneMarkings.v2"));
+const FName AlignedCollectorMarkingsTag(TEXT("SimCore.SignalCity.AlignedCollectorMarkings.v3"));
 
 FVector ToWorldCm(const FVector& EnuM)
 {
@@ -210,6 +217,14 @@ bool BuildScene(UWorld* World, const SimCoreVirtualCity::FLayout& Layout)
 	}
 	World->GetWorldSettings()->DefaultGameMode = GameMode;
 	AActor* Ground = SpawnNamed<AActor>(World, GroundName);
+	if (FString(ExpectedMapId) == TEXT("signal_city_v2"))
+	{
+		Ground->Tags.Add(ThreeLaneTag);
+		Ground->Tags.Add(SafeCrossingsTag);
+		Ground->Tags.Add(CompleteLaneMarkingsTag);
+		Ground->Tags.Add(NaturalLaneMarkingsV2Tag);
+		Ground->Tags.Add(AlignedCollectorMarkingsTag);
+	}
 	USceneComponent* Root = NewObject<USceneComponent>(Ground, TEXT("GroundRoot"), RF_Transactional);
 	Ground->SetRootComponent(Root);
 	Ground->AddInstanceComponent(Root);
@@ -576,6 +591,135 @@ bool SyncSidewalkCurbHeight(UWorld* World, const SimCoreVirtualCity::FLayout& La
 	return true;
 }
 
+bool SyncSignalCityTrafficLanes(UWorld* World, const SimCoreVirtualCity::FLayout& Layout,
+	const FString& MapFilename)
+{
+	TMap<FName, AActor*> Actors;
+	for (TActorIterator<AActor> It(World); It; ++It) Actors.Add(It->GetFName(), *It);
+	AActor* Ground = Actors.FindRef(GroundName);
+	if (!Ground || !Ground->Tags.Contains(GeneratedTag)) return false;
+	if (Ground->Tags.Contains(AlignedCollectorMarkingsTag)) return ValidateScene(World, Layout);
+	const auto Legacy = Ground->Tags.Contains(NaturalLaneMarkingsV2Tag)
+		? SimCoreSignalCity::BuildNaturalLaneMarkingsV2Layout()
+		: (Ground->Tags.Contains(CompleteLaneMarkingsTag)
+		? SimCoreSignalCity::BuildRaisedLaneMarkingsLayout()
+		: (Ground->Tags.Contains(SafeCrossingsTag)
+			? SimCoreSignalCity::BuildIncompleteLaneMarkingsLayout()
+			: (Ground->Tags.Contains(ThreeLaneTag)
+				? SimCoreSignalCity::BuildInitialThreeLaneLayout()
+				: SimCoreSignalCity::BuildLegacySingleLaneLayout())));
+	// This migration accepts only the exact last generated layout. User-edited
+	// roads, colliders or name collisions are refused before backup/mutation.
+	if (!ValidateScene(World, Legacy)) return false;
+	TArray<UStaticMeshComponent*> GroundComponents;
+	Ground->GetComponents(GroundComponents);
+	TMap<FName, UStaticMeshComponent*> GroundByName;
+	for (UStaticMeshComponent* Component : GroundComponents) GroundByName.Add(Component->GetFName(), Component);
+	TSet<FName> DesiredActorNames;
+	for (const auto& Box : Layout.Boxes)
+	{
+		if (!Box.bGround) DesiredActorNames.Add(Box.Id);
+	}
+	TArray<AActor*> RetiredGeneratedActors;
+	for (const auto& Box : Legacy.Boxes)
+	{
+		if (Box.bGround || DesiredActorNames.Contains(Box.Id)) continue;
+		AActor* Stale = Actors.FindRef(Box.Id);
+		if (!Stale || !Stale->Tags.Contains(GeneratedTag))
+		{
+			UE_LOG(LogBuildVirtualCity, Error,
+				TEXT("Traffic-lane sync refused stale unowned geometry: %s"),
+				*Box.Id.ToString());
+			return false;
+		}
+		RetiredGeneratedActors.Add(Stale);
+	}
+	for (const auto& Box : Layout.Boxes)
+	{
+		AActor* Existing = Actors.FindRef(Box.Id);
+		if ((!Box.bGround && Existing && !Existing->Tags.Contains(GeneratedTag))
+			|| (Box.bGround && !GroundByName.Contains(Box.Id)))
+		{
+			UE_LOG(LogBuildVirtualCity, Error, TEXT("Traffic-lane sync refused unowned/missing geometry: %s"), *Box.Id.ToString());
+			return false;
+		}
+		if (Box.bStaticCollider)
+		{
+			AActor* Marker = Actors.FindRef(FName(*(TEXT("Collider_") + Box.Id.ToString())));
+			if (!Marker || !Marker->Tags.Contains(GeneratedTag)) return false;
+		}
+	}
+	const FString Backup = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("Backups"))
+		/ (TEXT("SignalCityTraffic-") + FDateTime::Now().ToString(TEXT("%Y%m%d-%H%M%S"))
+			+ TEXT("-") + FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8));
+	if (!IFileManager::Get().MakeDirectory(*Backup, true)
+		|| IFileManager::Get().Copy(*(Backup / TEXT("L_SignalCity.umap")), *MapFilename, false) != COPY_OK) return false;
+	const FString PackageDirectory = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir(), PackageRelative);
+	for (const TCHAR* Name : {TEXT("manifest.cfg"), TEXT("static_colliders.csv"), TEXT("ground_surface.csv"),
+		TEXT("ground_heightfield.bin"), TEXT("drive_route.csv"), TEXT("traffic_network.json")})
+	{
+		const FString Source = PackageDirectory / Name;
+		if (IFileManager::Get().FileExists(*Source)
+			&& IFileManager::Get().Copy(*(Backup / Name), *Source, false) != COPY_OK) return false;
+	}
+	UE_LOG(LogBuildVirtualCity, Display, TEXT("Original map and map-package backup: %s"), *Backup);
+	UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+	if (!Cube) return false;
+	for (const auto& Box : Layout.Boxes)
+	{
+		if (Box.bGround)
+		{
+			UStaticMeshComponent* Component = GroundByName.FindRef(Box.Id);
+			Component->Modify();
+			Component->SetWorldTransform(BoxTransform(Box));
+		}
+		else
+		{
+			AStaticMeshActor* Actor = Cast<AStaticMeshActor>(Actors.FindRef(Box.Id));
+			if (!Actor)
+			{
+				Actor = SpawnNamed<AStaticMeshActor>(World, Box.Id);
+				UMaterial* Material = CreatePaletteMaterial(Box.Palette);
+				if (!Actor || !Material) return false;
+				ConfigureMesh(Actor->GetStaticMeshComponent(), Cube, Material, Box);
+				Actor->SetFolderPath(Box.Id.ToString().StartsWith(TEXT("Backdrop_"))
+					? TEXT("SignalCity/DistantBackdrop") : TEXT("SignalCity/LaneMarkings"));
+			}
+			Actor->Modify();
+			Actor->SetActorTransform(BoxTransform(Box));
+		}
+		if (Box.bStaticCollider)
+		{
+			auto* Marker = Cast<ASimCoreStaticCollider>(Actors.FindRef(FName(*(TEXT("Collider_") + Box.Id.ToString()))));
+			if (!Marker) return false;
+			Marker->Modify();
+			Marker->CollisionBounds->SetBoxExtent(Box.SizeM * 50.0);
+			Marker->SetActorLocationAndRotation(ToWorldCm(Box.CenterEnuM), FRotator(0, Box.HeadingDegrees, 0));
+		}
+	}
+	for (AActor* Actor : RetiredGeneratedActors)
+	{
+		if (!World->DestroyActor(Actor, false, true))
+		{
+			UE_LOG(LogBuildVirtualCity, Error,
+				TEXT("Traffic-lane sync could not retire generated marking %s."),
+				*Actor->GetName());
+			return false;
+		}
+	}
+	Ground->Tags.AddUnique(ThreeLaneTag);
+	Ground->Tags.AddUnique(SafeCrossingsTag);
+	Ground->Tags.AddUnique(CompleteLaneMarkingsTag);
+	Ground->Tags.AddUnique(NaturalLaneMarkingsV2Tag);
+	Ground->Tags.AddUnique(AlignedCollectorMarkingsTag);
+	Ground->MarkPackageDirty();
+	World->UpdateWorldComponents(true, false);
+	UE_LOG(LogBuildVirtualCity, Display,
+		TEXT("Synced aligned collector paint, natural road paint, 10m collectors and visual-only distant backdrop; retired %d obsolete generated marking actors."),
+		RetiredGeneratedActors.Num());
+	return ValidateScene(World, Layout);
+}
+
 bool WriteRoute(const SimCoreVirtualCity::FLayout& Layout)
 {
 	FString Csv = TEXT("# Authoring QA checkpoints only; not a LaneGraph, navigation or traffic implementation.\neast_m,north_m,up_m,heading_deg\n");
@@ -635,16 +779,18 @@ int32 UBuildVirtualCityCommandlet::Main(const FString& Params)
 		FParse::Param(*Params, TEXT("SyncHeightfieldResolution"));
 	const bool bSyncSidewalkCurbHeight =
 		FParse::Param(*Params, TEXT("SyncSidewalkCurbHeight"));
+	const bool bSyncTrafficLanes = FParse::Param(*Params, TEXT("SyncTrafficLanes"));
 	const int32 ExplicitModeCount = static_cast<int32>(bValidateOnly)
 		+ static_cast<int32>(bBakeOnly) + static_cast<int32>(bSyncGeneratedGround)
 		+ static_cast<int32>(bSyncHeightfieldResolution)
-		+ static_cast<int32>(bSyncSidewalkCurbHeight);
+		+ static_cast<int32>(bSyncSidewalkCurbHeight) + static_cast<int32>(bSyncTrafficLanes);
 	if (ExplicitModeCount > 1 || FParse::Param(*Params, TEXT("Replace"))
+		|| (bSyncTrafficLanes && !bSignalCity)
 		|| (bSignalCity && (bSyncGeneratedGround || bSyncHeightfieldResolution
 			|| bSyncSidewalkCurbHeight)))
 	{
 		UE_LOG(LogBuildVirtualCity, Error,
-			TEXT("Choose creation, -ValidateOnly or -BakeOnly. Legacy -Sync* migrations apply only to virtual_city_v1. General replacement is unsupported."));
+			TEXT("Choose one mode. -SignalCity -SyncTrafficLanes is a guarded migration with backup; legacy -Sync* modes apply to virtual_city_v1. General replacement is unsupported."));
 		return 1;
 	}
 	const FString MapFilename = FPackageName::LongPackageNameToFilename(MapAsset,
@@ -652,7 +798,7 @@ int32 UBuildVirtualCityCommandlet::Main(const FString& Params)
 	const bool bMapExists = IFileManager::Get().FileExists(*MapFilename);
 	const bool bExistingMapMode = bValidateOnly || bBakeOnly
 		|| bSyncGeneratedGround || bSyncHeightfieldResolution
-		|| bSyncSidewalkCurbHeight;
+		|| bSyncSidewalkCurbHeight || bSyncTrafficLanes;
 	if (!GEditor || ((!bExistingMapMode) && bMapExists)
 		|| (bExistingMapMode && !bMapExists))
 	{
@@ -675,6 +821,13 @@ int32 UBuildVirtualCityCommandlet::Main(const FString& Params)
 		World = UEditorLoadingAndSavingUtils::LoadMap(MapFilename);
 	}
 	if (!World) { return 1; }
+	if (bSyncTrafficLanes)
+	{
+		if (!SyncSignalCityTrafficLanes(World, Layout, MapFilename)
+			|| !UEditorLoadingAndSavingUtils::SaveMap(World, MapAsset)) return 1;
+		World = UEditorLoadingAndSavingUtils::LoadMap(MapFilename);
+		if (!World) return 1;
+	}
 	if (bSyncGeneratedGround)
 	{
 		if (!SyncGeneratedGroundComponents(World, Layout)
@@ -740,6 +893,7 @@ int32 UBuildVirtualCityCommandlet::Main(const FString& Params)
 			: (bSyncGeneratedGround ? TEXT("sync-ground-and-bake")
 				: (bSyncHeightfieldResolution ? TEXT("sync-heightfield-and-bake")
 					: (bSyncSidewalkCurbHeight ? TEXT("sync-sidewalk-height-and-bake")
-						: TEXT("create"))))));
+						: (bSyncTrafficLanes ? TEXT("sync-traffic-lanes-and-bake")
+							: TEXT("create")))))));
 	return 0;
 }

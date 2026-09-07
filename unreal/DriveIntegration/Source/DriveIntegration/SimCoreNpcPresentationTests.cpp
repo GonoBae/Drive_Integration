@@ -5,7 +5,9 @@
 #include "Components/SceneComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
-#include "Engine/StaticMeshActor.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "SimCorePedestrianPresentationActor.h"
+#include "SimCoreDeformableBody.h"
 #include "Engine/World.h"
 #include "HAL/PlatformTime.h"
 #include "Misc/AutomationTest.h"
@@ -123,6 +125,20 @@ TArray<uint8> Envelope(uint64 Sequence, const TArray<FVehicleState>& Entities,
 		Vector(Bytes, 23, Entity.LinearVelocityEnu);
 		Number(Bytes, 24, Entity.CollisionHalfLengthMeters); Number(Bytes, 25, Entity.CollisionHalfWidthMeters);
 		Number(Bytes, 26, Entity.CollisionHalfHeightMeters); Number(Bytes, 27, Entity.CollisionRadiusMeters);
+		Number(Bytes, 28, Entity.DamagePercent); Number(Bytes, 29, Entity.LastImpactImpulseNs);
+		Integer(Bytes, 30, static_cast<uint8>(Entity.DamageZone)); Integer(Bytes, 31, Entity.CollisionEventSequence);
+		Integer(Bytes, 32, static_cast<uint8>(Entity.RuntimeRecoveryPhase)); Vector(Bytes, 33, Entity.ImpactDirectionEnu);
+		Integer(Bytes, 34, Entity.bPedestrianDowned); Integer(Bytes, 35, Entity.bPedestrianAirborne);
+		Integer(Bytes, 36, static_cast<uint8>(Entity.TurnIndicator));
+		for (const auto& Dent : Entity.DentPatches) {
+			TArray<uint8> Patch;
+			Number(Patch,1,static_cast<float>(Dent.Position.X)); Number(Patch,2,static_cast<float>(Dent.Position.Y));
+			Number(Patch,3,static_cast<float>(Dent.Inward.X)); Number(Patch,4,static_cast<float>(Dent.Inward.Y));
+			Number(Patch,5,Dent.RadiusMeters); Number(Patch,6,Dent.DepthMeters);
+			Message(Bytes,37,Patch);
+		}
+		Integer(Bytes, 38, Entity.HornEventSequence);
+		Integer(Bytes, 39, static_cast<uint8>(Entity.RuntimeVehicleClass));
 		Message(World, 1, Bytes);
 	}
 	if (!Status.IsEmpty())
@@ -158,10 +174,32 @@ bool FSimCoreNpcActorPresentationTest::RunTest(const FString& Parameters)
 	Ok &= TestTrue(TEXT("Current project reuses the authored Sedan body and all four wheels"), Actor->HasAuthoredSedan()
 		&& Actor->GetBody()->GetStaticMesh()->GetPathName() == TEXT("/Game/Vehicles/Sedan/SM_SedanBody.SM_SedanBody"));
 	if (!Actor->HasAuthoredSedan()) return false;
+	Ok &= TestTrue(TEXT("closed hinged door keeps authored NPC bounds laterally centred"),
+		FMath::Abs(Actor->GetAuthoredBounds().GetCenter().Y) < 1.0f);
 	Ok &= TestTrue(TEXT("NPC is transient, nonreplicated, and noncolliding"),
 		Actor->HasAnyFlags(RF_Transient) && !Actor->GetIsReplicated() && !Actor->GetActorEnableCollision());
 	TArray<UStaticMeshComponent*> Meshes; Actor->GetComponents(Meshes);
-	Ok &= TestEqual(TEXT("Body plus four real wheel components"), Meshes.Num(), 5);
+	Ok &= TestEqual(TEXT("Body, four wheels and twelve authored interior panels"), Meshes.Num(), 17);
+	for (const FName InteriorName : {
+		FName(TEXT("SimCoreDriverSeatCushion")),
+		FName(TEXT("SimCoreDriverSeatBack")),
+		FName(TEXT("SimCoreDashboard")),
+		FName(TEXT("SimCorePassengerSeatCushion")),
+		FName(TEXT("SimCorePassengerSeatBack")),
+		FName(TEXT("SimCoreRearSeatCushion")),
+		FName(TEXT("SimCoreRearSeatBack")),
+		FName(TEXT("SimCoreCabinFloor")),
+		FName(TEXT("SimCoreCenterConsole")),
+		FName(TEXT("SimCoreLeftDoorPanel")),
+		FName(TEXT("SimCoreRightDoorPanel")),
+		FName(TEXT("SimCoreInstrumentBinnacle")) })
+	{
+		Ok &= TestTrue(*FString::Printf(TEXT("Interior component %s is present"), *InteriorName.ToString()),
+			Meshes.ContainsByPredicate([InteriorName](const UStaticMeshComponent* Mesh)
+			{
+				return Mesh && Mesh->GetFName() == InteriorName;
+			}));
+	}
 	for (UStaticMeshComponent* Mesh : Meshes)
 	{
 		Ok &= TestTrue(TEXT("Every NPC mesh is visual-only and movable"),
@@ -221,6 +259,70 @@ bool FSimCoreNpcActorPresentationTest::RunTest(const FString& Parameters)
 	return Ok;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSimCoreNpcFleetVariantsTest,
+	"DriveIntegration.NpcPresentation.VehicleClassModels",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSimCoreNpcFleetVariantsTest::RunTest(const FString& Parameters)
+{
+	using namespace SimCoreNpcPresentationTests;
+	FTestWorld Scene;
+	auto* Actor = Scene.World
+		? Scene.World->SpawnActor<ASimCoreNpcPresentationActor>() : nullptr;
+	if (!TestNotNull(TEXT("Fleet NPC actor"), Actor)) return false;
+	bool Ok = TestTrue(TEXT("Compact, truck and motorcycle authored meshes are installed"),
+		Actor->HasAuthoredFleet());
+	if (!Actor->HasAuthoredFleet()) return false;
+
+	struct FCase
+	{
+		ERuntimeVehicleClass Class;
+		const TCHAR* Path;
+		float HalfLength;
+		float HalfWidth;
+		float HalfHeight;
+		int32 Wheels;
+	};
+	const FCase Cases[] = {
+		{ERuntimeVehicleClass::Sedan,
+			TEXT("/Game/Vehicles/Sedan/SM_SedanBody.SM_SedanBody"), 2.2f, 1.0f, .75f, 4},
+		{ERuntimeVehicleClass::Compact,
+			TEXT("/Game/Vehicles/NpcFleet/SM_CompactBody.SM_CompactBody"), 1.8f, .86f, .70f, 4},
+		{ERuntimeVehicleClass::Truck,
+			TEXT("/Game/Vehicles/NpcFleet/SM_TruckBody.SM_TruckBody"), 3.1f, 1.12f, 1.25f, 4},
+		{ERuntimeVehicleClass::Motorcycle,
+			TEXT("/Game/Vehicles/NpcFleet/SM_MotorcycleBody.SM_MotorcycleBody"), 1.15f, .38f, .68f, 2},
+	};
+	TArray<FVector> Sizes;
+	for (const FCase& Case : Cases)
+	{
+		FVehicleState State = Npc(3.0f);
+		State.RuntimeVehicleClass = Case.Class;
+		State.CollisionHalfLengthMeters = Case.HalfLength;
+		State.CollisionHalfWidthMeters = Case.HalfWidth;
+		State.CollisionHalfHeightMeters = Case.HalfHeight;
+		State.PositionEnu.Z = Case.HalfHeight + .1f;
+		Ok &= TestTrue(TEXT("Vehicle-class snapshot is accepted"),
+			Actor->ApplySnapshot(State, 0.0f, .016f, true, .05f,
+				FVector::ZeroVector));
+		Ok &= TestTrue(TEXT("Wire class selects its matching authored mesh"),
+			Actor->GetRuntimeVehicleClass() == Case.Class
+			&& Actor->GetBody()->GetStaticMesh()
+			&& Actor->GetBody()->GetStaticMesh()->GetPathName() == Case.Path);
+		Ok &= TestEqual(TEXT("Vehicle class exposes the correct wheel count"),
+			Actor->GetVisibleWheelCount(), Case.Wheels);
+		Ok &= TestTrue(TEXT("Every class rests its authored visual bottom on server ground"),
+			FMath::IsNearlyZero(Actor->GetActorLocation().Z
+				+ Actor->GetModelRoot()->GetRelativeLocation().Z
+				+ Actor->GetAuthoredBounds().Min.Z, .02f));
+		Sizes.Add(Actor->GetAuthoredBounds().GetSize());
+	}
+	Ok &= TestTrue(TEXT("Truck, compact and motorcycle have distinct silhouettes"),
+		Sizes.Num() == 4 && Sizes[2].X > Sizes[0].X + 100.0
+		&& Sizes[1].X < Sizes[0].X - 40.0
+		&& Sizes[3].Y < Sizes[1].Y * .55);
+	return Ok;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSimCoreNpcClientLifecycleTest,
 	"DriveIntegration.NpcPresentation.AcceptedSnapshotLifecycle",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -239,7 +341,7 @@ bool FSimCoreNpcClientLifecycleTest::RunTest(const FString& Parameters)
 	Client->PlaySessionId = Play; Client->MapPackageChecksum = MapChecksum;
 	const auto Apply = [&](uint64 Sequence, const TArray<FVehicleState>& Entities, const FString& Health = TEXT("active"))
 	{
-		Client->ApplyRawMessage(7, Envelope(Sequence, Entities, Health), 0, false);
+		Client->ApplyBinaryMessage(7, Envelope(Sequence, Entities, Health), true, false);
 	};
 	const auto SetAge = [&](double Age)
 	{
@@ -253,7 +355,7 @@ bool FSimCoreNpcClientLifecycleTest::RunTest(const FString& Parameters)
 		Client->RuntimeEntityActors.Num() == 1 && Client->RuntimeEntityStates.Num() == 1
 		&& Actor->GetOwner() == Owner && Actor->GetEntityId() == 1001);
 	const double Arrival = Client->RuntimeEntityReceiveTimeSeconds;
-	Client->ApplyRawMessage(6, Envelope(21, {}), 0, false);
+	Client->ApplyBinaryMessage(6, Envelope(21, {}), true, false);
 	Apply(19, {});
 	Ok &= TestTrue(TEXT("Old generation/sequence cannot refresh or remove accepted NPCs"),
 		Client->RuntimeEntityReceiveTimeSeconds == Arrival && Client->LatestState.Sequence == 20
@@ -272,7 +374,7 @@ bool FSimCoreNpcClientLifecycleTest::RunTest(const FString& Parameters)
 			&& Actor->GetWheelSpinDegrees() == Spin);
 	}
 	Apply(30, {Npc()});
-	Client->ApplyRawMessage(7, Envelope(31, {}, TEXT("active"), TEXT("other-play")), 0, false);
+	Client->ApplyBinaryMessage(7, Envelope(31, {}, TEXT("active"), TEXT("other-play")), true, false);
 	const float SpinBeforeWrongPlay = Actor->GetWheelSpinDegrees();
 	SetAge(0.025); Client->TickRuntimeProxyActors(0.02f);
 	Ok &= TestTrue(TEXT("Another play cannot replace NPC geometry or grant motion via host-wide health"),
@@ -295,8 +397,8 @@ bool FSimCoreNpcClientLifecycleTest::RunTest(const FString& Parameters)
 	if (!Actor) return false;
 	auto Pedestrian = Npc(); Pedestrian.EntityKind = EEntityKind::Pedestrian; Pedestrian.CollisionRadiusMeters = 0.3f;
 	Apply(36, {Pedestrian});
-	Ok &= TestTrue(TEXT("Entity kind replacement destroys Sedan and preserves pedestrian fallback"),
-		Actor->IsActorBeingDestroyed() && Cast<AStaticMeshActor>(Client->RuntimeEntityActors.FindRef(1001).Get()) != nullptr);
+	Ok &= TestTrue(TEXT("Entity kind replacement destroys Sedan and creates a humanoid pedestrian"),
+		Actor->IsActorBeingDestroyed() && Cast<ASimCorePedestrianPresentationActor>(Client->RuntimeEntityActors.FindRef(1001).Get()) != nullptr);
 	Apply(37, {Npc()});
 	Actor = Cast<ASimCoreNpcPresentationActor>(Client->RuntimeEntityActors.FindRef(1001).Get());
 	if (!Actor) return false;
@@ -311,13 +413,163 @@ bool FSimCoreNpcClientLifecycleTest::RunTest(const FString& Parameters)
 	Actor = Cast<ASimCoreNpcPresentationActor>(Client->RuntimeEntityActors.FindRef(1001).Get());
 	if (!Actor) return false;
 	AddExpectedMessage(TEXT("MapPackage mismatch;"), ELogVerbosity::Error);
-	Client->ApplyRawMessage(7, Envelope(40, {Npc()}, TEXT("active"), Play, TEXT("fnv1a64:fedcba9876543210")), 0, false);
+	Client->ApplyBinaryMessage(7, Envelope(40, {Npc()}, TEXT("active"), Play, TEXT("fnv1a64:fedcba9876543210")), true, false);
 	Ok &= TestTrue(TEXT("Map mismatch revokes snapshot and destroys presentation"),
 		!Client->bHasState && Actor->IsActorBeingDestroyed() && Client->RuntimeEntityActors.IsEmpty());
 	Client->Disconnect();
 	Ok &= TestTrue(TEXT("Disconnect/reset leaves no runtime cache"),
 		Client->RuntimeEntityStates.IsEmpty() && Client->RuntimeEntityActors.IsEmpty());
 	Ok &= TestEqual(TEXT("Presentation and fixture acceptance never send controls or open a real connection"), Socket->SendCount, 0);
+	return Ok;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSimCoreNpcRolloverPresentationTest,
+	"DriveIntegration.NpcPresentation.AuthoritativeRollover",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSimCoreNpcRolloverPresentationTest::RunTest(const FString& Parameters)
+{
+	using namespace SimCoreNpcPresentationTests;
+	FTestWorld Scene;
+	if (!Scene.World) return false;
+	FActorSpawnParameters Spawn; Spawn.ObjectFlags |= RF_Transient;
+	auto* Actor = Scene.World->SpawnActor<ASimCoreNpcPresentationActor>(
+		ASimCoreNpcPresentationActor::StaticClass(), FTransform::Identity, Spawn);
+	if (!TestNotNull(TEXT("Rollover actor"), Actor) || !Actor->HasAuthoredSedan()) return false;
+	bool Ok = true;
+	auto State = Npc(0.0f, 0.0f);
+	Actor->ApplySnapshot(State, 0.0f, 0.0f, true, 0.05f, FVector::ZeroVector);
+	const FVector ModelOffset = Actor->GetModelRoot()->GetRelativeLocation();
+	for (float Roll : {90.0f, -90.0f, 180.0f})
+	{
+		const bool bOnSide = FMath::Abs(Roll) == 90.0f;
+		State.RollDegrees = Roll;
+		State.PositionEnu.Z = bOnSide ? 1.1 : 0.85;
+		State.CollisionHalfWidthMeters = bOnSide ? 0.75f : 1.0f;
+		State.CollisionHalfHeightMeters = bOnSide ? 1.0f : 0.75f;
+		State.AngularVelocityBody.X = 3.0;
+		Ok &= TestTrue(TEXT("Server sideways/roof pose is accepted"),
+			Actor->ApplySnapshot(State, 0.05f, 0.02f, true, 0.05f, FVector::ZeroVector));
+		Ok &= TestTrue(TEXT("Rotated collision envelope never stretches or shifts the model"),
+			Actor->GetModelRoot()->GetRelativeLocation().Equals(ModelOffset, 0.001)
+			&& Actor->GetModelRoot()->GetRelativeScale3D().Equals(FVector::OneVector));
+		Ok &= TestTrue(TEXT("Server roll reaches the displayed car"), bOnSide
+			? FMath::Abs(Actor->GetActorUpVector().Z) < 0.001
+			: Actor->GetActorUpVector().Z < -0.999);
+		const FBox Bounds = Actor->GetAuthoredBounds();
+		for (int32 Corner = 0; Corner < 8; ++Corner)
+		{
+			const FVector Local((Corner & 1) ? Bounds.Max.X : Bounds.Min.X,
+				(Corner & 2) ? Bounds.Max.Y : Bounds.Min.Y,
+				(Corner & 4) ? Bounds.Max.Z : Bounds.Min.Z);
+			Ok &= TestTrue(TEXT("Server-supported rolled mesh stays above flat ground"),
+				Actor->GetModelRoot()->GetComponentTransform().TransformPosition(Local).Z >= -1.0);
+		}
+	}
+	return Ok;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSimCoreNpcDamageBindingTest,
+	"DriveIntegration.NpcPresentation.DamageMaterialsAndWire",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSimCoreNpcDamageBindingTest::RunTest(const FString& Parameters)
+{
+	using namespace SimCoreNpcPresentationTests;
+	FTestWorld Scene;
+	auto* Actor = Scene.World->SpawnActor<ASimCoreNpcPresentationActor>();
+	if (!TestNotNull(TEXT("NPC actor"), Actor)) return false;
+	auto State = Npc(0); State.PlaySessionId = Play;
+	State.DamagePercent = 35.f; State.DamageZone = EVehicleDamageZone::Front;
+	State.CollisionEventSequence = 4; State.LastImpactImpulseNs = 9000.f;
+	State.DentPatches.Add({FVector2D(1,0),FVector2D(-1,0),.8f,.28f});
+	State.RuntimeRecoveryPhase = ERuntimeRecoveryPhase::Disabled; State.ImpactDirectionEnu = FVector3d(1,0,0);
+	FVehicleState Parsed; TArray<FVehicleState> Entities; FString Error;
+	bool Ok = TestTrue(TEXT("runtime impact fields parse through the actual envelope"),
+		ParseWorldStateEnvelope(Envelope(2, {State}), 1001, Parsed, Entities, Error)
+		&& Parsed.DamagePercent == 35.f && Parsed.CollisionEventSequence == 4
+		&& Parsed.RuntimeRecoveryPhase == ERuntimeRecoveryPhase::Disabled && Parsed.ImpactDirectionEnu.X == 1.0
+		&& Parsed.DentPatches == State.DentPatches);
+	Ok &= TestTrue(TEXT("damaged NPC snapshot accepted"), Actor->ApplySnapshot(Parsed,0,.016f,true,.05f,FVector::ZeroVector));
+	Ok &= TestTrue(TEXT("actual body vertices deform, not only material parameters"),
+		Actor->GetDeformableBody()->GetDeformedVertexCount() > 100
+		&& Actor->GetDeformableBody()->GetMaximumDisplacementCm() > 20.0f
+		&& Actor->GetDeformableBody()->GetMaximumDisplacementCm() <= 28.01f
+		&& Actor->GetDeformableBody()->IsVisible() && !Actor->GetBody()->IsVisible());
+	for (int32 Index = 0; Index < Actor->GetBody()->GetNumMaterials(); ++Index)
+	{
+		auto* Material = Cast<UMaterialInstanceDynamic>(Actor->GetBody()->GetMaterial(Index));
+		float Weight = 0.f;
+		Ok &= TestTrue(TEXT("contact-local geometry disables broad WPO on source materials"), Material
+			&& Material->GetScalarParameterValue(FMaterialParameterInfo(TEXT("DentFront")), Weight) && Weight == 0.f);
+		auto* DeformedMaterial = Cast<UMaterialInstanceDynamic>(Actor->GetDeformableBody()->GetMaterial(Index));
+		float DeformedWpo = 1.f;
+		Ok &= TestTrue(TEXT("deformed mesh retains original finish and disables double WPO"), DeformedMaterial && Material
+			&& DeformedMaterial->GetMaterial() == Material->GetMaterial()
+			&& DeformedMaterial->GetScalarParameterValue(FMaterialParameterInfo(TEXT("DentFront")), DeformedWpo)
+			&& DeformedWpo == 0.f);
+	}
+	Ok &= TestTrue(TEXT("WPO is enabled at every distance"), Actor->GetBody()->bEvaluateWorldPositionOffset
+		&& Actor->GetBody()->WorldPositionOffsetDisableDistance == 0);
+	State = Npc(0); State.PlaySessionId = TEXT("new-play");
+	Actor->ApplySnapshot(State,0,.016f,true,.05f,FVector::ZeroVector);
+	float Cleared = 1.f;
+	Ok &= TestTrue(TEXT("new Play restores the intact geometry"), Actor->GetBody()->IsVisible()
+		&& !Actor->GetDeformableBody()->IsVisible() && Actor->GetDeformableBody()->GetDeformedVertexCount() == 0);
+	Ok &= TestTrue(TEXT("new Play resets NPC material dent"),
+		Actor->GetBody()->GetMaterial(0)->GetScalarParameterValue(FMaterialParameterInfo(TEXT("DentFront")), Cleared) && Cleared == 0.f);
+	State.RuntimeRecoveryPhase = static_cast<ERuntimeRecoveryPhase>(5);
+	Ok &= TestFalse(TEXT("unknown reaction state rejected"), ParseWorldStateEnvelope(Envelope(3,{State}),1,Parsed,Error));
+	State.RuntimeRecoveryPhase = ERuntimeRecoveryPhase::Driving; State.ImpactDirectionEnu = FVector3d(2,0,0);
+	Ok &= TestFalse(TEXT("nonunit impulse direction rejected"), ParseWorldStateEnvelope(Envelope(4,{State}),1,Parsed,Error));
+	State = Npc();
+	State.DentPatches.Add({FVector2D(1,0),FVector2D(-1,0),.5f,.1f});
+	State.DentPatches[0].RadiusMeters = std::numeric_limits<float>::infinity();
+	Ok &= TestFalse(TEXT("nonfinite contact radius rejected"),ParseWorldStateEnvelope(Envelope(5,{State}),1001,Parsed,Error));
+	State.DentPatches[0].RadiusMeters = .5f;
+	State.DentPatches[0].Inward.X = 1;
+	Ok &= TestFalse(TEXT("outward contact deformation rejected"),ParseWorldStateEnvelope(Envelope(6,{State}),1001,Parsed,Error));
+	State.DentPatches[0].Inward.X = -1;
+	const FVehicleDentPatch RepeatedPatch = State.DentPatches[0];
+	while (State.DentPatches.Num() < 17) State.DentPatches.Add(RepeatedPatch);
+	Ok &= TestFalse(TEXT("unbounded contact history rejected"),ParseWorldStateEnvelope(Envelope(7,{State}),1001,Parsed,Error));
+	return Ok;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSimCoreDownedWireTest,
+	"DriveIntegration.NpcPresentation.DownedBodyAndIndicatorWire",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSimCoreDownedWireTest::RunTest(const FString& Parameters)
+{
+	using namespace SimCoreNpcPresentationTests;
+	FVehicleState State = Npc(5), Parsed;
+	State.RuntimeVehicleClass = ERuntimeVehicleClass::Truck;
+	State.TurnIndicator = ETurnIndicator::Left;
+	FString Error;
+	bool Ok = TestTrue(TEXT("left route intent crosses actual wire"),
+		ParseWorldStateEnvelope(Envelope(2,{State}),1001,Parsed,Error)
+		&& Parsed.TurnIndicator == ETurnIndicator::Left
+		&& Parsed.RuntimeVehicleClass == ERuntimeVehicleClass::Truck);
+	State.RuntimeVehicleClass = static_cast<ERuntimeVehicleClass>(5);
+	Ok &= TestFalse(TEXT("unknown runtime vehicle class rejected"),
+		ParseWorldStateEnvelope(Envelope(21,{State}),1001,Parsed,Error));
+	State.RuntimeVehicleClass = ERuntimeVehicleClass::Unspecified;
+	State.TurnIndicator = static_cast<ETurnIndicator>(3);
+	Ok &= TestFalse(TEXT("unknown indicator rejected"), ParseWorldStateEnvelope(Envelope(3,{State}),1001,Parsed,Error));
+	State.TurnIndicator = ETurnIndicator::Off;
+	State.EntityKind = EEntityKind::Pedestrian;
+	State.RuntimeVehicleClass = ERuntimeVehicleClass::Compact;
+	Ok &= TestFalse(TEXT("pedestrian cannot carry vehicle model metadata"),
+		ParseWorldStateEnvelope(Envelope(31,{State}),1001,Parsed,Error));
+	State.RuntimeVehicleClass = ERuntimeVehicleClass::Unspecified;
+	State.bPedestrianDowned = true; State.bPedestrianAirborne = true;
+	State.CollisionRadiusMeters = 0; State.CollisionHalfLengthMeters = .9f;
+	State.CollisionHalfWidthMeters = .35f; State.CollisionHalfHeightMeters = .25f;
+	State.LinearVelocityEnu.Z = 3.0;
+	Ok &= TestTrue(TEXT("airborne downed OBB and vertical velocity cross wire"),
+		ParseWorldStateEnvelope(Envelope(4,{State}),1001,Parsed,Error)
+		&& Parsed.bPedestrianDowned && Parsed.bPedestrianAirborne && Parsed.LinearVelocityEnu.Z == 3.0);
+	State.CollisionRadiusMeters = .35f;
+	Ok &= TestFalse(TEXT("downed state cannot retain upright capsule collider"),
+		ParseWorldStateEnvelope(Envelope(5,{State}),1001,Parsed,Error));
 	return Ok;
 }
 

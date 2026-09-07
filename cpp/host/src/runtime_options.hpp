@@ -20,6 +20,8 @@ struct RuntimeOptions {
     std::vector<std::uint32_t> npc_route;
     std::vector<std::uint32_t> npc_alternate_route;
     bool npc_route_loop = false;
+    // Routes above become spawn paths; destinations are selected from the graph.
+    bool npc_autonomous = false;
     double npc_start_offset_m = 0.0;
     double npc_max_speed_mps = 6.0;
     std::uint32_t npc_count = 1;
@@ -35,6 +37,10 @@ struct RuntimeOptions {
     std::chrono::nanoseconds hard_command_timeout{1'000'000'000};
     std::string source_id = "simcore-cpp-host";
     bool demo_entities = false;
+    // CLI-only capture/verification: never silently enabled by a runtime cfg.
+    std::optional<std::filesystem::path> record_physics_path;
+    std::optional<std::filesystem::path> verify_physics_replay_path;
+    std::optional<std::uint64_t> record_ticks;
     std::optional<std::filesystem::path> runtime_config_path;
     bool show_help = false;
 };

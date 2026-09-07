@@ -355,6 +355,30 @@ void test_v2_plan_schema_relationships_and_bounds()
             "signal controller count must remain bounded independently of file size");
 }
 
+void test_exclusive_walk_requires_all_vehicle_groups_red()
+{
+    const auto vehicle = signal_v2(1, 100, 7, "[10,1,0]");
+    const auto first = signal_v2(101, 105, 7, "[10,3,0]", "pedestrian");
+    const auto second = signal_v2(102, 105, 7, "[10,-3,0]", "pedestrian");
+    auto source = replace_once(valid_v2_json(), vehicle, vehicle + "," + first + "," + second);
+    const auto old_plan = plan(7, 0, "[100]", "[" + phase(1000) + ","
+        + phase(2000, "[100]") + "," + phase(500, "[]", "[100]") + "," + phase(500) + "]");
+    const auto safe_plan = plan(7, 0, "[100,105]", "[" + phase(1000, "[105]") + ","
+        + phase(2000, "[100]") + "," + phase(500, "[]", "[100]") + "," + phase(500) + "]");
+    source = replace_once(source, old_plan, safe_plan);
+    TemporaryNetwork fixture;
+    const auto network = fixture.load(source, simcore_host::FlatGroundQuery{});
+    const auto signals = network.signals_at(0);
+    require(signals[0].aspect == simcore_host::SignalAspect::Red
+        && signals[2].aspect == simcore_host::SignalAspect::Green,
+        "independent WALK must be valid without a same-group vehicle stopline");
+    rejects(replace_once(source, "\"green_groups\":[105]", "\"green_groups\":[100,105]"),
+        "exclusive crossing must reject a concurrently green vehicle approach");
+    rejects(replace_once(source, "\"green_groups\":[105],\"yellow_groups\":[]",
+        "\"green_groups\":[105],\"yellow_groups\":[100]"),
+        "exclusive crossing must also reject a concurrently yellow vehicle approach");
+}
+
 void test_pedestrian_signal_pairs_and_runtime_kind()
 {
     const auto vehicle = signal_v2(1, 100, 7, "[10,1,0]");
@@ -559,6 +583,85 @@ void test_resource_limits()
             "deeply nested JSON must fail before recursive property_tree parsing");
 }
 
+std::string change_json(std::uint32_t target, double begin = 5.0, double end = 35.0)
+{
+    return "{\"target_lane_id\":" + std::to_string(target)
+        + ",\"source_begin_m\":" + std::to_string(begin)
+        + ",\"source_end_m\":" + std::to_string(end)
+        + ",\"target_begin_m\":" + std::to_string(begin)
+        + ",\"target_end_m\":" + std::to_string(end) + "}";
+}
+
+std::string parallel_json(const std::string& second_points = "[[0,4.5,0],[40,4.5,0]]")
+{
+    const auto with_change = [](std::string lane_json, std::uint32_t target) {
+        lane_json.pop_back();
+        return lane_json + ",\"lane_changes\":[" + change_json(target) + "]}";
+    };
+    return network_json("[" + with_change(lane(1, "[[0,0,0],[40,0,0]]"), 2) + ","
+        + with_change(lane(2, second_points), 1) + "]");
+}
+
+class LaneMedianHoleGround final : public simcore_host::GroundQuery {
+public:
+    std::optional<simcore_host::GroundHit> query_down(
+        const simcore_host::GroundQueryRequest& request) const override
+    {
+        // Lane edge rays are at N=2.0/2.5: only the unpaved gap is absent.
+        if (std::abs(request.origin_enu.north_m - 2.25) < 0.05) { return std::nullopt; }
+        return simcore_host::FlatGroundQuery{}.query_down(request);
+    }
+};
+
+void test_optional_lane_changes_geometry_safety_and_provenance()
+{
+    const auto source = parallel_json();
+    TemporaryNetwork fixture;
+    const auto network = fixture.load(source, simcore_host::FlatGroundQuery{});
+    require(network.lanes.size() == 2 && network.lanes[0].lane_changes.size() == 1
+                && network.lanes[0].lane_changes[0].target_lane_id == 2,
+            "authored reciprocal same-direction neighbors must load");
+    const auto legacy = fixture.load(network_json("[" + lane(1, "[[0,0,0],[40,0,0]]")
+        + "," + lane(2, "[[0,4.5,0],[40,4.5,0]]") + "]"), simcore_host::FlatGroundQuery{});
+    require(legacy.lanes[0].lane_changes.empty() && network.checksum != legacy.checksum,
+            "omitted metadata must preserve old packages and authored changes must affect checksum");
+    rejects(replace_once(source, "\"lane_changes\":[" + change_json(2) + "]",
+                         "\"lane_changes\":{\"window\":" + change_json(2) + "}"),
+            "lane changes must remain a typed JSON array");
+    rejects(replace_once(source, "\"target_lane_id\":2", "\"target_lane_id\":\"2\""),
+            "lane-change target cannot coerce a string integer");
+    rejects(replace_once(source, "\"target_lane_id\":2", "\"target_lane_id\":999"),
+            "unknown neighbor must fail closed");
+    rejects(replace_once(source, "\"target_lane_id\":2", "\"target_lane_id\":1"),
+            "same lane cannot be its own neighbor");
+    rejects(replace_once(source, "\"lane_changes\":[" + change_json(1) + "]", "\"lane_changes\":[]"),
+            "one-way or mismatched reciprocal change permissions must fail closed");
+    rejects(replace_once(source, "\"source_begin_m\":5.000000", "\"source_begin_m\":-1"),
+            "lane-change window cannot include lane start or a negative offset");
+    rejects(replace_once(source, "\"target_end_m\":35.000000", "\"target_end_m\":100"),
+            "lane-change window cannot exceed the target lane");
+    for (const auto bounds : {std::pair{4.0, 35.0}, std::pair{5.0, 36.0}, std::pair{5.0, 12.0}}) {
+        const auto mutated = replace_once(replace_once(source, change_json(1),
+            change_json(1, bounds.first, bounds.second)), change_json(2),
+            change_json(2, bounds.first, bounds.second));
+        rejects(mutated, "even reciprocal windows must clear lane ends and provide 8m of travel");
+    }
+    rejects(replace_once(source, change_json(2), change_json(2) + "," + change_json(2)),
+            "duplicate neighbor windows must fail closed");
+    rejects(replace_once(source, "\"target_lane_id\":2", "\"unknown\":0,\"target_lane_id\":2"),
+            "unknown lane-change metadata must fail closed");
+    rejects(parallel_json("[[40,4.5,0],[0,4.5,0]]"),
+            "opposite traffic direction cannot become a lane-change target");
+    rejects(parallel_json("[[0,9,0],[40,9,0]]"),
+            "nonadjacent lanes cannot become change targets");
+    rejects(parallel_json("[[0,1,0],[40,1,0]]"),
+            "overlapping centerlines cannot impersonate distinct lanes");
+    rejects(parallel_json("[[2,4.5,0],[42,4.5,0]]"),
+            "offset station windows must align longitudinally");
+    rejects(source, "separately supported lane edges cannot permit driving across a median hole",
+            LaneMedianHoleGround{});
+}
+
 void test_signal_phase_boundaries_reset_and_disabled_safety()
 {
     TemporaryNetwork fixture;
@@ -697,10 +800,12 @@ int main()
         test_schema_primitives_and_unknown_duplicate_fields();
         test_v2_plan_schema_relationships_and_bounds();
         test_pedestrian_signal_pairs_and_runtime_kind();
+        test_exclusive_walk_requires_all_vehicle_groups_red();
         test_malformed_json_checksums_and_finite_values();
         test_topology_lane_envelope_and_stopline_validation();
         test_authoritative_ground_centre_edges_and_segment_interiors();
         test_resource_limits();
+        test_optional_lane_changes_geometry_safety_and_provenance();
         test_signal_phase_boundaries_reset_and_disabled_safety();
         test_v2_multi_controller_offsets_boundaries_and_countdowns();
         std::cout << "traffic_network_test: all checks passed\n";

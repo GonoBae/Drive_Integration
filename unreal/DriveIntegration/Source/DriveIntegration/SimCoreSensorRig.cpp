@@ -134,6 +134,8 @@ bool USimCoreSensorRigComponent::InitializeFromJson(const FString& Json, FString
 	Sensors = MoveTemp(Parsed);
 	RecentMetadata.Reset();
 	LastCaptureTimeBySensor.Reset();
+	ObservedMapChecksum.Reset();
+	ObservedPlaySessionId.Reset();
 	LastObservedSequence = 0;
 	return true;
 }
@@ -141,17 +143,26 @@ bool USimCoreSensorRigComponent::InitializeFromJson(const FString& Json, FString
 int32 USimCoreSensorRigComponent::ObserveAuthoritativeState(
 	const SimCoreProtocol::FVehicleState& State)
 {
-	if (Sensors.IsEmpty() || State.Sequence == 0 || State.Sequence <= LastObservedSequence
+	if (Sensors.IsEmpty() || State.Sequence == 0
 		|| State.MapPackageChecksum.IsEmpty() || State.PlaySessionId.IsEmpty()) return 0;
+	if (ObservedMapChecksum != State.MapPackageChecksum
+		|| ObservedPlaySessionId != State.PlaySessionId)
+	{
+		ObservedMapChecksum = State.MapPackageChecksum;
+		ObservedPlaySessionId = State.PlaySessionId;
+		LastObservedSequence = 0;
+		LastCaptureTimeBySensor.Reset();
+	}
+	if (State.Sequence <= LastObservedSequence) return 0;
 	LastObservedSequence = State.Sequence;
 	int32 Emitted = 0;
 	for (const auto& Sensor : Sensors)
 	{
 		const uint64 IntervalNs = static_cast<uint64>(FMath::RoundToDouble(1.e9 / Sensor.RateHz));
-		uint64& Last = LastCaptureTimeBySensor.FindOrAdd(Sensor.SensorId);
-		if (Last != 0 && (State.SimulationTimeNs < Last
-			|| State.SimulationTimeNs - Last < IntervalNs)) continue;
-		Last = State.SimulationTimeNs;
+		const uint64* Last = LastCaptureTimeBySensor.Find(Sensor.SensorId);
+		if (Last && (State.SimulationTimeNs < *Last
+			|| State.SimulationTimeNs - *Last < IntervalNs)) continue;
+		LastCaptureTimeBySensor.Add(Sensor.SensorId, State.SimulationTimeNs);
 		SimCoreSensorRig::FFrameMetadata Metadata;
 		Metadata.SensorId = Sensor.SensorId; Metadata.Type = Sensor.Type;
 		Metadata.ChildFrame = Sensor.ChildFrame;

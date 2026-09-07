@@ -1,4 +1,5 @@
 #include "BuildSedanVisualCommandlet.h"
+#include "SimCoreSedanVisualContract.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Engine/StaticMesh.h"
@@ -30,10 +31,16 @@ DEFINE_LOG_CATEGORY_STATIC(LogBuildSedanVisual, Log, All);
 namespace
 {
 constexpr const TCHAR* AssetRoot = TEXT("/Game/Vehicles/Sedan/");
+constexpr const TCHAR* FleetAssetRoot = TEXT("/Game/Vehicles/NpcFleet/");
 constexpr const TCHAR* AuthorKey = TEXT("SimCore.GeneratedVisual");
 constexpr const TCHAR* LegacyAuthorValue = TEXT("SelfAuthoredSedanV1");
 constexpr const TCHAR* AuthorValue = TEXT("SelfAuthoredSedanV2");
 constexpr float MaxDentDepthCm = 12.0f;
+constexpr float GlassOpacity = 0.24f;
+constexpr const TCHAR* GlassOpacityDescription = TEXT("Sedan transparent glazing opacity");
+constexpr double DriverDoorRearX = -46.0;
+constexpr double DriverDoorFrontX = 63.0;
+constexpr double DriverDoorLowerV = 0.07;
 const FName DentParameterNames[] = {
 	TEXT("DentFront"),
 	TEXT("DentRear"),
@@ -149,12 +156,116 @@ bool HasAnyDentGraph(const UMaterial* Material)
 	return false;
 }
 
+bool ValidateIndicatorMaterial(const UMaterial* Material)
+{
+	if (!Material) return false;
+	float Value = 0.0f;
+	return Material->GetScalarParameterValue(FMaterialParameterInfo(SimCoreSedanVisualContract::SignalLeftParameter), Value)
+		&& Material->GetScalarParameterValue(FMaterialParameterInfo(SimCoreSedanVisualContract::SignalRightParameter), Value);
+}
+
+bool ValidateTransparentGlass(const UMaterial* Material)
+{
+	if (!Material || Material->GetBlendMode() != BLEND_Translucent
+		|| !Material->IsTwoSided())
+	{
+		return false;
+	}
+	for (UMaterialExpression* Expression : Material->GetExpressions())
+	{
+		const auto* Opacity = Cast<UMaterialExpressionConstant>(Expression);
+		if (Opacity && Opacity->Desc == GlassOpacityDescription
+			&& FMath::IsNearlyEqual(Opacity->R, GlassOpacity, KINDA_SMALL_NUMBER))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+void ConfigureTransparentGlass(UMaterial* Material)
+{
+	Material->Modify();
+	Material->BlendMode = BLEND_Translucent;
+	Material->TwoSided = true;
+	Material->SetShadingModel(MSM_DefaultLit);
+	UMaterialExpressionConstant* Opacity = nullptr;
+	for (UMaterialExpression* Expression : Material->GetExpressions())
+	{
+		auto* Candidate = Cast<UMaterialExpressionConstant>(Expression);
+		if (Candidate && Candidate->Desc == GlassOpacityDescription)
+		{
+			Opacity = Candidate;
+			break;
+		}
+	}
+	if (!Opacity)
+	{
+		Opacity = CastChecked<UMaterialExpressionConstant>(
+			UMaterialEditingLibrary::CreateMaterialExpression(
+				Material, UMaterialExpressionConstant::StaticClass(), -300, 300));
+		Opacity->Desc = GlassOpacityDescription;
+	}
+	Opacity->R = GlassOpacity;
+	UMaterialEditingLibrary::ConnectMaterialProperty(Opacity, TEXT(""), MP_Opacity);
+}
+
+bool AddIndicatorGraph(UMaterial* Material)
+{
+	if (ValidateIndicatorMaterial(Material)) return true;
+	// Only the owned Amber emission input changes. Keep its base finish and six
+	// damage parameters, and refuse to append over a partially authored graph.
+	for (UMaterialExpression* Expression : Material->GetExpressions())
+	{
+		const auto* Parameter = Cast<UMaterialExpressionScalarParameter>(Expression);
+		if (Parameter && (Parameter->ParameterName == SimCoreSedanVisualContract::SignalLeftParameter
+			|| Parameter->ParameterName == SimCoreSedanVisualContract::SignalRightParameter)) return false;
+	}
+	Material->Modify();
+	auto* WorldPosition = CastChecked<UMaterialExpressionWorldPosition>(UMaterialEditingLibrary::CreateMaterialExpression(
+		Material, UMaterialExpressionWorldPosition::StaticClass(), -1100, -600));
+	WorldPosition->WorldPositionShaderOffset = WPT_ExcludeAllShaderOffsets;
+	auto* LocalPosition = CastChecked<UMaterialExpressionTransformPosition>(UMaterialEditingLibrary::CreateMaterialExpression(
+		Material, UMaterialExpressionTransformPosition::StaticClass(), -900, -600));
+	LocalPosition->Input.Expression = WorldPosition;
+	LocalPosition->TransformSourceType = TRANSFORMPOSSOURCE_World;
+	LocalPosition->TransformType = TRANSFORMPOSSOURCE_Local;
+	auto* Emission = CastChecked<UMaterialExpressionCustom>(UMaterialEditingLibrary::CreateMaterialExpression(
+		Material, UMaterialExpressionCustom::StaticClass(), -300, -600));
+	Emission->Description = TEXT("Authored left/right turn signal lenses");
+	Emission->OutputType = CMOT_Float3;
+	Emission->Code = TEXT("float On = LocalPosition.y < 0.0 ? SignalLeftOn : SignalRightOn;\nreturn float3(1.0, 0.22, 0.003) * (0.03 + 8.0 * saturate(On));");
+	Emission->Inputs.SetNum(3);
+	Emission->Inputs[0].InputName = TEXT("LocalPosition");
+	Emission->Inputs[0].Input.Expression = LocalPosition;
+	const FName SignalNames[] = { SimCoreSedanVisualContract::SignalLeftParameter, SimCoreSedanVisualContract::SignalRightParameter };
+	for (int32 Index = 0; Index < 2; ++Index)
+	{
+		auto* Parameter = CastChecked<UMaterialExpressionScalarParameter>(UMaterialEditingLibrary::CreateMaterialExpression(
+			Material, UMaterialExpressionScalarParameter::StaticClass(), -700, -500 + Index * 100));
+		Parameter->ParameterName = SignalNames[Index];
+		Parameter->DefaultValue = 0.0f;
+		Parameter->SliderMin = 0.0f;
+		Parameter->SliderMax = 1.0f;
+		Parameter->Group = TEXT("Turn Signals");
+		Emission->Inputs[Index + 1].InputName = SignalNames[Index];
+		Emission->Inputs[Index + 1].Input.Expression = Parameter;
+	}
+	UMaterialEditingLibrary::ConnectMaterialProperty(Emission, TEXT(""), MP_EmissiveColor);
+	UMaterialEditingLibrary::RecompileMaterial(Material);
+	return ValidateIndicatorMaterial(Material);
+}
+
 void BuildMaterialGraph(
 	UMaterial* Material,
 	const FFinish& Finish,
 	const bool bCreateBaseProperties)
 {
 	Material->MaxWorldPositionOffsetDisplacement = MaxDentDepthCm;
+	if (FName(Finish.Name) == FName(Finishes[Glass].Name))
+	{
+		ConfigureTransparentGlass(Material);
+	}
 	if (bCreateBaseProperties)
 	{
 		UMaterialExpressionConstant3Vector* Color = CastChecked<UMaterialExpressionConstant3Vector>(
@@ -273,6 +384,24 @@ UMaterial* MakeMaterial(int32 Index, bool bValidateOnly, bool bRegenerate)
 		}
 		if (ValidateDentMaterial(Material))
 		{
+			if (Index == Glass && !ValidateTransparentGlass(Material))
+			{
+				if (bValidateOnly || !bRegenerate || !IsAuthoredAsset(Material))
+				{
+					return nullptr;
+				}
+				ConfigureTransparentGlass(Material);
+				UMaterialEditingLibrary::RecompileMaterial(Material);
+				if (!ValidateTransparentGlass(Material) || !SaveAuthoredAsset(Material))
+				{
+					return nullptr;
+				}
+			}
+			if (Index == Amber && !ValidateIndicatorMaterial(Material))
+			{
+				if (bValidateOnly || !bRegenerate || !IsAuthoredAsset(Material)
+					|| !AddIndicatorGraph(Material) || !SaveAuthoredAsset(Material)) return nullptr;
+			}
 			return Material;
 		}
 		if (bValidateOnly || !bRegenerate)
@@ -304,7 +433,9 @@ UMaterial* MakeMaterial(int32 Index, bool bValidateOnly, bool bRegenerate)
 	}
 
 	BuildMaterialGraph(Material, Finish, !bExisting);
-	if (!ValidateDentMaterial(Material) || !SaveAuthoredAsset(Material))
+	if ((Index == Amber && !AddIndicatorGraph(Material))
+		|| (Index == Glass && !ValidateTransparentGlass(Material))
+		|| !ValidateDentMaterial(Material) || !SaveAuthoredAsset(Material))
 	{
 		return nullptr;
 	}
@@ -381,6 +512,53 @@ struct FAuthor
 		if (FVector::DotProduct(Normal, Outward) < 0) { Normal *= -1; }
 		Triangle(A, B, C, Normal, Normal, Normal, Finish);
 		Triangle(A, C, D, Normal, Normal, Normal, Finish);
+	}
+
+	void Box(const FVector& Center, const FVector& Extent, int32 Finish)
+	{
+		const FVector P000 = Center + FVector(-Extent.X, -Extent.Y, -Extent.Z);
+		const FVector P001 = Center + FVector(-Extent.X, -Extent.Y,  Extent.Z);
+		const FVector P010 = Center + FVector(-Extent.X,  Extent.Y, -Extent.Z);
+		const FVector P011 = Center + FVector(-Extent.X,  Extent.Y,  Extent.Z);
+		const FVector P100 = Center + FVector( Extent.X, -Extent.Y, -Extent.Z);
+		const FVector P101 = Center + FVector( Extent.X, -Extent.Y,  Extent.Z);
+		const FVector P110 = Center + FVector( Extent.X,  Extent.Y, -Extent.Z);
+		const FVector P111 = Center + FVector( Extent.X,  Extent.Y,  Extent.Z);
+		Quad(P100, P110, P111, P101, FVector::ForwardVector, Finish);
+		Quad(P000, P001, P011, P010, -FVector::ForwardVector, Finish);
+		Quad(P010, P011, P111, P110, FVector::RightVector, Finish);
+		Quad(P000, P100, P101, P001, -FVector::RightVector, Finish);
+		Quad(P001, P101, P111, P011, FVector::UpVector, Finish);
+		Quad(P000, P010, P110, P100, -FVector::UpVector, Finish);
+	}
+
+	void Transform(const FVector& Scale, const FVector& Offset)
+	{
+		if (Scale.GetMin() <= KINDA_SMALL_NUMBER || Scale.ContainsNaN()
+			|| Offset.ContainsNaN())
+		{
+			bInvalidTriangle = true;
+			return;
+		}
+		for (const FVertexID Vertex : Mesh.Vertices().GetElementIDs())
+		{
+			const FVector Point(Attributes.GetVertexPositions()[Vertex]);
+			Attributes.GetVertexPositions()[Vertex] = FVector3f(
+				Point.X * Scale.X + Offset.X,
+				Point.Y * Scale.Y + Offset.Y,
+				Point.Z * Scale.Z + Offset.Z);
+		}
+		for (const FVertexInstanceID Instance : Mesh.VertexInstances().GetElementIDs())
+		{
+			const FVector Normal(Attributes.GetVertexInstanceNormals()[Instance]);
+			const FVector ScaledNormal(
+				Normal.X / Scale.X, Normal.Y / Scale.Y, Normal.Z / Scale.Z);
+			const FVector UnitNormal = ScaledNormal.GetSafeNormal();
+			Attributes.GetVertexInstanceNormals()[Instance] = FVector3f(UnitNormal);
+			FVector Tangent = FVector::CrossProduct(FVector::UpVector, UnitNormal).GetSafeNormal();
+			if (Tangent.IsNearlyZero()) Tangent = FVector::ForwardVector;
+			Attributes.GetVertexInstanceTangents()[Instance] = FVector3f(Tangent);
+		}
 	}
 
 	void Patch(TFunctionRef<FVector(double, double)> Sample,
@@ -464,12 +642,12 @@ double Curve(double X, std::initializer_list<FVector2D> Keys)
 
 double Width(double X)
 {
-	return Curve(X, {{-228.5, 66}, {-216, 80}, {-188, 88}, {-130, 90}, {25, 90}, {135, 90}, {178, 85}, {193, 77}, {201.5, 65}});
+	return SimCoreSedanVisualContract::BodyHalfWidthCm(X);
 }
 
 double Deck(double X)
 {
-	return Curve(X, {{-228.5, 9}, {-216, 27}, {-185, 37}, {-115, 41}, {40, 38}, {130, 34}, {178, 29}, {193, 21}, {201.5, 9}});
+	return SimCoreSedanVisualContract::BodyDeckHeightCm(X);
 }
 
 double ArchCut(double X)
@@ -506,25 +684,58 @@ FVector BodyEndPoint(double X, double Across, double V)
 	return FVector(X, Across * HalfWidth, FMath::Lerp(ArchCut(X), BodyDeckPoint(X, Across).Z, V));
 }
 
+double CabinZ(double X)
+{
+	return Curve(X, {{-135, 42}, {-82, 83}, {-60, 92}, {-6, 94}, {17, 86}, {66, 41}});
+}
+
+double CabinWidth(double X)
+{
+	return Curve(X, {{-135, 76}, {-82, 62}, {-60, 61}, {-6, 61}, {17, 64}, {66, 77}});
+}
+
+FVector CabinSidePoint(double X, double Side, double V)
+{
+	return FVector(X, Side * (FMath::Lerp(78.0, CabinWidth(X), V) + 0.45),
+		FMath::Lerp(42.0, CabinZ(X), V));
+}
+
 FVector LampPoint(bool bFront, double Side, double U, double V, double Lift)
 {
-	const double X = bFront ? FMath::Lerp(196.0, 182.0, V) - 4.0 * U
-		: FMath::Lerp(-226.0, -209.0, V) + 3.0 * U;
-	const double Across = Side * FMath::Lerp(0.36, 0.96, U);
-	// Keep the thin lens above the tessellated deck everywhere, including its curved nose.
-	return BodyDeckPoint(X, Across) + FVector(0, 0, Lift);
+	return SimCoreSedanVisualContract::LampLensPointCm(bFront, Side < 0, U, V, Lift);
 }
 
 void BuildBody(FAuthor& M)
 {
-	// Continuous fender/door skin with real openings around both wheel centers.
+	// Continuous right/fender skin with real wheel openings. The left-front
+	// door aperture is split out of this body mesh and is filled only by the
+	// separately authored SM_SedanDoorLeft when it is closed.
 	for (double Side : {-1.0, 1.0})
 	{
-		M.Patch([&](double U, double V)
+		auto SideSkin = [&](const double StartX, const double EndX,
+			const double StartV, const double EndV, const int32 StepsX,
+			const int32 StepsV)
 		{
-			const double X = FMath::Lerp(-228.5, 201.5, U);
-			return BodySidePoint(X, Side, V);
-		}, [&](double, double) { return FVector(0, Side, 0); }, 180, 6, Paint);
+			M.Patch([&](double U, double V)
+			{
+				const double X = FMath::Lerp(StartX, EndX, U);
+				return BodySidePoint(X, Side, FMath::Lerp(StartV, EndV, V));
+			}, [&](double, double) { return FVector(0, Side, 0); },
+				StepsX, StepsV, Paint);
+		};
+		if (Side < 0.0)
+		{
+			SideSkin(-228.5, DriverDoorRearX, 0.0, 1.0, 76, 6);
+			SideSkin(DriverDoorFrontX, 201.5, 0.0, 1.0, 58, 6);
+			// A narrow fixed sill remains under the opening; no painted door skin
+			// remains behind the moving panel.
+			SideSkin(DriverDoorRearX, DriverDoorFrontX, 0.0,
+				DriverDoorLowerV, 44, 1);
+		}
+		else
+		{
+			SideSkin(-228.5, 201.5, 0.0, 1.0, 180, 6);
+		}
 		// Rolled, thin fender lip follows the exact open wheel cutout, not a solid disc.
 		for (double Axle : {-148.5, 121.5})
 		{
@@ -537,13 +748,28 @@ void BuildBody(FAuthor& M)
 			}, [&](double, double) { return FVector(0, Side, 0); }, 48, 2, Paint);
 		}
 		// Longitudinal character line and modest rocker trim stop before both wheel openings.
-		TArray<FVector> Belt;
-		for (int32 I = 0; I <= 60; ++I)
+		auto AddBelt = [&](const double StartX, const double EndX,
+			const int32 Steps)
 		{
-			const double X = FMath::Lerp(-204.0, 179.0, I / 60.0);
-			Belt.Add(FVector(X, Side * (Width(X) - 1.0), Deck(X) - 10.0));
+			TArray<FVector> Belt;
+			for (int32 I = 0; I <= Steps; ++I)
+			{
+				const double X = FMath::Lerp(StartX, EndX,
+					static_cast<double>(I) / Steps);
+				Belt.Add(FVector(X, Side * (Width(X) - 1.0),
+					Deck(X) - 10.0));
+			}
+			M.Polyline(Belt, 0.24, Paint);
+		};
+		if (Side < 0.0)
+		{
+			AddBelt(-204.0, DriverDoorRearX, 25);
+			AddBelt(DriverDoorFrontX, 179.0, 19);
 		}
-		M.Polyline(Belt, 0.24, Paint);
+		else
+		{
+			AddBelt(-204.0, 179.0, 60);
+		}
 		M.Tube(FVector(-106, Side * 87, -24), FVector(79, Side * 87, -24), 2.0, Black);
 	}
 	// Curved upper body deck: gently crowned hood/trunk and fender shoulders.
@@ -577,52 +803,84 @@ void BuildBody(FAuthor& M)
 	}
 
 	// Greenhouse: a tapered loft, including a convex roof, separate glass and structural pillars.
-	const auto CabinZ = [](double X)
-	{
-		return Curve(X, {{-135, 42}, {-82, 83}, {-60, 92}, {-6, 94}, {17, 86}, {66, 41}});
-	};
-	const auto CabinWidth = [](double X)
-	{
-		return Curve(X, {{-135, 76}, {-82, 62}, {-60, 61}, {-6, 61}, {17, 64}, {66, 77}});
-	};
+	// The opaque roof occupies only the metal panel between the front and rear
+	// glazing. Earlier versions skinned the complete greenhouse in Paint and
+	// merely overlaid glass, so a translucent material still revealed solid blue.
 	M.Patch([&](double U, double V)
 	{
-		const double X = FMath::Lerp(-135.0, 66.0, U);
+		const double X = FMath::Lerp(-82.0, 17.0, U);
 		const double Across = V * 2 - 1;
 		return FVector(X, Across * CabinWidth(X), CabinZ(X) + 2.0 * (1 - Across * Across));
-	}, [](double, double) { return FVector::UpVector; }, 48, 12, Paint);
+	}, [](double, double) { return FVector::UpVector; }, 28, 12, Paint);
 	for (double Side : {-1.0, 1.0})
 	{
-		M.Patch([&](double U, double V)
-		{
-			const double X = FMath::Lerp(-135.0, 66.0, U);
-			return FVector(X, Side * FMath::Lerp(78.0, CabinWidth(X), V), FMath::Lerp(42.0, CabinZ(X), V));
-		}, [&](double, double) { return FVector(0, Side, 0); }, 64, 5, Paint);
-		// Side glazing is inset from the A/C pillars and split by an actual broad black B pillar.
-		auto SidePoint = [&](double X, double V)
-		{
-			return FVector(X, Side * (FMath::Lerp(78.0, CabinWidth(X), V) + 0.45), FMath::Lerp(42.0, CabinZ(X), V));
-		};
-		for (const FVector2D Range : {FVector2D(-120, -49), FVector2D(-43, 54)})
+		// Belt and roof rails surround true window openings. The glazing below is
+		// now the only surface in each aperture, rather than a tinted decal over
+		// an opaque side sheet.
+		auto AddLowerRail = [&](const double StartX, const double EndX,
+			const int32 Steps)
 		{
 			M.Patch([&](double U, double V)
 			{
+				const double X = FMath::Lerp(StartX, EndX, U);
+				const double RailV = FMath::Lerp(0.0, 0.105, V);
+				return FVector(X, Side * FMath::Lerp(78.0, CabinWidth(X), RailV),
+					FMath::Lerp(42.0, CabinZ(X), RailV));
+			}, [&](double, double) { return FVector(0, Side, 0); },
+				Steps, 1, Paint);
+		};
+		if (Side < 0.0)
+		{
+			AddLowerRail(-135.0, DriverDoorRearX, 28);
+			AddLowerRail(DriverDoorFrontX, 66.0, 1);
+		}
+		else
+		{
+			AddLowerRail(-135.0, 66.0, 64);
+		}
+		M.Patch([&](double U, double V)
+		{
+			const double X = FMath::Lerp(-135.0, 66.0, U);
+			const double RailV = FMath::Lerp(0.92, 1.0, V);
+			return FVector(X, Side * FMath::Lerp(78.0, CabinWidth(X), RailV),
+				FMath::Lerp(42.0, CabinZ(X), RailV));
+		}, [&](double, double) { return FVector(0, Side, 0); }, 64, 1, Paint);
+		// Side glazing is inset from the A/C pillars and split by an actual broad black B pillar.
+		for (const FVector2D Range : {FVector2D(-120, -49), FVector2D(-43, 54)})
+		{
+			if (Side < 0.0 && Range.X > DriverDoorRearX)
+			{
+				continue;
+			}
+			M.Patch([&](double U, double V)
+			{
 				const double X = FMath::Lerp(Range.X, Range.Y, U);
-				return SidePoint(X, FMath::Lerp(0.12, 0.91, V));
+				return CabinSidePoint(X, Side, FMath::Lerp(0.12, 0.91, V));
 			}, [&](double, double) { return FVector(0, Side, 0.2); }, 22, 3, Glass);
 			TArray<FVector> Lower, Upper;
 			for (int32 I = 0; I <= 22; ++I)
 			{
 				const double X = FMath::Lerp(Range.X, Range.Y, I / 22.0);
-				Lower.Add(SidePoint(X, 0.12));
-				Upper.Add(SidePoint(X, 0.91));
+				Lower.Add(CabinSidePoint(X, Side, 0.12));
+				Upper.Add(CabinSidePoint(X, Side, 0.91));
 			}
 			M.Polyline(Lower, 0.7, Chrome);
 			M.Polyline(Upper, 1.0, Black);
 			M.Tube(Lower[0], Upper[0], 1.0, Black);
 			M.Tube(Lower.Last(), Upper.Last(), 1.0, Black);
 		}
-		M.Quad(SidePoint(-49, 0.10), SidePoint(-43, 0.10), SidePoint(-43, 0.94), SidePoint(-49, 0.94), FVector(0, Side, 0), Black);
+		for (const FVector2D Pillar : {
+			FVector2D(-135.0, -120.0), FVector2D(-49.0, -43.0), FVector2D(54.0, 66.0)})
+		{
+			M.Patch([&](double U, double V)
+			{
+				return CabinSidePoint(FMath::Lerp(Pillar.X, Pillar.Y, U), Side,
+					FMath::Lerp(0.10, 0.94, V));
+			}, [&](double, double) { return FVector(0, Side, 0); }, 4, 3, Black);
+		}
+		M.Quad(CabinSidePoint(-49, Side, 0.10), CabinSidePoint(-43, Side, 0.10),
+			CabinSidePoint(-43, Side, 0.94), CabinSidePoint(-49, Side, 0.94),
+			FVector(0, Side, 0), Black);
 		// Door shut lines and pull handles: dark geometric seams, never painted onto a box.
 		for (double X : {-114.0, -46.0, 63.0})
 		{
@@ -640,12 +898,19 @@ void BuildBody(FAuthor& M)
 		}
 		for (double X : {-88.0, 1.0})
 		{
+			if (Side < 0.0 && X > DriverDoorRearX)
+			{
+				continue;
+			}
 			M.Ellipsoid(FVector(X, Side * 89.0, 24.0), FVector(6.3, 1.3, 1.4), Chrome);
 		}
-		M.Tube(FVector(45, Side * 79, 48), FVector(43, Side * 96, 47), 1.6, Black);
-		M.Ellipsoid(FVector(44, Side * 100, 49), FVector(8.2, 6.4, 4.5), Paint);
-		M.Quad(FVector(37.0, Side * 95.5, 46), FVector(37.0, Side * 104.0, 46),
-			FVector(37.0, Side * 104.0, 51.5), FVector(37.0, Side * 95.5, 51.5), FVector(-1, 0, 0), Glass);
+		if (Side > 0.0)
+		{
+			M.Tube(FVector(45, Side * 79, 48), FVector(43, Side * 96, 47), 1.6, Black);
+			M.Ellipsoid(FVector(44, Side * 100, 49), FVector(8.2, 6.4, 4.5), Paint);
+			M.Quad(FVector(37.0, Side * 95.5, 46), FVector(37.0, Side * 104.0, 46),
+				FVector(37.0, Side * 104.0, 51.5), FVector(37.0, Side * 95.5, 51.5), FVector(-1, 0, 0), Glass);
+		}
 	}
 	// Windshield and rear glazing follow the actual curved cabin loft, not flat floating planes.
 	for (const FVector2D Range : {FVector2D(-128, -85), FVector2D(21, 61)})
@@ -689,8 +954,14 @@ void BuildBody(FAuthor& M)
 				[](double, double) { return FVector::UpVector; }, 12, 4, Black);
 			M.Patch([&](double U, double V)
 			{
-				return LampPoint(bFront, Side, FMath::Lerp(0.035, 0.965, U), FMath::Lerp(0.15, 0.85, V), 1.0);
+				return LampPoint(bFront, Side, FMath::Lerp(0.035, 0.965, U), FMath::Lerp(0.37, 0.85, V), 1.0);
 			}, [](double, double) { return FVector::UpVector; }, 12, 3, bFront ? Headlamp : TailLamp);
+			// The strip is part of the curved lamp lens, not an attached cube. Leave
+			// a small black housing gap between the white/red and amber sections.
+			M.Patch([&](double U, double V)
+			{
+				return SimCoreSedanVisualContract::TurnSignalLensPointCm(bFront, Side < 0, U, V);
+			}, [](double, double) { return FVector::UpVector; }, 12, 2, Amber);
 		}
 		M.Ellipsoid(FVector(-216, Side * 54, -24), FVector(5, 7, 2.6), Black);
 		M.Tube(FVector(-219, Side * 60, -22), FVector(-224, Side * 60, -22), 2.9, Chrome, 12);
@@ -702,6 +973,112 @@ void BuildBody(FAuthor& M)
 	{
 		M.Tube(FVector(-230.55, I * 3.1, -7), FVector(-230.55, I * 3.1, -3), 0.55, Black, 6);
 	}
+}
+
+void BuildDriverDoor(FAuthor& M)
+{
+	constexpr double Side = -1.0;
+	// The exterior reuses the exact body curve removed by BuildBody, so the
+	// closed door restores the original silhouette without an overlay or mask.
+	M.Patch([&](double U, double V)
+	{
+		const double X = FMath::Lerp(DriverDoorRearX, DriverDoorFrontX, U);
+		return BodySidePoint(X, Side,
+			FMath::Lerp(DriverDoorLowerV, 1.0, V));
+	}, [](double, double) { return FVector(0, -1, 0); }, 44, 6, Paint);
+
+	// A thin, body-conforming inner trim is part of the moving door itself. It
+	// replaces the old fixed black aperture slab and exposes the real cabin when
+	// the door opens.
+	auto InnerPoint = [](const double X, const double V)
+	{
+		FVector Point = BodySidePoint(X, -1.0, V);
+		Point.Y += 2.4;
+		return Point;
+	};
+	M.Patch([&](double U, double V)
+	{
+		const double X = FMath::Lerp(DriverDoorRearX, DriverDoorFrontX, U);
+		return InnerPoint(X, FMath::Lerp(DriverDoorLowerV, 1.0, V));
+	}, [](double, double) { return FVector(0, 1, 0); }, 44, 6, Black);
+
+	// Close the thin door shell along the two jambs, sill and belt edge.
+	for (double X : {DriverDoorRearX, DriverDoorFrontX})
+	{
+		M.Patch([&](double U, double V)
+		{
+			const double BodyV = FMath::Lerp(DriverDoorLowerV, 1.0, U);
+			return FMath::Lerp(BodySidePoint(X, Side, BodyV),
+				InnerPoint(X, BodyV), V);
+		}, [&](double, double) { return FVector(X < 0.0 ? -1.0 : 1.0, 0, 0); },
+			6, 1, Black);
+	}
+	for (double BodyV : {DriverDoorLowerV, 1.0})
+	{
+		M.Patch([&](double U, double V)
+		{
+			const double X = FMath::Lerp(DriverDoorRearX, DriverDoorFrontX, U);
+			return FMath::Lerp(BodySidePoint(X, Side, BodyV),
+				InnerPoint(X, BodyV), V);
+		}, [&](double, double) { return BodyV < 0.5 ? FVector::DownVector : FVector::UpVector; },
+			44, 1, Black);
+	}
+
+	TArray<FVector> CharacterLine;
+	for (int32 I = 0; I <= 22; ++I)
+	{
+		const double X = FMath::Lerp(DriverDoorRearX, DriverDoorFrontX,
+			static_cast<double>(I) / 22.0);
+		CharacterLine.Add(FVector(X, -(Width(X) - 1.0), Deck(X) - 10.0));
+	}
+	M.Polyline(CharacterLine, 0.24, Paint);
+
+	// Lower window rail belongs to the door; the fixed roof rail and A/B pillars
+	// remain on the body.
+	M.Patch([&](double U, double V)
+	{
+		const double X = FMath::Lerp(DriverDoorRearX, DriverDoorFrontX, U);
+		const FVector Lower = BodySidePoint(X, Side, 1.0);
+		const FVector Upper(X, -78.0, 42.0);
+		return FMath::Lerp(Lower, Upper, V);
+	}, [](double, double) { return FVector(0, -1, 0.35); }, 44, 1, Paint);
+	M.Patch([&](double U, double V)
+	{
+		const double X = FMath::Lerp(DriverDoorRearX, DriverDoorFrontX, U);
+		const double RailV = FMath::Lerp(0.0, 0.105, V);
+		return FVector(X, -FMath::Lerp(78.0, CabinWidth(X), RailV),
+			FMath::Lerp(42.0, CabinZ(X), RailV));
+	}, [](double, double) { return FVector(0, -1, 0); }, 44, 1, Paint);
+
+	constexpr double GlassRearX = -43.0;
+	constexpr double GlassFrontX = 54.0;
+	M.Patch([&](double U, double V)
+	{
+		const double X = FMath::Lerp(GlassRearX, GlassFrontX, U);
+		return CabinSidePoint(X, Side, FMath::Lerp(0.12, 0.91, V));
+	}, [](double, double) { return FVector(0, -1, 0.2); }, 22, 3, Glass);
+	TArray<FVector> LowerFrame;
+	TArray<FVector> UpperFrame;
+	for (int32 I = 0; I <= 22; ++I)
+	{
+		const double X = FMath::Lerp(GlassRearX, GlassFrontX,
+			static_cast<double>(I) / 22.0);
+		LowerFrame.Add(CabinSidePoint(X, Side, 0.12));
+		UpperFrame.Add(CabinSidePoint(X, Side, 0.91));
+	}
+	M.Polyline(LowerFrame, 0.7, Chrome);
+	M.Polyline(UpperFrame, 1.0, Black);
+	M.Tube(LowerFrame[0], UpperFrame[0], 1.0, Black);
+	M.Tube(LowerFrame.Last(), UpperFrame.Last(), 1.0, Black);
+
+	// Exterior handle and mirror move with the door instead of remaining on the
+	// body after the hinge rotates.
+	M.Ellipsoid(FVector(1.0, -89.0, 24.0), FVector(6.3, 1.3, 1.4), Chrome);
+	M.Tube(FVector(45, -79, 48), FVector(43, -96, 47), 1.6, Black);
+	M.Ellipsoid(FVector(44, -100, 49), FVector(8.2, 6.4, 4.5), Paint);
+	M.Quad(FVector(37.0, -95.5, 46), FVector(37.0, -104.0, 46),
+		FVector(37.0, -104.0, 51.5), FVector(37.0, -95.5, 51.5),
+		FVector(-1, 0, 0), Glass);
 }
 
 void BuildWheel(FAuthor& M)
@@ -785,6 +1162,247 @@ void BuildWheel(FAuthor& M)
 	}
 }
 
+void BuildCompactBody(FAuthor& M)
+{
+	// Reuse the curved, closed sedan surface at a genuinely smaller wheelbase.
+	// The separate driver door is merged into this NPC-only body because fleet
+	// variants do not run the sedan exit-door presentation.
+	BuildBody(M);
+	BuildDriverDoor(M);
+	M.Transform(FVector(0.79, 0.90, 0.92), FVector(-4.0, 0.0, -1.5));
+}
+
+void BuildTruckBody(FAuthor& M)
+{
+	// A medium box truck: separate chassis, forward cab and tall cargo body make
+	// its silhouette unambiguous at traffic-camera distance.
+	M.Box(FVector(-15, 0, -8), FVector(310, 103, 18), Black);
+	M.Box(FVector(-138, 0, 72), FVector(145, 101, 92), Paint);
+	M.Box(FVector(94, 0, 49), FVector(72, 99, 57), Paint);
+	M.Ellipsoid(FVector(103, 0, 105), FVector(76, 98, 62), Paint, 20, 10);
+	M.Box(FVector(194, 0, 31), FVector(43, 96, 35), Paint);
+	M.Box(FVector(151, -99.5, 104), FVector(35, 1.5, 31), Glass);
+	M.Box(FVector(151, 99.5, 104), FVector(35, 1.5, 31), Glass);
+	M.Box(FVector(176.5, 0, 106), FVector(1.5, 78, 31), Glass);
+	M.Box(FVector(236, 0, 13), FVector(8, 105, 9), Chrome);
+	M.Box(FVector(-291, 0, 6), FVector(8, 105, 9), Chrome);
+	for (double Side : {-1.0, 1.0})
+	{
+		M.Box(FVector(238, Side * 72, 45), FVector(2.5, 19, 10), Headlamp);
+		M.Box(FVector(-292, Side * 76, 53), FVector(2.5, 18, 11), TailLamp);
+		M.Box(FVector(240, Side * 96, 58), FVector(3.0, 7.0, 6.0), Amber);
+		M.Box(FVector(-294, Side * 96, 64), FVector(3.0, 7.0, 6.0), Amber);
+	}
+	M.Box(FVector(-292, 0, 22), FVector(2.0, 31, 11), Plate);
+}
+
+void BuildMotorcycleBody(FAuthor& M)
+{
+	// Two-wheel road bike with a visible frame, tank, saddle, fork and lamps.
+	M.Tube(FVector(-82, 0, -7), FVector(20, 0, 47), 4.2, Black, 10);
+	M.Tube(FVector(20, 0, 47), FVector(91, 0, -8), 4.2, Black, 10);
+	M.Tube(FVector(-82, 0, -7), FVector(91, 0, -8), 3.6, Chrome, 10);
+	M.Ellipsoid(FVector(20, 0, 47), FVector(49, 34, 29), Paint, 20, 10);
+	M.Box(FVector(-40, 0, 53), FVector(44, 29, 8), Black);
+	M.Ellipsoid(FVector(-77, 0, 33), FVector(29, 25, 19), Paint, 16, 8);
+	M.Tube(FVector(80, -7, 66), FVector(99, -7, -6), 2.8, Chrome, 10);
+	M.Tube(FVector(80, 7, 66), FVector(99, 7, -6), 2.8, Chrome, 10);
+	M.Tube(FVector(75, -43, 70), FVector(75, 43, 70), 2.6, Black, 10);
+	M.Ellipsoid(FVector(103, 0, 62), FVector(10, 15, 10), Headlamp, 14, 7);
+	M.Ellipsoid(FVector(-103, 0, 48), FVector(7, 13, 8), TailLamp, 14, 7);
+	for (double Side : {-1.0, 1.0})
+	{
+		M.Tube(FVector(82, Side * 16, 66), FVector(91, Side * 27, 62), 1.6, Black, 8);
+		M.Ellipsoid(FVector(93, Side * 29, 61), FVector(5, 5, 5), Amber, 10, 5);
+		M.Tube(FVector(-76, Side * 13, 45), FVector(-91, Side * 24, 47), 1.4, Black, 8);
+		M.Ellipsoid(FVector(-94, Side * 27, 47), FVector(4.5, 4.5, 4.5), Amber, 10, 5);
+	}
+}
+
+bool ValidateIndicatorLenses(const FMeshDescription& Mesh)
+{
+	const FStaticMeshConstAttributes Attributes(Mesh);
+	const auto Slots = Attributes.GetPolygonGroupMaterialSlotNames();
+	const auto Positions = Attributes.GetVertexPositions();
+	int32 CornerTriangleCounts[4] = {};
+	for (FTriangleID Triangle : Mesh.Triangles().GetElementIDs())
+	{
+		if (Slots[Mesh.GetTrianglePolygonGroup(Triangle)] != FName(Finishes[Amber].Name)) continue;
+		int32 Corner = INDEX_NONE;
+		for (FVertexInstanceID Instance : Mesh.GetTriangleVertexInstances(Triangle))
+		{
+			const FVector Point(Positions[Mesh.GetVertexInstanceVertex(Instance)]);
+			const bool bFront = Point.X > 0;
+			const int32 VertexCorner = (bFront ? 0 : 2) + (Point.Y < 0 ? 0 : 1);
+			if (Corner != INDEX_NONE && Corner != VertexCorner) return false;
+			Corner = VertexCorner;
+			const double Across = Point.Y / (Width(Point.X) - 7.5);
+			const double U = (FMath::Abs(Across) - 0.36) / 0.6;
+			const double V = bFront ? (196.0 - 4.0 * U - Point.X) / 14.0
+				: (Point.X + 226.0 - 3.0 * U) / 17.0;
+			if (U < 0.0349 || U > 0.9651 || V < 0.1499 || V > 0.3301
+				|| !FMath::IsNearlyEqual(Point.Z - BodyDeckPoint(Point.X, Across).Z, 1.0, 0.0001)) return false;
+		}
+		if (Corner == INDEX_NONE) return false;
+		++CornerTriangleCounts[Corner];
+	}
+	for (int32 Count : CornerTriangleCounts) if (Count != 48) return false;
+	return true;
+}
+
+bool ValidateTransparentGlazingGeometry(const FMeshDescription& Mesh,
+	const int32 MinimumGlassTriangles = 1700)
+{
+	const FStaticMeshConstAttributes Attributes(Mesh);
+	const auto Slots = Attributes.GetPolygonGroupMaterialSlotNames();
+	const auto Positions = Attributes.GetVertexPositions();
+	int32 GlassTriangles = 0;
+	int32 OpaqueBackingTriangles = 0;
+	for (FTriangleID Triangle : Mesh.Triangles().GetElementIDs())
+	{
+		const FName Slot = Slots[Mesh.GetTrianglePolygonGroup(Triangle)];
+		if (Slot == FName(Finishes[Glass].Name))
+		{
+			++GlassTriangles;
+			continue;
+		}
+		if (Slot != FName(Finishes[Paint].Name))
+		{
+			continue;
+		}
+		FVector Points[3];
+		int32 PointIndex = 0;
+		for (FVertexInstanceID Instance : Mesh.GetTriangleVertexInstances(Triangle))
+		{
+			Points[PointIndex++] = FVector(
+				Positions[Mesh.GetVertexInstanceVertex(Instance)]);
+		}
+		const FVector Centre = (Points[0] + Points[1] + Points[2]) / 3.0;
+		const FVector Normal = FVector::CrossProduct(
+			Points[2] - Points[0], Points[1] - Points[0]).GetSafeNormal();
+		const bool bFrontOrRearGlassX = (Centre.X > -127.5 && Centre.X < -85.5)
+			|| (Centre.X > 21.5 && Centre.X < 60.5);
+		const bool bSideGlassX = (Centre.X > -119.5 && Centre.X < -49.5)
+			|| (Centre.X > -42.5 && Centre.X < 53.5);
+		const bool bOpaqueUnderWindshield = bFrontOrRearGlassX
+			&& Centre.Z > 50.0 && FMath::Abs(Centre.Y) < 56.0;
+		const double CabinTop = Curve(Centre.X,
+			{{-135, 42}, {-82, 83}, {-60, 92}, {-6, 94}, {17, 86}, {66, 41}});
+		const double SideV = (Centre.Z - 42.0) / FMath::Max(1.0, CabinTop - 42.0);
+		const bool bOpaqueUnderSideGlass = bSideGlassX
+			&& SideV > 0.16 && SideV < 0.87
+			&& FMath::Abs(Centre.Y) > 55.0 && FMath::Abs(Centre.Y) < 85.0
+			&& FMath::Abs(Normal.Y) > 0.55;
+		if (bOpaqueUnderWindshield || bOpaqueUnderSideGlass)
+		{
+			++OpaqueBackingTriangles;
+			if (OpaqueBackingTriangles <= 3)
+			{
+				UE_LOG(LogBuildSedanVisual, Warning,
+					TEXT("Opaque glass-backing candidate centre=%s normal=%s sideV=%.3f wind=%d side=%d"),
+					*Centre.ToString(), *Normal.ToString(), SideV,
+					bOpaqueUnderWindshield, bOpaqueUnderSideGlass);
+			}
+		}
+	}
+	if (GlassTriangles < MinimumGlassTriangles || OpaqueBackingTriangles > 0)
+	{
+		UE_LOG(LogBuildSedanVisual, Warning,
+			TEXT("Glazing validation glassTriangles=%d opaqueBackingTriangles=%d"),
+			GlassTriangles, OpaqueBackingTriangles);
+	}
+	return GlassTriangles >= MinimumGlassTriangles && OpaqueBackingTriangles == 0;
+}
+
+bool ValidateDriverDoorApertureGeometry(const FMeshDescription& Mesh)
+{
+	const FStaticMeshConstAttributes Attributes(Mesh);
+	const auto Slots = Attributes.GetPolygonGroupMaterialSlotNames();
+	const auto Positions = Attributes.GetVertexPositions();
+	for (FTriangleID Triangle : Mesh.Triangles().GetElementIDs())
+	{
+		FVector Points[3];
+		int32 PointIndex = 0;
+		for (FVertexInstanceID Instance : Mesh.GetTriangleVertexInstances(Triangle))
+		{
+			Points[PointIndex++] = FVector(
+				Positions[Mesh.GetVertexInstanceVertex(Instance)]);
+		}
+		const FVector Centre = (Points[0] + Points[1] + Points[2]) / 3.0;
+		const FVector Normal = FVector::CrossProduct(
+			Points[2] - Points[0], Points[1] - Points[0]).GetSafeNormal();
+		const FName Slot = Slots[Mesh.GetTrianglePolygonGroup(Triangle)];
+		const bool bFixedPaintBehindDoor = Slot == FName(Finishes[Paint].Name)
+			&& Centre.X > DriverDoorRearX + 0.5
+			&& Centre.X < DriverDoorFrontX - 0.5
+			&& Centre.Y < -80.0 && Centre.Z > -21.0 && Centre.Z < 45.0
+			&& FMath::Abs(Normal.Y) > 0.5;
+		const bool bFixedFrontDoorGlass = Slot == FName(Finishes[Glass].Name)
+			&& Centre.X > -42.5 && Centre.X < 53.5
+			&& Centre.Y < -50.0 && FMath::Abs(Normal.Y) > 0.55;
+		if (bFixedPaintBehindDoor || bFixedFrontDoorGlass)
+		{
+			UE_LOG(LogBuildSedanVisual, Error,
+				TEXT("Fixed body geometry remains behind left-front door at %s slot=%s"),
+				*Centre.ToString(), *Slot.ToString());
+			return false;
+		}
+	}
+	return true;
+}
+
+bool ValidateDriverDoorGeometry(const FMeshDescription& Mesh)
+{
+	const FStaticMeshConstAttributes Attributes(Mesh);
+	const auto Slots = Attributes.GetPolygonGroupMaterialSlotNames();
+	const auto Positions = Attributes.GetVertexPositions();
+	int32 ExteriorPaintTriangles = 0;
+	int32 SideGlassTriangles = 0;
+	int32 InnerTrimTriangles = 0;
+	for (FTriangleID Triangle : Mesh.Triangles().GetElementIDs())
+	{
+		FVector Points[3];
+		int32 PointIndex = 0;
+		for (FVertexInstanceID Instance : Mesh.GetTriangleVertexInstances(Triangle))
+		{
+			Points[PointIndex++] = FVector(
+				Positions[Mesh.GetVertexInstanceVertex(Instance)]);
+		}
+		const FVector Centre = (Points[0] + Points[1] + Points[2]) / 3.0;
+		const FVector Normal = FVector::CrossProduct(
+			Points[2] - Points[0], Points[1] - Points[0]).GetSafeNormal();
+		const FName Slot = Slots[Mesh.GetTrianglePolygonGroup(Triangle)];
+		if (Slot == FName(Finishes[Paint].Name)
+			&& Centre.X > DriverDoorRearX && Centre.X < DriverDoorFrontX
+			&& Centre.Y < -80.0 && Centre.Z < 45.0
+			&& Normal.Y < -0.5)
+		{
+			++ExteriorPaintTriangles;
+		}
+		if (Slot == FName(Finishes[Glass].Name)
+			&& Centre.X > -43.0 && Centre.X < 54.0
+			&& Centre.Y < -50.0 && FMath::Abs(Normal.Y) > 0.55)
+		{
+			++SideGlassTriangles;
+		}
+		if (Slot == FName(Finishes[Black].Name)
+			&& Centre.X > DriverDoorRearX && Centre.X < DriverDoorFrontX
+			&& Centre.Y > -90.0 && Centre.Z < 42.0 && Normal.Y > 0.5)
+		{
+			++InnerTrimTriangles;
+		}
+	}
+	if (ExteriorPaintTriangles < 400 || SideGlassTriangles < 100
+		|| InnerTrimTriangles < 300)
+	{
+		UE_LOG(LogBuildSedanVisual, Error,
+			TEXT("Driver door separation invalid: exterior=%d glass=%d inner=%d"),
+			ExteriorPaintTriangles, SideGlassTriangles, InnerTrimTriangles);
+		return false;
+	}
+	return ValidateTransparentGlazingGeometry(Mesh, 100);
+}
+
 bool ValidateMesh(UStaticMesh* Mesh, bool bWheel)
 {
 	if (!Mesh || Mesh->GetNumLODs() != 1 || Mesh->GetStaticMaterials().Num() != FinishCount || !Mesh->GetMeshDescription(0))
@@ -807,8 +1425,67 @@ bool ValidateMesh(UStaticMesh* Mesh, bool bWheel)
 		const FStaticMaterial& Slot = Mesh->GetStaticMaterials()[Index];
 		if (!Slot.MaterialInterface || Slot.MaterialSlotName != FName(Finishes[Index].Name)) { return false; }
 	}
+	if (!bWheel && (!Mesh->bAllowCPUAccess
+		|| !ValidateIndicatorLenses(*Mesh->GetMeshDescription(0))
+		|| !ValidateTransparentGlazingGeometry(*Mesh->GetMeshDescription(0))
+		|| !ValidateDriverDoorApertureGeometry(*Mesh->GetMeshDescription(0))))
+	{
+		UE_LOG(LogBuildSedanVisual, Error,
+			TEXT("Body needs CPU-readable indicators, true glazing and a real left-front door aperture; run -UpdateDriverDoor."));
+		return false;
+	}
 	UE_LOG(LogBuildSedanVisual, Display, TEXT("Validated %s: triangles=%d bounds=%s materials=%d"),
 		*Mesh->GetPathName(), Triangles, *Box.ToString(), Mesh->GetStaticMaterials().Num());
+	return true;
+}
+
+bool ValidateDriverDoorMesh(UStaticMesh* Mesh)
+{
+	if (!Mesh || Mesh->GetNumLODs() != 1
+		|| Mesh->GetStaticMaterials().Num() != FinishCount
+		|| !Mesh->GetMeshDescription(0) || !Mesh->bAllowCPUAccess)
+	{
+		UE_LOG(LogBuildSedanVisual, Error,
+			TEXT("Missing driver-door mesh, LOD, material slots or editable source description."));
+		return false;
+	}
+	const FBox Box = Mesh->GetBoundingBox();
+	const int32 Triangles = Mesh->GetMeshDescription(0)->Triangles().Num();
+	// Includes the exterior mirror at Y=-106.4 and the inward-tapered upper
+	// frame at Y=-62.0. Tight two-sided ranges catch a misplaced/full-body mesh
+	// without rejecting the authored greenhouse taper.
+	const bool bBounds = Box.Min.X >= DriverDoorRearX - 2.0
+		&& Box.Min.X <= DriverDoorRearX + 2.0
+		&& Box.Max.X >= DriverDoorFrontX - 2.0
+		&& Box.Max.X <= DriverDoorFrontX + 2.0
+		&& Box.Min.Y >= -108.0 && Box.Min.Y <= -104.0
+		&& Box.Max.Y >= -65.0 && Box.Max.Y <= -59.0
+		&& Box.Min.Z >= -27.0 && Box.Min.Z <= -22.0
+		&& Box.Max.Z >= 88.0 && Box.Max.Z <= 93.0;
+	if (!bBounds || Triangles < 2400 || Triangles > 3400)
+	{
+		UE_LOG(LogBuildSedanVisual, Error,
+			TEXT("Invalid driver-door bounds/triangle count: %s, triangles=%d"),
+			*Box.ToString(), Triangles);
+		return false;
+	}
+	for (int32 Index = 0; Index < FinishCount; ++Index)
+	{
+		const FStaticMaterial& Slot = Mesh->GetStaticMaterials()[Index];
+		if (!Slot.MaterialInterface
+			|| Slot.MaterialSlotName != FName(Finishes[Index].Name))
+		{
+			return false;
+		}
+	}
+	if (!ValidateDriverDoorGeometry(*Mesh->GetMeshDescription(0)))
+	{
+		return false;
+	}
+	UE_LOG(LogBuildSedanVisual, Display,
+		TEXT("Validated %s: triangles=%d bounds=%s materials=%d"),
+		*Mesh->GetPathName(), Triangles, *Box.ToString(),
+		Mesh->GetStaticMaterials().Num());
 	return true;
 }
 
@@ -846,6 +1523,7 @@ bool MakeMesh(bool bWheel, const TArray<UMaterial*>& Materials, bool bValidateOn
 		Mesh->GetStaticMaterials().Add(FStaticMaterial(Materials[Index], FName(Finishes[Index].Name), FName(Finishes[Index].Name)));
 	}
 	UStaticMesh::FBuildMeshDescriptionsParams BuildParams;
+	Mesh->bAllowCPUAccess = !bWheel;
 	BuildParams.bBuildSimpleCollision = false;
 	BuildParams.bFastBuild = false;
 	BuildParams.bCommitMeshDescription = true;
@@ -854,6 +1532,159 @@ bool MakeMesh(bool bWheel, const TArray<UMaterial*>& Materials, bool bValidateOn
 	if (!bExisting) { FAssetRegistryModule::AssetCreated(Mesh); }
 	if (!ValidateMesh(Mesh, bWheel) || !SaveAuthoredAsset(Mesh)) { return false; }
 	return true;
+}
+
+bool MakeDriverDoorMesh(const TArray<UMaterial*>& Materials,
+	const bool bValidateOnly, const bool bRegenerate)
+{
+	const FString Name = TEXT("SM_SedanDoorLeft");
+	const FString Path = SimCoreSedanVisualContract::DriverDoorPackagePath();
+	UStaticMesh* Mesh = nullptr;
+	const bool bExisting = FPackageName::DoesPackageExist(Path);
+	if (bExisting)
+	{
+		Mesh = LoadObject<UStaticMesh>(nullptr,
+			SimCoreSedanVisualContract::DriverDoorObjectPath());
+		if (!Mesh)
+		{
+			return false;
+		}
+		if (!bRegenerate || bValidateOnly)
+		{
+			return ValidateDriverDoorMesh(Mesh);
+		}
+		if (!IsAuthoredAsset(Mesh))
+		{
+			UE_LOG(LogBuildSedanVisual, Error,
+				TEXT("Refusing to replace non-authored asset: %s"), *Path);
+			return false;
+		}
+	}
+	else if (bValidateOnly)
+	{
+		return false;
+	}
+	else
+	{
+		Mesh = NewObject<UStaticMesh>(CreatePackage(*Path), *Name,
+			RF_Public | RF_Standalone);
+	}
+	FAuthor Author;
+	BuildDriverDoor(Author);
+	if (Author.bInvalidTriangle || Author.TriangleCount > 6000)
+	{
+		return false;
+	}
+	Mesh->SetNumSourceModels(1);
+	FMeshBuildSettings& Build = Mesh->GetSourceModel(0).BuildSettings;
+	Build.bRecomputeNormals = false;
+	Build.bRecomputeTangents = false;
+	Build.bGenerateLightmapUVs = false;
+	Build.bRemoveDegenerates = true;
+	Mesh->GetStaticMaterials().Reset();
+	for (int32 Index = 0; Index < Materials.Num(); ++Index)
+	{
+		Mesh->GetStaticMaterials().Add(FStaticMaterial(Materials[Index],
+			FName(Finishes[Index].Name), FName(Finishes[Index].Name)));
+	}
+	UStaticMesh::FBuildMeshDescriptionsParams BuildParams;
+	Mesh->bAllowCPUAccess = true;
+	BuildParams.bBuildSimpleCollision = false;
+	BuildParams.bFastBuild = false;
+	BuildParams.bCommitMeshDescription = true;
+	const TArray<const FMeshDescription*> Descriptions = { &Author.Mesh };
+	if (!Mesh->BuildFromMeshDescriptions(Descriptions, BuildParams))
+	{
+		return false;
+	}
+	if (!bExisting)
+	{
+		FAssetRegistryModule::AssetCreated(Mesh);
+	}
+	return ValidateDriverDoorMesh(Mesh) && SaveAuthoredAsset(Mesh);
+}
+
+bool ValidateFleetMesh(UStaticMesh* Mesh, const TCHAR* Name)
+{
+	if (!Mesh || !IsAuthoredAsset(Mesh) || !Mesh->bAllowCPUAccess
+		|| Mesh->GetNumSourceModels() != 1 || !Mesh->GetMeshDescription(0)
+		|| Mesh->GetStaticMaterials().Num() != FinishCount)
+	{
+		return false;
+	}
+	const int32 Triangles = Mesh->GetMeshDescription(0)->Triangles().Num();
+	const FBox Box = Mesh->GetBoundingBox();
+	const FVector Size = Box.GetSize();
+	if (Triangles < 80 || Triangles > 35000 || !Box.IsValid
+		|| Size.ContainsNaN() || Size.X < 150.0 || Size.X > 750.0
+		|| Size.Y < 35.0 || Size.Y > 300.0 || Size.Z < 35.0 || Size.Z > 350.0)
+	{
+		return false;
+	}
+	for (int32 Index = 0; Index < FinishCount; ++Index)
+	{
+		if (Mesh->GetStaticMaterials()[Index].MaterialSlotName
+			!= FName(Finishes[Index].Name)) return false;
+	}
+	UE_LOG(LogBuildSedanVisual, Display,
+		TEXT("Validated fleet mesh %s: triangles=%d bounds=%s"),
+		Name, Triangles, *Box.ToString());
+	return true;
+}
+
+bool MakeFleetMesh(const TCHAR* Name, TFunctionRef<void(FAuthor&)> Builder,
+	const TArray<UMaterial*>& Materials, const bool bValidateOnly)
+{
+	const FString Path = FString(FleetAssetRoot) + Name;
+	UStaticMesh* Mesh = nullptr;
+	const bool bExisting = FPackageName::DoesPackageExist(Path);
+	if (bExisting)
+	{
+		Mesh = LoadObject<UStaticMesh>(nullptr, *(Path + TEXT(".") + Name));
+		if (!Mesh) return false;
+		if (bValidateOnly) return ValidateFleetMesh(Mesh, Name);
+		if (!IsAuthoredAsset(Mesh))
+		{
+			UE_LOG(LogBuildSedanVisual, Error,
+				TEXT("Refusing to replace non-authored fleet mesh: %s"), *Path);
+			return false;
+		}
+	}
+	else if (bValidateOnly)
+	{
+		return false;
+	}
+	else
+	{
+		Mesh = NewObject<UStaticMesh>(CreatePackage(*Path), Name,
+			RF_Public | RF_Standalone);
+	}
+
+	FAuthor Author;
+	Builder(Author);
+	if (Author.bInvalidTriangle || Author.TriangleCount < 80
+		|| Author.TriangleCount > 35000) return false;
+	Mesh->SetNumSourceModels(1);
+	FMeshBuildSettings& Build = Mesh->GetSourceModel(0).BuildSettings;
+	Build.bRecomputeNormals = false;
+	Build.bRecomputeTangents = false;
+	Build.bGenerateLightmapUVs = false;
+	Build.bRemoveDegenerates = true;
+	Mesh->GetStaticMaterials().Reset();
+	for (int32 Index = 0; Index < Materials.Num(); ++Index)
+	{
+		Mesh->GetStaticMaterials().Add(FStaticMaterial(Materials[Index],
+			FName(Finishes[Index].Name), FName(Finishes[Index].Name)));
+	}
+	Mesh->bAllowCPUAccess = true;
+	UStaticMesh::FBuildMeshDescriptionsParams BuildParams;
+	BuildParams.bBuildSimpleCollision = false;
+	BuildParams.bFastBuild = false;
+	BuildParams.bCommitMeshDescription = true;
+	const TArray<const FMeshDescription*> Descriptions = {&Author.Mesh};
+	if (!Mesh->BuildFromMeshDescriptions(Descriptions, BuildParams)) return false;
+	if (!bExisting) FAssetRegistryModule::AssetCreated(Mesh);
+	return SaveAuthoredAsset(Mesh) && ValidateFleetMesh(Mesh, Name);
 }
 }
 
@@ -867,6 +1698,199 @@ UBuildSedanVisualCommandlet::UBuildSedanVisualCommandlet()
 
 int32 UBuildSedanVisualCommandlet::Main(const FString& Params)
 {
+	if (FParse::Param(*Params, TEXT("UpdateNpcFleet")))
+	{
+		const bool bValidateOnly = FParse::Param(*Params, TEXT("ValidateOnly"));
+		TArray<UMaterial*> Materials;
+		for (int32 Index = 0; Index < FinishCount; ++Index)
+		{
+			UMaterial* Material = MakeMaterial(Index, true, false);
+			if (!Material)
+			{
+				UE_LOG(LogBuildSedanVisual, Error,
+					TEXT("Fleet generation requires the validated sedan material set."));
+				return 1;
+			}
+			Materials.Add(Material);
+		}
+		const bool bOk = MakeFleetMesh(TEXT("SM_CompactBody"), BuildCompactBody,
+			Materials, bValidateOnly)
+			&& MakeFleetMesh(TEXT("SM_TruckBody"), BuildTruckBody,
+				Materials, bValidateOnly)
+			&& MakeFleetMesh(TEXT("SM_MotorcycleBody"), BuildMotorcycleBody,
+				Materials, bValidateOnly);
+		if (bOk)
+		{
+			UE_LOG(LogBuildSedanVisual, Display,
+				TEXT("NPC fleet %s: compact, truck and motorcycle authored meshes."),
+				bValidateOnly ? TEXT("validation") : TEXT("update"));
+		}
+		else
+		{
+			UE_LOG(LogBuildSedanVisual, Error,
+				TEXT("NPC fleet %s failed."),
+				bValidateOnly ? TEXT("validation") : TEXT("update"));
+		}
+		return bOk ? 0 : 1;
+	}
+	if (FParse::Param(*Params, TEXT("UpdateDriverDoor")))
+	{
+		// Scoped migration: derive the moving door from the existing owned body
+		// materials, create/validate it first, then cut only its matching aperture
+		// from the body. Wheels and materials are not regenerated.
+		UStaticMesh* Body = LoadObject<UStaticMesh>(nullptr,
+			SimCoreSedanVisualContract::BodyObjectPath());
+		if (!Body || !IsAuthoredAsset(Body)
+			|| Body->GetStaticMaterials().Num() != FinishCount)
+		{
+			UE_LOG(LogBuildSedanVisual, Error,
+				TEXT("Driver-door update requires the existing self-authored sedan body."));
+			return 1;
+		}
+		TArray<UMaterial*> Materials;
+		for (int32 Index = 0; Index < FinishCount; ++Index)
+		{
+			const FStaticMaterial& Slot = Body->GetStaticMaterials()[Index];
+			auto* Material = Cast<UMaterial>(Slot.MaterialInterface);
+			if (!Material || Slot.MaterialSlotName != FName(Finishes[Index].Name)
+				|| !ValidateDentMaterial(Material))
+			{
+				UE_LOG(LogBuildSedanVisual, Error,
+					TEXT("Driver-door update refused: body material slot %d was replaced or invalid."),
+					Index);
+				return 1;
+			}
+			Materials.Add(Material);
+		}
+		const bool bValidateOnly = FParse::Param(*Params, TEXT("ValidateOnly"));
+		if (bValidateOnly)
+		{
+			return ValidateMesh(Body, false)
+				&& MakeDriverDoorMesh(Materials, true, false) ? 0 : 1;
+		}
+		if (!MakeDriverDoorMesh(Materials, false, true)
+			|| !MakeMesh(false, Materials, false, true))
+		{
+			return 1;
+		}
+		UE_LOG(LogBuildSedanVisual, Display,
+			TEXT("Driver-door update passed: body aperture + SM_SedanDoorLeft; wheel and materials unchanged."));
+		return 0;
+	}
+	if (FParse::Param(*Params, TEXT("UpdateGlass")))
+	{
+		// Scoped migration: preserve the wheel and every owned material except
+		// M_Sedan_Glass, then rebuild only our generated body to cut real windows.
+		UStaticMesh* Body = LoadObject<UStaticMesh>(nullptr,
+			SimCoreSedanVisualContract::BodyObjectPath());
+		if (!Body || !IsAuthoredAsset(Body)
+			|| Body->GetStaticMaterials().Num() != FinishCount)
+		{
+			UE_LOG(LogBuildSedanVisual, Error,
+				TEXT("Glass update requires the existing self-authored sedan body."));
+			return 1;
+		}
+		TArray<UMaterial*> Materials;
+		for (int32 Index = 0; Index < FinishCount; ++Index)
+		{
+			const FStaticMaterial& Slot = Body->GetStaticMaterials()[Index];
+			auto* Material = Cast<UMaterial>(Slot.MaterialInterface);
+			if (!Material || Slot.MaterialSlotName != FName(Finishes[Index].Name)
+				|| !ValidateDentMaterial(Material))
+			{
+				UE_LOG(LogBuildSedanVisual, Error,
+					TEXT("Glass update refused: body material slot %d was replaced or invalid."), Index);
+				return 1;
+			}
+			Materials.Add(Material);
+		}
+		const FString GlassPath = FString(AssetRoot) + TEXT("Materials/")
+			+ Finishes[Glass].Name + TEXT(".") + Finishes[Glass].Name;
+		if (!IsAuthoredAsset(Materials[Glass])
+			|| Materials[Glass]->GetPathName() != GlassPath)
+		{
+			return 1;
+		}
+		const bool bValidateOnly = FParse::Param(*Params, TEXT("ValidateOnly"));
+		if (bValidateOnly)
+		{
+			return ValidateTransparentGlass(Materials[Glass])
+				&& ValidateMesh(Body, false)
+				&& MakeDriverDoorMesh(Materials, true, false) ? 0 : 1;
+		}
+		ConfigureTransparentGlass(Materials[Glass]);
+		UMaterialEditingLibrary::RecompileMaterial(Materials[Glass]);
+		if (!ValidateTransparentGlass(Materials[Glass])
+			|| !SaveAuthoredAsset(Materials[Glass])
+			|| !MakeDriverDoorMesh(Materials, false, true)
+			|| !MakeMesh(false, Materials, false, true))
+		{
+			return 1;
+		}
+		UE_LOG(LogBuildSedanVisual, Display,
+			TEXT("Glass update passed: body + driver door + M_Sedan_Glass; true apertures, 24%% translucent two-sided glazing; wheel unchanged."));
+		return 0;
+	}
+	if (FParse::Param(*Params, TEXT("UpdateIndicators")))
+	{
+		// Scoped migration: never regenerate wheels, replace unrelated materials,
+		// or overwrite a body that is not identified as our own generated asset.
+		UStaticMesh* Body = LoadObject<UStaticMesh>(nullptr, SimCoreSedanVisualContract::BodyObjectPath());
+		if (!Body || !IsAuthoredAsset(Body) || Body->GetStaticMaterials().Num() != FinishCount)
+		{
+			UE_LOG(LogBuildSedanVisual, Error, TEXT("Indicator update requires the existing self-authored sedan body."));
+			return 1;
+		}
+		TArray<UMaterial*> Materials;
+		for (int32 Index = 0; Index < FinishCount; ++Index)
+		{
+			const FStaticMaterial& Slot = Body->GetStaticMaterials()[Index];
+			auto* Material = Cast<UMaterial>(Slot.MaterialInterface);
+			if (!Material || Slot.MaterialSlotName != FName(Finishes[Index].Name)
+				|| !ValidateDentMaterial(Material))
+			{
+				UE_LOG(LogBuildSedanVisual, Error, TEXT("Indicator update refused: body material slot %d was replaced or is invalid."), Index);
+				return 1;
+			}
+			Materials.Add(Material);
+		}
+		const FString AmberPath = FString(AssetRoot) + TEXT("Materials/") + Finishes[Amber].Name
+			+ TEXT(".") + Finishes[Amber].Name;
+		if (!IsAuthoredAsset(Materials[Amber]) || Materials[Amber]->GetPathName() != AmberPath) return 1;
+		const bool bValidateOnly = FParse::Param(*Params, TEXT("ValidateOnly"));
+		if (bValidateOnly) return ValidateIndicatorMaterial(Materials[Amber])
+			&& ValidateMesh(Body, false)
+			&& MakeDriverDoorMesh(Materials, true, false) ? 0 : 1;
+		Materials[Amber] = MakeMaterial(Amber, false, true);
+		if (!Materials[Amber]
+			|| !MakeDriverDoorMesh(Materials, false, true)
+			|| !MakeMesh(false, Materials, false, true)) return 1;
+		UE_LOG(LogBuildSedanVisual, Display,
+			TEXT("Indicator update passed: body + Amber only; 4 curved lens strips, CPU access enabled; other materials/wheel unchanged."));
+		return 0;
+	}
+	if (FParse::Param(*Params, TEXT("EnableDentCpuAccess")))
+	{
+		UStaticMesh* Body = LoadObject<UStaticMesh>(nullptr, SimCoreSedanVisualContract::BodyObjectPath());
+		if (!Body || !IsAuthoredAsset(Body)) return 1;
+		Body->bAllowCPUAccess = true;
+		if (!SaveAuthoredAsset(Body)) return 1;
+		const TCHAR* LampPath = TEXT("/Game/Vehicles/Sedan/Materials/M_Sedan_TurnIndicator");
+		if (FPackageName::DoesPackageExist(LampPath))
+		{
+			return IsAuthoredAsset(LoadObject<UMaterial>(nullptr,
+				TEXT("/Game/Vehicles/Sedan/Materials/M_Sedan_TurnIndicator.M_Sedan_TurnIndicator"))) ? 0 : 1;
+		}
+		UMaterial* Lamp = NewObject<UMaterial>(CreatePackage(LampPath), TEXT("M_Sedan_TurnIndicator"), RF_Public | RF_Standalone);
+		Lamp->SetShadingModel(MSM_Unlit);
+		auto* Emission = CastChecked<UMaterialExpressionConstant3Vector>(
+			UMaterialEditingLibrary::CreateMaterialExpression(Lamp, UMaterialExpressionConstant3Vector::StaticClass()));
+		Emission->Constant = FLinearColor(8.0f, 1.8f, 0.025f);
+		UMaterialEditingLibrary::ConnectMaterialProperty(Emission, TEXT(""), MP_EmissiveColor);
+		UMaterialEditingLibrary::RecompileMaterial(Lamp);
+		FAssetRegistryModule::AssetCreated(Lamp);
+		return SaveAuthoredAsset(Lamp) ? 0 : 1;
+	}
 	const bool bValidateOnly = FParse::Param(*Params, TEXT("ValidateOnly"));
 	const bool bRegenerate = FParse::Param(*Params, TEXT("Regenerate"));
 	TArray<UMaterial*> Materials;
@@ -880,7 +1904,9 @@ int32 UBuildSedanVisualCommandlet::Main(const FString& Params)
 		}
 		Materials.Add(Material);
 	}
-	if (!MakeMesh(false, Materials, bValidateOnly, bRegenerate) || !MakeMesh(true, Materials, bValidateOnly, bRegenerate)) { return 1; }
+	if (!MakeDriverDoorMesh(Materials, bValidateOnly, bRegenerate)
+		|| !MakeMesh(false, Materials, bValidateOnly, bRegenerate)
+		|| !MakeMesh(true, Materials, bValidateOnly, bRegenerate)) { return 1; }
 	UE_LOG(LogBuildSedanVisual, Display,
 		TEXT("Sedan visual %s: authored curved body and double-sided alloy wheel, centimeter coordinates, no external assets or physics SDK. Existing unrelated content preserved."),
 		bValidateOnly ? TEXT("validation passed") : TEXT("generation passed"));
@@ -895,12 +1921,23 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSedanGeometryIntegrityTest,
 bool FSedanGeometryIntegrityTest::RunTest(const FString& Parameters)
 {
 	FAuthor Body;
+	FAuthor DriverDoor;
 	FAuthor Wheel;
 	BuildBody(Body);
+	BuildDriverDoor(DriverDoor);
 	BuildWheel(Wheel);
 	TestFalse(TEXT("Body triangles are finite"), Body.bInvalidTriangle);
+	TestFalse(TEXT("Driver door triangles are finite"), DriverDoor.bInvalidTriangle);
+	TestTrue(TEXT("Four amber strips occupy the actual curved head/tail lenses"), ValidateIndicatorLenses(Body.Mesh));
+	TestTrue(TEXT("Glass panels have true openings with no opaque paint backing"),
+		ValidateTransparentGlazingGeometry(Body.Mesh));
+	TestTrue(TEXT("Left-front body has a real aperture instead of fixed paint/glass"),
+		ValidateDriverDoorApertureGeometry(Body.Mesh));
+	TestTrue(TEXT("Separate left-front door owns curved paint, glazing and inner trim"),
+		ValidateDriverDoorGeometry(DriverDoor.Mesh));
 	TestFalse(TEXT("Wheel triangles are finite"), Wheel.bInvalidTriangle);
-	TestTrue(TEXT("Assembled sedan stays below 40000 triangles"), Body.TriangleCount + 4 * Wheel.TriangleCount < 40000);
+	TestTrue(TEXT("Assembled sedan stays below 40000 triangles"),
+		Body.TriangleCount + DriverDoor.TriangleCount + 4 * Wheel.TriangleCount < 40000);
 	TestTrue(TEXT("Both axle openings clear a 35.5cm circle"), ArchCut(-148.5) >= 12.5 && ArchCut(121.5) >= 12.5);
 	bool bBodyClear = true;
 	bool bUnitNormals = true;
@@ -917,7 +1954,7 @@ bool FSedanGeometryIntegrityTest::RunTest(const FString& Parameters)
 			}
 		}
 	}
-	for (FAuthor* Author : { &Body, &Wheel })
+	for (FAuthor* Author : { &Body, &DriverDoor, &Wheel })
 	{
 		for (FVertexInstanceID Instance : Author->Mesh.VertexInstances().GetElementIDs())
 		{
@@ -976,8 +2013,9 @@ bool FSedanGeometryIntegrityTest::RunTest(const FString& Parameters)
 		}
 	}
 	TestTrue(TEXT("Lamp lenses follow the curved body without rectangular protrusions"), bConformingLamps);
-	AddInfo(FString::Printf(TEXT("Sedan body=%d, wheel=%d, assembled=%d triangles"),
-		Body.TriangleCount, Wheel.TriangleCount, Body.TriangleCount + 4 * Wheel.TriangleCount));
+	AddInfo(FString::Printf(TEXT("Sedan body=%d, driverDoor=%d, wheel=%d, assembled=%d triangles"),
+		Body.TriangleCount, DriverDoor.TriangleCount, Wheel.TriangleCount,
+		Body.TriangleCount + DriverDoor.TriangleCount + 4 * Wheel.TriangleCount));
 	return true;
 }
 
@@ -1013,6 +2051,13 @@ bool FSedanDamageMaterialIntegrityTest::RunTest(const FString& Parameters)
 		bOk &= TestTrue(
 			*FString::Printf(TEXT("%s owns the body-local dent graph"), Finish.Name),
 			bHasLocalDentNode);
+		if (FName(Finish.Name) == FName(Finishes[Glass].Name))
+		{
+			bOk &= TestTrue(TEXT("Glass is translucent and two-sided"),
+				ValidateTransparentGlass(Material));
+		}
+		if (FName(Finish.Name) == SimCoreSedanVisualContract::SignalMaterialName)
+			bOk &= TestTrue(TEXT("Amber material exposes independent left/right turn signals"), ValidateIndicatorMaterial(Material));
 	}
 	return bOk;
 }

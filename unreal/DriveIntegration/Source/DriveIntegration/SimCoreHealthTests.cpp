@@ -378,8 +378,8 @@ bool FSimCoreDebugHudVehicleStateTest::RunTest(const FString& Parameters)
 		bool bHealthPresent, float SpeedMps, EVehicleGear Gear, float SteeringRadians,
 		float YawRateRadians)
 	{
-		Client->ApplyRawMessage(7, MakeVehicleHudEnvelope(Sequence, Status,
-			bHealthPresent, SpeedMps, Gear, SteeringRadians, YawRateRadians), 0, false);
+		Client->ApplyBinaryMessage(7, MakeVehicleHudEnvelope(Sequence, Status,
+			bHealthPresent, SpeedMps, Gear, SteeringRadians, YawRateRadians), true, false);
 		return Client->bHasState && Client->LatestState.Sequence == Sequence;
 	};
 
@@ -427,8 +427,8 @@ bool FSimCoreDebugHudVehicleStateTest::RunTest(const FString& Parameters)
 		Text.Contains(TEXT("vehicle speed=-- km/h (-- m/s) gear=-- steering=-- deg yaw=-- deg/s")));
 
 	Socket->bConnected = true;
-	Client->ApplyRawMessage(7, MakeVehicleHudEnvelope(44, TEXT("estop_latched"), true,
-		50.0f, EVehicleGear::Drive, 0.5f, 1.0f, TEXT("other-play")), 0, false);
+	Client->ApplyBinaryMessage(7, MakeVehicleHudEnvelope(44, TEXT("estop_latched"), true,
+		50.0f, EVehicleGear::Drive, 0.5f, 1.0f, TEXT("other-play")), true, false);
 	bSuccess &= TestTrue(TEXT("Verified host-wide EStop supersedes Health but fails the current-play pose fence"),
 		Client->GlobalEstopHealthCache.HasEstopHealth()
 		&& Client->LatestState.Sequence == 43);

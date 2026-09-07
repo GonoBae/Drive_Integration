@@ -157,6 +157,95 @@ namespace
 			&& FMath::Abs(Vector.Z) <= MaximumMagnitude;
 	}
 
+	bool ParseStructureVector(TArrayView<const uint8> Data, FVector3d& Vector)
+	{
+		if (Data.Num() > 128) return false;
+		FReader Reader(Data);
+		uint32 Seen = 0;
+		while (!Reader.AtEnd())
+		{
+			uint32 Field; uint8 Wire;
+			if (!Reader.ReadTag(Field, Wire)) return false;
+			if (Field >= 1 && Field <= 3)
+			{
+				const uint32 Mask = 1u << Field;
+				if (Seen & Mask) return false;
+				Seen |= Mask;
+				double& Value = Field == 1 ? Vector.X : Field == 2 ? Vector.Y : Vector.Z;
+				if (Wire != 1 || !Reader.ReadFixed64(Value)) return false;
+			}
+			else if (!Reader.Skip(Wire)) return false;
+		}
+		return IsFiniteVector(Vector);
+	}
+
+	bool ParseStructure(TArrayView<const uint8> Data, FStructureState& State)
+	{
+		if (Data.Num() > 1024) return false;
+		FReader Reader(Data);
+		uint32 Seen = 0;
+		while (!Reader.AtEnd())
+		{
+			uint32 Field; uint8 Wire; uint64 Integer = 0;
+			if (!Reader.ReadTag(Field, Wire)) return false;
+			if (Field <= 15)
+			{
+				const uint32 Mask = 1u << Field;
+				if (Seen & Mask) return false;
+				Seen |= Mask;
+			}
+			switch (Field)
+			{
+			case 1:
+				if (Wire != 2 || !Reader.ReadString(State.ColliderId, 128)) return false;
+				break;
+			case 2:
+				if (Wire != 0 || !Reader.ReadVarint(Integer) || Integer < 1 || Integer > 2) return false;
+				State.Kind = static_cast<EStructureKind>(Integer);
+				break;
+			case 3:
+			case 5:
+				if (Wire != 0 || !Reader.ReadVarint(Integer) || Integer > MAX_uint32) return false;
+				(Field == 3 ? State.SignalId : State.EventSequence) = static_cast<uint32>(Integer);
+				break;
+			case 4:
+				if (Wire != 5 || !Reader.ReadFixed32(State.DamagePercent)) return false;
+				break;
+			case 6:
+			case 7:
+			case 8:
+			case 11:
+			{
+				TArrayView<const uint8> VectorData;
+				FVector3d& Vector = Field == 6 ? State.ImpactPointEnu
+					: Field == 7 ? State.ImpactNormalEnu
+					: Field == 8 ? State.BasePositionEnu : State.FallDirectionEnu;
+				if (Wire != 2 || !Reader.ReadMessage(VectorData)
+					|| !ParseStructureVector(VectorData, Vector)) return false;
+				break;
+			}
+			case 9:
+				if (Wire != 1 || !Reader.ReadFixed64(State.HeadingRadians)) return false;
+				break;
+			case 10:
+				if (Wire != 5 || !Reader.ReadFixed32(State.FallAngleRadians)) return false;
+				break;
+			case 12:
+				if (Wire != 0 || !Reader.ReadVarint(Integer) || Integer > 1) return false;
+				State.bDisabled = Integer != 0;
+				break;
+			case 13: if (Wire != 5 || !Reader.ReadFixed32(State.ImpactHalfWidthMeters)) return false; break;
+			case 14: if (Wire != 5 || !Reader.ReadFixed32(State.ImpactHalfHeightMeters)) return false; break;
+			case 15: if (Wire != 5 || !Reader.ReadFixed32(State.ImpactSeverity)) return false; break;
+			default:
+				if (!Reader.Skip(Wire)) return false;
+				break;
+			}
+		}
+		// Kind has no proto3 zero/default meaning. Origin/heading may be omitted.
+		return (Seen & (1u << 2)) != 0 && IsValidStructureState(State);
+	}
+
 	bool ParseTrafficSignal(TArrayView<const uint8> Data, FTrafficSignalState& State)
 	{
 		// Bound the complete message, including otherwise forward-compatible fields.
@@ -167,7 +256,7 @@ namespace
 		{
 			uint32 Field; uint8 Wire; uint64 Integer = 0;
 			if (!Reader.ReadTag(Field, Wire)) return false;
-			if (Field <= 8)
+			if (Field <= 9)
 			{
 				const uint32 Mask = 1u << Field;
 				if (Seen & Mask) return false;
@@ -224,6 +313,10 @@ namespace
 					|| Integer < static_cast<uint8>(ETrafficSignalKind::Vehicle)
 					|| Integer > static_cast<uint8>(ETrafficSignalKind::Pedestrian)) return false;
 				State.Kind = static_cast<ETrafficSignalKind>(Integer);
+				break;
+			case 9:
+				if (Wire != 0 || !Reader.ReadVarint(Integer) || Integer > 1) return false;
+				State.bOutOfService = Integer != 0;
 				break;
 			default:
 				if (!Reader.Skip(Wire)) return false;
@@ -285,6 +378,19 @@ namespace
 			|| State.DamagePercent > 100.0f
 			|| State.LastImpactImpulseNs < 0.0f
 			|| State.LastImpactImpulseNs > MaxImpactImpulseNs
+			|| static_cast<uint8>(State.RuntimeRecoveryPhase) > static_cast<uint8>(ERuntimeRecoveryPhase::Disabled)
+			|| static_cast<uint8>(State.TurnIndicator) > 2
+			|| static_cast<uint8>(State.RuntimeVehicleClass)
+				> static_cast<uint8>(ERuntimeVehicleClass::Motorcycle)
+			|| (State.EntityKind != EEntityKind::NpcVehicle
+				&& State.HornEventSequence != 0)
+			|| ((State.EntityKind != EEntityKind::NpcVehicle
+				&& State.EntityKind != EEntityKind::EgoVehicle)
+				&& State.RuntimeVehicleClass != ERuntimeVehicleClass::Unspecified)
+			|| ((State.bPedestrianDowned || State.bPedestrianAirborne) && State.EntityKind != EEntityKind::Pedestrian)
+			|| (State.bPedestrianAirborne && !State.bPedestrianDowned)
+			|| !IsBoundedVector(State.ImpactDirectionEnu, 1.001)
+			|| (!State.ImpactDirectionEnu.IsZero() && FMath::Abs(State.ImpactDirectionEnu.SizeSquared() - 1.0) > .001)
 			|| static_cast<uint8>(State.DamageZone)
 				> static_cast<uint8>(EVehicleDamageZone::Underbody))
 		{
@@ -295,6 +401,16 @@ namespace
 			> static_cast<uint8>(EVehicleGear::Reverse))
 		{
 			return false;
+		}
+		if (State.DentPatches.Num() > 16 || (State.EntityKind == EEntityKind::Pedestrian && !State.DentPatches.IsEmpty())) return false;
+		for (const auto& Patch : State.DentPatches) {
+			if (Patch.Position.ContainsNaN() || Patch.Inward.ContainsNaN()
+				|| FMath::Abs(Patch.Position.X) > 1.001 || FMath::Abs(Patch.Position.Y) > 1.001
+				|| FMath::Max(FMath::Abs(Patch.Position.X),FMath::Abs(Patch.Position.Y)) < .99
+				|| FMath::Abs(Patch.Inward.Size()-1.0) >= .01
+				|| FVector2D::DotProduct(Patch.Position,Patch.Inward) >= -.05
+				|| !FMath::IsFinite(Patch.RadiusMeters) || Patch.RadiusMeters < .15f || Patch.RadiusMeters > .95f
+				|| !FMath::IsFinite(Patch.DepthMeters) || Patch.DepthMeters <= 0.0f || Patch.DepthMeters > .28f) return false;
 		}
 		for (const FVehicleState::FWheelState& Wheel : State.Wheels)
 		{
@@ -322,6 +438,9 @@ namespace
 				&& State.CollisionHalfWidthMeters > 0.0f
 				&& State.CollisionHalfHeightMeters > 0.0f;
 		case EEntityKind::Pedestrian:
+			if (State.bPedestrianDowned)
+				return State.CollisionRadiusMeters == 0.0f && State.CollisionHalfLengthMeters > 0.0f
+					&& State.CollisionHalfWidthMeters > 0.0f && State.CollisionHalfHeightMeters > 0.0f;
 			return State.CollisionRadiusMeters > 0.0f
 				&& State.CollisionHalfHeightMeters
 					>= State.CollisionRadiusMeters;
@@ -445,6 +564,53 @@ namespace
 					|| Integer > MAX_uint32) return false;
 				State.CollisionEventSequence = static_cast<uint32>(Integer);
 				break;
+			case 32:
+				if (Wire != 0 || !Reader.ReadVarint(Integer) || Integer > 4) return false;
+				State.RuntimeRecoveryPhase = static_cast<ERuntimeRecoveryPhase>(Integer);
+				break;
+			case 33: {
+				TArrayView<const uint8> VectorData;
+				if (Wire != 2 || !Reader.ReadMessage(VectorData)
+					|| !ParseStructureVector(VectorData, State.ImpactDirectionEnu)) return false;
+				break;
+			}
+			case 34:
+				if (Wire != 0 || !Reader.ReadVarint(Integer) || Integer > 1) return false;
+				State.bPedestrianDowned = Integer != 0;
+				break;
+			case 35:
+				if (Wire != 0 || !Reader.ReadVarint(Integer) || Integer > 1) return false;
+				State.bPedestrianAirborne = Integer != 0;
+				break;
+			case 36:
+				if (Wire != 0 || !Reader.ReadVarint(Integer) || Integer > 2) return false;
+				State.TurnIndicator = static_cast<ETurnIndicator>(Integer);
+				break;
+			case 37: {
+				TArrayView<const uint8> PatchData;
+				if (Wire != 2 || State.DentPatches.Num() >= 16 || !Reader.ReadMessage(PatchData)) return false;
+				FReader PatchReader(PatchData);
+				float Values[6] = {};
+				while (!PatchReader.AtEnd()) {
+					uint32 PatchField; uint8 PatchWire;
+					if (!PatchReader.ReadTag(PatchField,PatchWire)) return false;
+					if (PatchField >= 1 && PatchField <= 6) {
+						if (PatchWire != 5 || !PatchReader.ReadFixed32(Values[PatchField-1])) return false;
+					} else if (!PatchReader.Skip(PatchWire)) return false;
+				}
+				State.DentPatches.Add({FVector2D(Values[0],Values[1]),FVector2D(Values[2],Values[3]),Values[4],Values[5]});
+				break;
+			}
+			case 38:
+				if (Wire != 0 || !Reader.ReadVarint(Integer)
+					|| Integer > MAX_uint32) return false;
+				State.HornEventSequence = static_cast<uint32>(Integer);
+				break;
+			case 39:
+				if (Wire != 0 || !Reader.ReadVarint(Integer)
+					|| Integer > static_cast<uint8>(ERuntimeVehicleClass::Motorcycle)) return false;
+				State.RuntimeVehicleClass = static_cast<ERuntimeVehicleClass>(Integer);
+				break;
 			default: if (!Reader.Skip(Wire)) return false; break;
 			}
 		}
@@ -509,6 +675,8 @@ namespace
 		TSet<uint32> EntityIds;
 		TArray<FTrafficSignalState> Signals;
 		TSet<uint32> SignalIds;
+		TArray<FStructureState> Structures;
+		TSet<FString> StructureIds;
 		FString TrafficChecksum;
 		bool bHasTrafficChecksum = false;
 		while (!Reader.AtEnd())
@@ -586,6 +754,21 @@ namespace
 				bHasTrafficChecksum = true;
 				continue;
 			}
+			if (Field == 5)
+			{
+				TArrayView<const uint8> StructureData;
+				FStructureState Structure;
+				if (Structures.Num() >= MaxWorldStateStructures || Wire != 2
+					|| !Reader.ReadMessage(StructureData) || !ParseStructure(StructureData, Structure)
+					|| StructureIds.Contains(Structure.ColliderId))
+				{
+					OutError = TEXT("WorldState contains invalid, duplicate, or too many structures");
+					return false;
+				}
+				StructureIds.Add(Structure.ColliderId);
+				Structures.Add(MoveTemp(Structure));
+				continue;
+			}
 			if (!Reader.Skip(Wire)) return false;
 		}
 		if (!Signals.IsEmpty() && !IsValidTrafficNetworkChecksum(TrafficChecksum))
@@ -596,7 +779,8 @@ namespace
 		// Controller identity is additive: legacy v1 heads default to controller 1.
 		// Group consistency and mutually-exclusive permissions are controller-local.
 		TMap<uint64, const FTrafficSignalState*> GroupStates;
-		TMap<uint32, uint32> PermissiveGroupsByController;
+		TMap<uint32, TSet<uint32>> PermissiveGroupsByController;
+		TSet<uint32> ControllersPermittingVehicles;
 		for (const FTrafficSignalState& Signal : Signals)
 		{
 			const uint64 GroupKey = (static_cast<uint64>(Signal.ControllerId) << 32)
@@ -613,23 +797,57 @@ namespace
 			else GroupStates.Add(GroupKey, &Signal);
 			if (Signal.Aspect == ETrafficSignalAspect::Green || Signal.Aspect == ETrafficSignalAspect::Yellow)
 			{
-				uint32& PermissiveGroup = PermissiveGroupsByController.FindOrAdd(Signal.ControllerId);
-				if (PermissiveGroup != 0 && PermissiveGroup != Signal.GroupId)
-				{
-					OutError = TEXT("WorldState contains conflicting permissive traffic signal groups");
-					return false;
-				}
-				PermissiveGroup = Signal.GroupId;
+				PermissiveGroupsByController.FindOrAdd(Signal.ControllerId).Add(Signal.GroupId);
+				if (Signal.Kind != ETrafficSignalKind::Pedestrian)
+					ControllersPermittingVehicles.Add(Signal.ControllerId);
+			}
+		}
+		for (uint32 Controller : ControllersPermittingVehicles)
+		{
+			if (PermissiveGroupsByController.FindChecked(Controller).Num() > 1)
+			{
+				OutError = TEXT("WorldState contains conflicting permissive traffic signal groups");
+				return false;
+			}
+		}
+		TSet<uint32> PoleSignalIds;
+		for (const FStructureState& Structure : Structures)
+		{
+			if (Structure.Kind != EStructureKind::SignalPole) continue;
+			const FTrafficSignalState* Signal = Signals.FindByPredicate(
+				[&](const FTrafficSignalState& Value) { return Value.SignalId == Structure.SignalId; });
+			if (!Signal || Signal->bOutOfService != Structure.bDisabled
+				|| PoleSignalIds.Contains(Structure.SignalId))
+			{
+				OutError = TEXT("WorldState damaged pole does not match one current signal head");
+				return false;
+			}
+			PoleSignalIds.Add(Structure.SignalId);
+		}
+		for (const FTrafficSignalState& Signal : Signals)
+		{
+			if (!Signal.bOutOfService) continue;
+			const bool bUnsafeController = Signals.ContainsByPredicate(
+				[&](const FTrafficSignalState& Other) {
+					return Other.ControllerId == Signal.ControllerId
+						&& (Other.Aspect != ETrafficSignalAspect::Red || Other.RemainingSeconds != 0.0f);
+				});
+			if (!PoleSignalIds.Contains(Signal.SignalId) || bUnsafeController)
+			{
+				OutError = TEXT("WorldState broken head requires damaged pole and all-red controller");
+				return false;
 			}
 		}
 		State.ServerHealth = Health;
 		State.TrafficSignals = Signals;
 		State.TrafficNetworkChecksum = TrafficChecksum;
+		State.Structures = Structures;
 		for (FVehicleState& Entity : Entities)
 		{
 			Entity.ServerHealth = Health;
 			Entity.TrafficSignals = Signals;
 			Entity.TrafficNetworkChecksum = TrafficChecksum;
+			Entity.Structures = Structures;
 		}
 		return bFoundTarget;
 	}
@@ -647,7 +865,36 @@ bool IsValidTrafficSignalState(const FTrafficSignalState& State)
 		&& State.HeadingDegrees >= 0.0f && State.HeadingDegrees < 360.0f
 		&& FMath::IsFinite(State.RemainingSeconds)
 		&& State.RemainingSeconds >= 0.0f
-		&& State.RemainingSeconds <= MaxTrafficSignalCountdownSeconds;
+		&& State.RemainingSeconds <= MaxTrafficSignalCountdownSeconds
+		&& (!State.bOutOfService
+			|| (State.Aspect == ETrafficSignalAspect::Red && State.RemainingSeconds == 0.0f));
+}
+
+bool IsValidStructureState(const FStructureState& State)
+{
+	const bool bBuilding = State.Kind == EStructureKind::Building;
+	const bool bPole = State.Kind == EStructureKind::SignalPole;
+	if (State.ColliderId.IsEmpty() || State.ColliderId.Len() > 128) return false;
+	for (TCHAR Character : State.ColliderId)
+	{
+		if (Character < 33 || Character > 126) return false;
+	}
+	return (bBuilding || bPole) && FMath::IsFinite(State.DamagePercent)
+		&& State.DamagePercent > 0.0f && State.DamagePercent <= 100.0f && State.EventSequence != 0
+		&& FMath::IsFinite(State.ImpactHalfWidthMeters) && State.ImpactHalfWidthMeters >= 0.0f && State.ImpactHalfWidthMeters <= 3.0f
+		&& FMath::IsFinite(State.ImpactHalfHeightMeters) && State.ImpactHalfHeightMeters >= 0.0f && State.ImpactHalfHeightMeters <= 3.0f
+		&& FMath::IsFinite(State.ImpactSeverity) && State.ImpactSeverity >= 0.0f && State.ImpactSeverity <= 1.0f
+		&& IsBoundedVector(State.ImpactPointEnu, 1'000'000.0)
+		&& IsBoundedVector(State.BasePositionEnu, 1'000'000.0)
+		&& IsBoundedVector(State.ImpactNormalEnu, 1.001)
+		&& FMath::Abs(State.ImpactNormalEnu.SizeSquared() - 1.0) <= .001
+		&& FMath::IsFinite(State.HeadingRadians) && FMath::Abs(State.HeadingRadians) <= 2.0 * UE_DOUBLE_PI
+		&& FMath::IsFinite(State.FallAngleRadians)
+		&& State.FallAngleRadians >= 0.0f && State.FallAngleRadians <= static_cast<float>(UE_DOUBLE_PI / 2.0)
+		&& IsBoundedVector(State.FallDirectionEnu, 1.001) && State.FallDirectionEnu.Z == 0.0
+		&& (!bBuilding || (State.SignalId == 0 && State.FallAngleRadians == 0.0f && !State.bDisabled))
+		&& (!bPole || (State.SignalId != 0 && FMath::Abs(State.FallDirectionEnu.SizeSquared() - 1.0) <= .001
+			&& (State.FallAngleRadians == 0.0f || State.bDisabled)));
 }
 
 bool IsValidTrafficNetworkChecksum(const FString& Checksum)
@@ -688,6 +935,7 @@ TArray<uint8> SerializeControlEnvelope(const FControlCommand& Command, uint64 Se
 TArray<uint8> SerializeSimulationResetEnvelope(
 	const FString& PlaySessionId,
 	uint64 ClientTimeNs,
+	ERuntimeVehicleClass RequestedVehicleClass,
 	uint64 Sequence,
 	const FString& SourceId,
 	const FString& ConnectionSessionId,
@@ -696,6 +944,10 @@ TArray<uint8> SerializeSimulationResetEnvelope(
 	TArray<uint8> Reset;
 	WriteString(Reset, 1, PlaySessionId);
 	WriteTag(Reset, 2, 0); WriteVarint(Reset, ClientTimeNs);
+	WriteTag(Reset, 3, 0); WriteVarint(Reset,
+		static_cast<uint8>(RequestedVehicleClass) <= static_cast<uint8>(ERuntimeVehicleClass::Motorcycle)
+			? static_cast<uint8>(RequestedVehicleClass)
+			: static_cast<uint8>(ERuntimeVehicleClass::Sedan));
 
 	TArray<uint8> Envelope;
 	WriteTag(Envelope, 1, 0); WriteVarint(Envelope, SchemaVersion);

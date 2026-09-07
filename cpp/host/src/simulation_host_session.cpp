@@ -1,5 +1,6 @@
 #include "simulation_host.hpp"
 
+#include "player_vehicle_profile.hpp"
 #include "simulation_host_session_detail.hpp"
 
 #include <algorithm>
@@ -118,6 +119,7 @@ std::string make_reset_payload_fingerprint(
     append_fingerprint_string(fingerprint, reset.map_package_checksum);
     append_fingerprint_string(fingerprint, reset.play_session_id);
     append_fingerprint_u64(fingerprint, reset.client_time_ns);
+    fingerprint.push_back(static_cast<char>(reset.requested_vehicle_class));
     return fingerprint;
 }
 
@@ -336,7 +338,10 @@ ClientMessageResult SimulationHost::handle_control_command(
     if (command.estop) {
         estop_latched_ = true;
         last_logged_input_ = make_safe_stop_input();
-        physics_.set_input(last_logged_input_);
+        apply_vehicle_input(last_logged_input_);
+        if (config_.physics_replay) {
+            config_.physics_replay->event(simcore_host::PhysicsReplayEvent::EmergencyStop);
+        }
         std::cerr << "[Safety] E-stop latched by source="
                   << command.source_id << " session=" << command.session_id << "\n";
         return ClientMessageResult::EmergencyStopLatched;
@@ -384,7 +389,7 @@ ClientMessageResult SimulationHost::handle_control_command(
                   << command.source_id << " session=" << command.session_id << "\n";
     }
 
-    physics_.set_input(command.input);
+    apply_vehicle_input(command.input);
     const bool changed = std::abs(last_logged_input_.throttle - command.input.throttle) > 0.001f
         || std::abs(last_logged_input_.brake - command.input.brake) > 0.001f
         || std::abs(last_logged_input_.steering - command.input.steering) > 0.001f
@@ -439,6 +444,10 @@ ClientMessageResult SimulationHost::handle_simulation_reset(
 
     const std::string play_key = make_play_session_key(
         reset.source_id, reset.play_session_id);
+    const simcore_host::RuntimeVehicleClass requested_class =
+        reset.requested_vehicle_class == simcore_host::RuntimeVehicleClass::Unspecified
+        ? simcore_host::RuntimeVehicleClass::Sedan
+        : reset.requested_vehicle_class;
 
     // WebSocket connection generations are issued by the server at accept.
     // They provide ordering that random session GUIDs cannot: once a newer
@@ -459,6 +468,10 @@ ClientMessageResult SimulationHost::handle_simulation_reset(
                 && reset.play_session_id == active_play_session_id_;
             if (!same_identity) {
                 std::cerr << "[Lifecycle] identity changed within one connection generation\n";
+                return ClientMessageResult::Rejected;
+            }
+            if (requested_class != active_vehicle_class_) {
+                std::cerr << "[Lifecycle] reset rejected: vehicle class changed within play session\n";
                 return ClientMessageResult::Rejected;
             }
             if (reset.sequence < lifecycle_highest_sequence_
@@ -488,6 +501,10 @@ ClientMessageResult SimulationHost::handle_simulation_reset(
                       << reset.play_session_id << "\n";
             return ClientMessageResult::Rejected;
         }
+        if (requested_class != active_vehicle_class_) {
+            std::cerr << "[Lifecycle] reconnect rejected: vehicle class changed within play session\n";
+            return ClientMessageResult::Rejected;
+        }
 
         const auto reconnect = control_lease_.reset_for_reconnect(
             reset.source_id, reset.session_id);
@@ -498,7 +515,10 @@ ClientMessageResult SimulationHost::handle_simulation_reset(
         }
         if (reconnect == ControlLeaseResetDecision::Ready) {
             last_logged_input_ = make_safe_stop_input();
-            physics_.set_input(last_logged_input_);
+            apply_vehicle_input(last_logged_input_);
+            if (config_.physics_replay) {
+                config_.physics_replay->event(simcore_host::PhysicsReplayEvent::Reconnect);
+            }
             std::cout << "[Lifecycle] PIE reconnect accepted without physics reset source="
                       << reset.source_id << " play_session="
                       << reset.play_session_id << " session="
@@ -528,12 +548,17 @@ ClientMessageResult SimulationHost::handle_simulation_reset(
         return ClientMessageResult::Rejected;
     }
 
-    physics_.reset();
+    reset_player_vehicle(requested_class);
+    if (config_.physics_replay) {
+        config_.physics_replay->event(
+            simcore_host::PhysicsReplayEvent::Reset, requested_class);
+    }
     runtime_entities_ = initial_runtime_entities_;
+    structure_damage_.reset();
     rebuild_lane_npc();
     rebuild_pedestrians();
     last_logged_input_ = make_safe_stop_input();
-    physics_.set_input(last_logged_input_);
+    apply_vehicle_input(last_logged_input_);
     simulation_clock_.reset_elapsed();
     last_reported_overrun_count_ = 0;
     last_overrun_log_time_ = Clock::time_point::min();
@@ -553,9 +578,20 @@ ClientMessageResult SimulationHost::handle_simulation_reset(
     std::cout << "[Lifecycle] simulation reset source=" << reset.source_id
               << " play_session=" << reset.play_session_id
               << " session=" << reset.session_id << " generation="
-              << connection_generation << "\n";
+              << connection_generation << " vehicle="
+              << simcore_host::runtime_vehicle_class_name(active_vehicle_class_)
+              << "\n";
     publish_current_state();
     return ClientMessageResult::SimulationReset;
+}
+
+void SimulationHost::reset_player_vehicle(
+    simcore_host::RuntimeVehicleClass vehicle_class)
+{
+    config_.vehicle_parameters = simcore_host::make_player_vehicle_parameters(
+        base_vehicle_parameters_, vehicle_class);
+    physics_.replace_parameters(config_.vehicle_parameters);
+    active_vehicle_class_ = vehicle_class;
 }
 
 std::string SimulationHost::make_initial_hello()
@@ -567,6 +603,7 @@ std::string SimulationHost::make_initial_hello()
             "world-state.v2",
             "control.v2",
             "simulation-reset.v1",
+            "player-vehicle-selection.v1",
             "map-package-checksum.v1",
             "safe-stop.v1",
             "world-health.v1",

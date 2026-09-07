@@ -339,14 +339,14 @@ void test_optional_lane_npc_options_are_strict_and_overridable()
     TemporaryConfig configured(read_file(SIMCORE_TEST_RUNTIME_CONFIG_PATH)
         + "\ntraffic_network=traffic.json\nnpc_route=260,270,280\nnpc_route_loop=true\n"
           "npc_alternate_route=360,370,380\nnpc_start_offset_m=96\nnpc_max_speed_mps=6\n"
-          "npc_count=4\nnpc_spacing_m=180\n");
+          "npc_count=4\nnpc_spacing_m=180\nnpc_autonomous=true\n");
     const auto loaded = simcore_host::parse_runtime_options(
         {"--runtime-config", configured.path.string()}, defaults());
     require(loaded.npc_route == std::vector<std::uint32_t>{260, 270, 280}
                 && loaded.npc_alternate_route == std::vector<std::uint32_t>{360, 370, 380}
                 && loaded.npc_route_loop && loaded.npc_start_offset_m == 96
                 && loaded.npc_max_speed_mps == 6 && loaded.npc_count == 4
-                && loaded.npc_spacing_m == 180,
+                && loaded.npc_spacing_m == 180 && loaded.npc_autonomous,
             "optional NPC route configuration must preserve ordered lane IDs and geometry units");
     const auto disabled = simcore_host::parse_runtime_options(
         {"--runtime-config", configured.path.string(), "--npc-route", "none"}, defaults());
@@ -356,12 +356,12 @@ void test_optional_lane_npc_options_are_strict_and_overridable()
         {"--runtime-config", configured.path.string(), "--npc-route", "310,340",
          "--npc-alternate-route", "410,440", "--npc-loop", "false",
          "--npc-start-offset", "3", "--npc-max-speed", "4",
-         "--npc-count", "3", "--npc-spacing", "90"}, defaults());
+         "--npc-count", "3", "--npc-spacing", "90", "--npc-autonomous", "false"}, defaults());
     require(changed.npc_route == std::vector<std::uint32_t>{310, 340}
                 && changed.npc_alternate_route == std::vector<std::uint32_t>{410, 440}
                 && !changed.npc_route_loop && changed.npc_start_offset_m == 3
                 && changed.npc_max_speed_mps == 4 && changed.npc_count == 3
-                && changed.npc_spacing_m == 90,
+                && changed.npc_spacing_m == 90 && !changed.npc_autonomous,
             "all NPC command-line values must override the optional cfg values");
     for (const std::vector<std::string> arguments : {
             std::vector<std::string>{"--npc-route", "100"},
@@ -372,6 +372,8 @@ void test_optional_lane_npc_options_are_strict_and_overridable()
             {"--traffic-network", "a", "--npc-route", "100.0"},
             {"--traffic-network", "a", "--npc-route", "100", "--demo-entities"},
             {"--npc-loop", "1"}, {"--npc-start-offset", "-1"},
+            {"--npc-autonomous", "yes"},
+            {"--npc-autonomous", "true", "--npc-autonomous", "false"},
             {"--npc-max-speed", "nan"}, {"--npc-max-speed", "0"},
             {"--npc-max-speed", "26"}, {"--npc-count", "0"},
             {"--npc-count", "17"}, {"--npc-spacing", "7"},

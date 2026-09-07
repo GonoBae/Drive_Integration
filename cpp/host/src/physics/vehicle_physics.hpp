@@ -1,6 +1,7 @@
 #pragma once
 
 #include "collision/collision_world.hpp"
+#include "collision/vehicle_dent.hpp"
 #include "physics/suspension_model.hpp"
 #include "terrain/ground_query.hpp"
 
@@ -104,6 +105,13 @@ struct VehicleParameters {
     float wheel_free_spin_damping_n_m_s = 3.6f;
     // Regularizes slip angle near zero speed without disabling lateral grip.
     float low_speed_slip_reference_mps = 1.5f;
+    // Authoritative collision shell dimensions. Defaults retain the validated
+    // sedan contract; selectable profiles may replace them at a reset fence.
+    float collision_body_overhang_m = 0.80f;
+    float collision_body_side_padding_m = 0.15f;
+    float collision_body_half_height_m = 0.75f;
+    float chassis_shell_center_up_offset_m = 0.335f;
+    float chassis_shell_half_height_m = 0.625f;
     simcore_host::SuspensionParameters suspension;
 };
 
@@ -168,6 +176,7 @@ struct VehicleState {
     float last_impact_impulse_n_s = 0.f;
     VehicleDamageZone damage_zone = VehicleDamageZone::None;
     uint32_t collision_event_sequence = 0;
+    std::vector<simcore_host::VehicleDentPatch> dent_patches;
     float collision_half_length_m = 0.f;
     float collision_half_width_m = 0.f;
     float collision_half_height_m = 0.f;
@@ -188,6 +197,9 @@ public:
 
     void         set_input(const VehicleInput& input);
     void         reset();
+    // A selectable vehicle profile is installed only at a SimulationReset
+    // boundary. The current pose/input/damage cannot cross that boundary.
+    void         replace_parameters(VehicleParameters parameters);
     // Install one fully verified MapPackage collision snapshot. SimulationHost
     // calls this only at a fixed-tick boundary and the vehicle is reset before
     // the new environment can be observed by an update.
@@ -209,10 +221,14 @@ public:
     {
         return last_collision_contacts_;
     }
+    const std::vector<simcore_host::RuntimeProxyContact>&
+        get_last_runtime_proxy_contacts() const noexcept { return last_runtime_proxy_contacts_; }
     std::array<WheelContactSupportDiagnostics, 4>
         get_wheel_contact_support_diagnostics() const;
 
 private:
+    void refresh_runtime_tire_supports(
+        const std::vector<simcore_host::KinematicCollisionProxy>& proxies);
     bool update_wheel_contacts(float dt_seconds, bool update_suspension,
                                bool enforce_non_penetration = false,
                                bool update_attitude_target = false,
@@ -226,6 +242,7 @@ private:
     VehicleParameters  parameters_;
     std::shared_ptr<const simcore_host::GroundQuery> ground_query_;
     std::shared_ptr<const simcore_host::CollisionWorld> collision_world_;
+    std::vector<simcore_host::KinematicCollisionProxy> runtime_tire_supports_;
     mutable std::mutex input_mutex_;
 
     double origin_lat_  = 0.0;
@@ -278,6 +295,7 @@ private:
     std::vector<simcore_host::KinematicCollisionProxy>
         last_resolved_dynamic_proxies_;
     std::vector<simcore_host::CollisionContact> last_collision_contacts_;
+    std::vector<simcore_host::RuntimeProxyContact> last_runtime_proxy_contacts_;
 
     static constexpr float  STOP_EPSILON     = 0.01f;
     static constexpr double EARTH_R          = 6371000.0; // meters

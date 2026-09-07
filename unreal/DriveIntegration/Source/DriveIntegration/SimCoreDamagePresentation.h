@@ -19,6 +19,9 @@ namespace SimCoreDamagePresentation
 		float Right = 0.0f;
 		float Roof = 0.0f;
 		float Underbody = 0.0f;
+		// Runtime deformation uses authoritative contacts, not broad panel weights.
+		bool bContactLocal = false;
+		TArray<SimCoreProtocol::FVehicleDentPatch> Dents;
 
 		bool IsNearlyZero() const;
 		float Get(SimCoreProtocol::EVehicleDamageZone Zone) const;

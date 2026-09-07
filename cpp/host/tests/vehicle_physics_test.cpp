@@ -1,5 +1,6 @@
 #include "physics/vehicle_physics.hpp"
 #include "physics/vehicle_config.hpp"
+#include "physics/runtime_tire_support.hpp"
 #include "terrain/map_package_ground_query.hpp"
 #include "terrain/map_package_runtime.hpp"
 
@@ -4086,12 +4087,15 @@ void test_authoritative_static_wall_blocks_vehicle_without_losing_ground()
             && state.damage_zone == VehicleDamageZone::Front
             && state.collision_event_sequence >= 1,
             "a damaging front-wall impact must publish authoritative crash state");
+    require(!state.dent_patches.empty() && state.dent_patches.front().forward > .99f
+            && simcore_host::valid_vehicle_dent(state.dent_patches.front()),
+            "real physics contact must publish its localized front-shell dent");
     vehicle.reset();
     const auto reset_state = vehicle.get_state();
     require(reset_state.damage_percent == 0.f
             && reset_state.last_impact_impulse_n_s == 0.f
             && reset_state.damage_zone == VehicleDamageZone::None
-            && reset_state.collision_event_sequence == 0,
+            && reset_state.collision_event_sequence == 0 && reset_state.dent_patches.empty(),
             "simulation reset must restore an undamaged vehicle snapshot");
 }
 
@@ -4610,6 +4614,76 @@ void test_tracked_landscape_launch_keeps_body_attitude_bounded()
 
 } // namespace
 
+void test_runtime_fallen_obstacles_support_tires_without_becoming_walls()
+{
+    using namespace simcore_host;
+    const auto ground=std::make_shared<FlatGroundQuery>();
+    const auto world=std::make_shared<CollisionWorld>();
+    KinematicCollisionProxy pole;
+    pole.proxy_id="fallen-pole";
+    pole.shape=ObbPrism{{0,25},.10,std::numbers::pi*.5,2.8,.10,.10};
+    pole.tire_support_candidate=true;
+    require(is_low_tire_obstacle(pole,*ground,.32),"settled low pole must qualify for round tire support");
+    auto upright=pole; upright.tire_support_candidate=false;
+    require(!is_low_tire_obstacle(upright,*ground,.32),"unmarked actor must never bypass chassis collision");
+    auto airborne=pole; std::get<ObbPrism>(airborne.shape).center_up_m+=.3;
+    require(!is_low_tire_obstacle(airborne,*ground,.32),"airborne prop is not ground support");
+    auto high=pole; auto& high_shape=std::get<ObbPrism>(high.shape);
+    high_shape.center_up_m=.8; high_shape.half_height_m=.8;
+    require(!is_low_tire_obstacle(high,*ground,.32),"oversize object retains blocking collision");
+    GroundQueryRequest request{{0,25,4},10};
+    require(!runtime_tire_contact(request,{},.32,{pole}),"prop must not fabricate missing map coverage");
+    const auto top=runtime_tire_contact(request,ground->query_down(request),.32,{pole});
+    require(top && std::abs(top->point_enu.up_m-.2)<.001 && top->normal_enu.up_m>.999,
+        "wheel at rounded pole crown rests on actual top, not ground");
+
+    for (const bool person : {false,true}) {
+        auto obstacle=pole;
+        if(person) {
+            obstacle.proxy_id="downed-person";
+            obstacle.shape=ObbPrism{{0,25},.25,std::numbers::pi*.5,.95,.35,.25};
+        }
+        require(is_low_tire_obstacle(obstacle,*ground,.32),"settled rounded body within tire-scale bound qualifies");
+        VehiclePhysics vehicle(kInitialLat,kInitialLon,0.0,0.f,{},ground,world);
+        VehicleInput input; input.throttle=1.f; vehicle.set_input(input);
+        bool front_raised=false,rear_raised=false,passed=false;
+        double max_pitch=0.0,min_crossing_speed=100.0;
+        for(int step=0;step<720;++step) {
+            const auto state=vehicle.update(kDt,{obstacle});
+            require(std::isfinite(state.speed) && state.position_enu.z>.2,
+                "fallen object must not cause invalid or underground pose");
+            max_pitch=std::max(max_pitch,std::abs(static_cast<double>(state.pitch)));
+            front_raised|=state.wheels[0].contact_point_enu.z>.06 || state.wheels[1].contact_point_enu.z>.06;
+            rear_raised|=state.wheels[2].contact_point_enu.z>.06 || state.wheels[3].contact_point_enu.z>.06;
+            if(state.north>22 && state.north<28) min_crossing_speed=std::min(min_crossing_speed,static_cast<double>(state.speed));
+            if(state.north>30) {passed=true;break;}
+        }
+        require(passed && front_raised && rear_raised && min_crossing_speed>1.0 && max_pitch<60.0,
+            std::string(person?"fallen person":"fallen pole")+" must roll under sequential axles, not erase velocity"
+            +" passed="+std::to_string(passed)+" front="+std::to_string(front_raised)
+            +" rear="+std::to_string(rear_raised)+" speed="+std::to_string(min_crossing_speed)
+            +" pitch="+std::to_string(max_pitch));
+        std::cout << "fallen-tire-support: kind=" << (person?"person":"pole")
+            << " min_crossing_mps=" << min_crossing_speed << " max_pitch_deg=" << max_pitch << '\n';
+        vehicle.reset();
+        const auto reset=vehicle.update(kDt);
+        for(const auto& wheel:reset.wheels) require(std::abs(wheel.contact_point_enu.z)<.001,
+            "reset/new snapshot must discard all runtime tire support");
+    }
+    VehiclePhysics blocked(kInitialLat,kInitialLon,0.0,0.f,{},ground,world);
+    VehicleInput input; input.throttle=1.f; blocked.set_input(input);
+    for(int step=0;step<720;++step) blocked.update(kDt,{high});
+    require(blocked.get_state().north<23.0 && std::abs(blocked.get_state().speed)<.2,
+        "tall obstacles must still block; no global dynamic-collision bypass");
+    auto straddled=pole;
+    straddled.shape=ObbPrism{{0,25},.25,0,.95,.35,.25};
+    VehiclePhysics belly_blocked(kInitialLat,kInitialLon,0.0,0.f,{},ground,world);
+    belly_blocked.set_input(input);
+    for(int step=0;step<720;++step) belly_blocked.update(kDt,{straddled});
+    require(belly_blocked.get_state().north<24 && std::abs(belly_blocked.get_state().speed)<.2,
+        "torso above belly clearance between both wheel tracks cannot disappear through chassis");
+}
+
 int main(int argc, char** argv)
 {
     try {
@@ -4691,6 +4765,7 @@ int main(int argc, char** argv)
         test_driveline_does_not_wind_up_at_speed_limiter();
         test_authoritative_static_wall_blocks_vehicle_without_losing_ground();
         test_curb_requires_authored_wheel_support_and_climbs_by_suspension();
+        test_runtime_fallen_obstacles_support_tires_without_becoming_walls();
         test_swept_curb_candidate_prevents_tunneling_and_velocity_erasure();
         test_empty_collision_world_matches_no_collision_path_on_a_grade();
         test_glancing_wall_collision_preserves_the_fixed_enu_grade();

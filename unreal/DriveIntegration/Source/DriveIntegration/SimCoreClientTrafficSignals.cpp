@@ -16,6 +16,8 @@ void USimCoreClientComponent::TickTrafficSignals()
 	const bool bAccepted = bTrafficSnapshotAccepted
 		&& SimCoreProtocol::IsValidTrafficNetworkChecksum(LatestState.TrafficNetworkChecksum);
 	const double Age = FPlatformTime::Seconds() - LatestStateReceiveTimeSeconds;
+	const bool bFresh = bReady && bAccepted && FMath::IsFinite(Age) && Age >= 0.0
+		&& Age <= SimCoreTrafficSignals::SnapshotFreshnessSeconds;
 	// Replacing a network invalidates every old head, even when it reuses IDs.
 	if (!PresentedTrafficNetworkChecksum.Equals(LatestState.TrafficNetworkChecksum, ESearchCase::CaseSensitive))
 	{
@@ -39,7 +41,15 @@ void USimCoreClientComponent::TickTrafficSignals()
 		}
 		if (Actor)
 		{
+			const SimCoreProtocol::FStructureState* Damage = LatestState.Structures.FindByPredicate(
+				[&](const SimCoreProtocol::FStructureState& Structure)
+				{
+					return Structure.Kind == SimCoreProtocol::EStructureKind::SignalPole
+						&& Structure.SignalId == Signal.SignalId;
+				});
+			if (bFresh && !Damage && !Signal.bOutOfService) Actor->ClearStructureDamage();
 			Actor->ApplyAuthoritativeSignal(Signal, bReady, bAccepted, Age, RuntimeEntityPresentationOffsetCm);
+			if (bFresh && Damage) Actor->ApplyStructureDamage(*Damage, RuntimeEntityPresentationOffsetCm);
 		}
 	}
 	for (auto It = TrafficSignalActors.CreateIterator(); It; ++It)
@@ -88,7 +98,9 @@ FString USimCoreClientComponent::BuildTrafficSignalStatusText() const
 	{
 		const auto& Signal = LatestState.TrafficSignals[Index];
 		const auto Display = SimCoreTrafficSignals::EvaluateDisplay(Signal, bReady, bAccepted, Age);
-		Text += Display.bVerified
+		Text += Display.bVerified && Display.bOutOfService
+			? FString::Printf(TEXT(" S%u/G%u BROKEN"), Signal.SignalId, Signal.GroupId)
+			: Display.bVerified
 			? FString::Printf(TEXT(" S%u/G%u %s %.1fs"), Signal.SignalId, Signal.GroupId,
 				Display.bGreen ? TEXT("GREEN") : Display.bYellow ? TEXT("YELLOW") : TEXT("RED"),
 				Display.RemainingSeconds)

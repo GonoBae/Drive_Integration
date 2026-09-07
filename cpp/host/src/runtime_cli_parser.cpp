@@ -26,12 +26,16 @@ const std::unordered_map<std::string, CliSpecification>& cli_specifications()
 {
     static const std::unordered_map<std::string, CliSpecification> specs{
         {"--runtime-config", {"runtime_config", true}},
+        {"--record-physics", {"record_physics", true}},
+        {"--record-ticks", {"record_ticks", true}},
+        {"--verify-physics-replay", {"verify_physics_replay", true}},
         {"--vehicle-config", {"vehicle_config", true}},
         {"--map-package", {"map_package", true}},
         {"--traffic-network", {"traffic_network", true}},
         {"--npc-route", {"npc_route", true}},
         {"--npc-alternate-route", {"npc_alternate_route", true}},
         {"--npc-loop", {"npc_route_loop", true}},
+        {"--npc-autonomous", {"npc_autonomous", true}},
         {"--npc-start-offset", {"npc_start_offset_m", true}},
         {"--npc-max-speed", {"npc_max_speed_mps", true}},
         {"--npc-count", {"npc_count", true}},
@@ -114,6 +118,12 @@ void apply_cli_option(RuntimeOptions& options, const CliOption& option)
     if (option.canonical_key == "vehicle_config") {
         options.vehicle_config_path = require_nonempty_path(
             "vehicle_config", require_value());
+    } else if (option.canonical_key == "record_physics") {
+        options.record_physics_path = require_nonempty_path("record_physics", require_value());
+    } else if (option.canonical_key == "verify_physics_replay") {
+        options.verify_physics_replay_path = require_nonempty_path("verify_physics_replay", require_value());
+    } else if (option.canonical_key == "record_ticks") {
+        options.record_ticks = parse_unsigned_integer("record_ticks", require_value());
     } else if (option.canonical_key == "map_package") {
         options.map_package_path = require_nonempty_path(
             "map_package", require_value());
@@ -127,6 +137,8 @@ void apply_cli_option(RuntimeOptions& options, const CliOption& option)
         options.npc_alternate_route = parse_npc_route(require_value());
     } else if (option.canonical_key == "npc_route_loop") {
         options.npc_route_loop = parse_boolean("npc_route_loop", require_value());
+    } else if (option.canonical_key == "npc_autonomous") {
+        options.npc_autonomous = parse_boolean("npc_autonomous", require_value());
     } else if (option.canonical_key == "npc_start_offset_m") {
         options.npc_start_offset_m = parse_finite_double("npc_start_offset_m", require_value());
     } else if (option.canonical_key == "npc_max_speed_mps") {

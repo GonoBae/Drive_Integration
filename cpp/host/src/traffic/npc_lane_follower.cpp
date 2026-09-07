@@ -68,6 +68,7 @@ void NpcLaneFollower::clear() noexcept
     signal_identities_.clear();
     ground_ = nullptr;
     loop_ = false;
+    destination_end_ = false;
     route_length_m_ = 0.0;
     progress_m_ = 0.0;
     reset_progress_m_ = 0.0;
@@ -79,7 +80,7 @@ void NpcLaneFollower::clear() noexcept
 
 void NpcLaneFollower::rebuild(const TrafficNetwork& network, const GroundQuery& ground,
                             std::vector<std::uint32_t> route_lane_ids,
-                            bool loop, double start_offset_m)
+                            bool loop, double start_offset_m, bool destination_end)
 {
     clear();
     try {
@@ -131,8 +132,10 @@ void NpcLaneFollower::rebuild(const TrafficNetwork& network, const GroundQuery& 
         for (std::size_t i = 1; i < selected.size(); ++i) {
             connected(*selected[i - 1], *selected[i]);
         }
+        require(!(loop && destination_end), "NPC destination route cannot loop");
         if (loop) { connected(*selected.back(), *selected.front()); }
-        else { require(selected.back()->terminal, "NPC open route must end at an explicit terminal"); }
+        else { require(selected.back()->terminal || destination_end,
+                       "NPC open route must end at an explicit terminal"); }
 
         require(network.signals.size() <= 32, "NPC network has too many signal heads");
         std::set<std::uint32_t> signal_ids;
@@ -179,11 +182,126 @@ void NpcLaneFollower::rebuild(const TrafficNetwork& network, const GroundQuery& 
                 "NPC route is shorter than its front extent/stop margin");
         ground_ = &ground;
         loop_ = loop;
+        destination_end_ = destination_end;
         reset(start_offset_m);
     } catch (...) {
         clear();
         throw;
     }
+}
+
+void NpcLaneFollower::reroute(const TrafficNetwork& network,
+                             std::vector<std::uint32_t> route_lane_ids,
+                             bool loop, bool destination_end)
+{
+    require(state_.valid && !route_.empty() && ground_ != nullptr,
+            "NPC reroute requires a supported current anchor");
+    require(!route_lane_ids.empty() && route_lane_ids.front() == state_.lane_id,
+            "NPC reroute must begin with its current lane");
+    const auto& current = route_[state_.route_index];
+    if (state_.stopline_committed && current.id == state_.committed_lane_id) {
+        const std::size_t next = (state_.route_index + 1) % route_.size();
+        require(route_lane_ids.size() >= 2 && route_lane_ids[1] == route_[next].id,
+                "NPC reroute cannot change an already committed connector");
+    }
+    NpcLaneFollower replacement(config_);
+    replacement.rebuild(network, *ground_, std::move(route_lane_ids), loop, 0.0, destination_end);
+    const auto& rebuilt = replacement.route_.front();
+    require(rebuilt.signal_group_id == current.signal_group_id
+                && rebuilt.points.size() == current.points.size()
+                && distance(rebuilt.points.front(), current.points.front()) <= 0.15 + epsilon,
+            "NPC reroute cannot replace the occupied lane geometry/control");
+    for (std::size_t point = 1; point < current.points.size(); ++point) {
+        require(distance(rebuilt.points[point], current.points[point]) <= epsilon,
+                "NPC reroute cannot move the occupied lane geometry");
+    }
+    // The old predecessor may have closed a loader-tolerated <15cm join gap.
+    // Keep that exact occupied geometry so replanning cannot snap the anchor.
+    replacement.route_.front().points = current.points;
+    replacement.route_.front().point_offsets_m = current.point_offsets_m;
+    replacement.route_.front().length_m = current.length_m;
+    replacement.route_length_m_ = 0.0;
+    for (auto& lane : replacement.route_) {
+        lane.start_m = replacement.route_length_m_;
+        replacement.route_length_m_ += lane.length_m;
+    }
+    replacement.progress_m_ = state_.lane_offset_m;
+    require(loop || replacement.progress_m_ <= replacement.route_length_m_
+                - config_.front_extent_m - config_.stop_margin_m + epsilon,
+            "NPC reroute destination lies behind the current usable anchor");
+    replacement.reset_progress_m_ = replacement.progress_m_ - state_.distance_travelled_m;
+    if (state_.stopline_committed) {
+        replacement.committed_stopline_m_ = committed_stopline_m_ - progress_m_
+            + replacement.progress_m_;
+        replacement.committed_until_m_ = committed_until_m_ - progress_m_
+            + replacement.progress_m_;
+        replacement.committed_lane_id_ = committed_lane_id_;
+    }
+    const auto anchor = replacement.sample_at(replacement.progress_m_);
+    require(anchor && distance(anchor->position_enu, state_.position_enu) <= epsilon,
+            "NPC reroute must preserve its ground-supported anchor exactly");
+    replacement.state_ = state_;
+    static_cast<NpcLaneSample&>(replacement.state_) = *anchor;
+    if (replacement.state_.stop_reason == NpcLaneStopReason::Terminal
+        && replacement.progress_m_ < replacement.route_length_m_
+            - config_.front_extent_m - config_.stop_margin_m - stop_epsilon_m) {
+        replacement.state_.stop_reason = NpcLaneStopReason::None;
+    }
+    *this = std::move(replacement);
+}
+
+bool NpcLaneFollower::complete_lane_change(
+    const TrafficNetwork& network, std::vector<std::uint32_t> target_route,
+    double target_lane_offset_m, bool destination_end)
+{
+    try {
+        require(state_.valid && !route_.empty() && ground_ != nullptr
+                    && !state_.stopline_committed && !target_route.empty()
+                    && target_route.front() != state_.lane_id
+                    && std::isfinite(target_lane_offset_m),
+                "NPC lateral completion has invalid state or destination");
+        const auto source = std::find_if(network.lanes.begin(), network.lanes.end(),
+            [&](const TrafficLane& lane) { return lane.id == state_.lane_id; });
+        require(source != network.lanes.end(), "NPC lateral source lane is unknown");
+        const auto window = std::find_if(source->lane_changes.begin(), source->lane_changes.end(),
+            [&](const TrafficLaneChange& change) {
+                if (change.target_lane_id != target_route.front()
+                    || !std::isfinite(change.source_begin_m) || !std::isfinite(change.source_end_m)
+                    || !std::isfinite(change.target_begin_m) || !std::isfinite(change.target_end_m)
+                    || change.source_begin_m < 0.0 || change.target_begin_m < 0.0
+                    || change.source_end_m <= change.source_begin_m
+                    || change.target_end_m <= change.target_begin_m
+                    || state_.lane_offset_m < change.source_begin_m - epsilon
+                    || state_.lane_offset_m > change.source_end_m + epsilon) { return false; }
+                const double t = (state_.lane_offset_m - change.source_begin_m)
+                    / (change.source_end_m - change.source_begin_m);
+                const double expected = change.target_begin_m
+                    + t * (change.target_end_m - change.target_begin_m);
+                return std::abs(target_lane_offset_m - expected) <= 0.1;
+            });
+        require(window != source->lane_changes.end(), "NPC lateral completion lacks an authored window");
+        NpcLaneFollower replacement(config_);
+        replacement.rebuild(network, *ground_, std::move(target_route), false,
+                            target_lane_offset_m, destination_end);
+        require(replacement.state_.valid && replacement.state_.route_index == 0
+                    && replacement.route_.front().signal_group_id == source->signal_group_id,
+                "NPC lateral completion changed control identity or lacks ground");
+        const double heading_delta = std::remainder(
+            replacement.state_.heading_deg - state_.heading_deg, 360.0);
+        require(std::abs(heading_delta) <= 15.0,
+                "NPC lateral completion cannot enter an opposing lane");
+        const auto target_sample = static_cast<const NpcLaneSample&>(replacement.state_);
+        replacement.reset_progress_m_ = replacement.progress_m_ - state_.distance_travelled_m;
+        replacement.state_ = state_;
+        static_cast<NpcLaneSample&>(replacement.state_) = target_sample;
+        replacement.state_.stopline_committed = false;
+        replacement.state_.committed_lane_id = 0;
+        if (replacement.state_.stop_reason == NpcLaneStopReason::Terminal) {
+            replacement.state_.stop_reason = NpcLaneStopReason::None;
+        }
+        *this = std::move(replacement);
+        return true;
+    } catch (const std::invalid_argument&) { return false; }
 }
 
 void NpcLaneFollower::reset(double start_offset_m)
@@ -283,6 +401,38 @@ std::optional<NpcLaneSample> NpcLaneFollower::sample_ahead(double distance_m) co
 {
     if (!std::isfinite(distance_m) || distance_m < 0.0) { return std::nullopt; }
     return sample_at(progress_m_ + distance_m);
+}
+
+std::optional<NpcLaneSample> NpcLaneFollower::sample_behind(double distance_m) const
+{
+    if (!state_.valid || !std::isfinite(distance_m) || distance_m < 0.0
+        || distance_m > state_.lane_offset_m + epsilon) {
+        return std::nullopt;
+    }
+    const auto sample = sample_at(progress_m_ - distance_m);
+    if (!sample || sample->lane_id != state_.lane_id
+        || sample->route_index != state_.route_index) {
+        return std::nullopt;
+    }
+    return sample;
+}
+
+bool NpcLaneFollower::retreat_for_obstacle(double distance_m)
+{
+    if (!state_.valid || !state_.stopped || state_.stopline_committed
+        || !std::isfinite(distance_m) || distance_m < 0.0) {
+        return false;
+    }
+    const auto sample = sample_behind(distance_m);
+    if (!sample) { return false; }
+    progress_m_ -= distance_m;
+    static_cast<NpcLaneSample&>(state_) = *sample;
+    state_.speed_mps = 0.0;
+    state_.distance_travelled_m = progress_m_ - reset_progress_m_;
+    state_.stopped = true;
+    state_.stop_reason = NpcLaneStopReason::Blocked;
+    state_.safety_clamped = false;
+    return true;
 }
 
 bool NpcLaneFollower::green(std::uint32_t group_id,

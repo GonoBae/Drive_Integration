@@ -1,4 +1,5 @@
 #include "simulation_host.hpp"
+#include "player_vehicle_profile.hpp"
 
 #include "vehicle.pb.h"
 
@@ -54,7 +55,9 @@ std::string make_reset_message(
     std::uint64_t sequence = 1,
     std::uint64_t client_time_ns = 1,
     std::string_view map_package_checksum = "test-map",
-    std::string_view source_id = "unreal-test")
+    std::string_view source_id = "unreal-test",
+    simcore::RuntimeVehicleClass vehicle_class =
+        simcore::RUNTIME_VEHICLE_CLASS_UNSPECIFIED)
 {
     simcore::Envelope envelope;
     envelope.set_schema_version(simcore_host::kProtocolSchemaVersion);
@@ -65,7 +68,63 @@ std::string make_reset_message(
     auto* reset = envelope.mutable_simulation_reset();
     reset->set_play_session_id(std::string(play_session_id));
     reset->set_client_time_ns(client_time_ns);
+    reset->set_requested_vehicle_class(vehicle_class);
     return envelope.SerializeAsString();
+}
+
+SimulationHostConfig make_test_config();
+
+void test_player_vehicle_selection_is_authoritative_and_reset_fenced()
+{
+    using simcore_host::RuntimeVehicleClass;
+    const VehicleParameters sedan;
+    const auto compact = simcore_host::make_player_vehicle_parameters(
+        sedan, RuntimeVehicleClass::Compact);
+    const auto truck = simcore_host::make_player_vehicle_parameters(
+        sedan, RuntimeVehicleClass::Truck);
+    const auto motorcycle = simcore_host::make_player_vehicle_parameters(
+        sedan, RuntimeVehicleClass::Motorcycle);
+    require(compact.mass_kg < sedan.mass_kg && truck.mass_kg > sedan.mass_kg
+            && motorcycle.mass_kg < compact.mass_kg,
+        "selectable profiles must apply distinct authoritative mass");
+    require(compact.wheelbase_m < sedan.wheelbase_m
+            && truck.wheelbase_m > sedan.wheelbase_m
+            && motorcycle.front_track_m < compact.front_track_m,
+        "selectable profiles must apply distinct wheel geometry");
+
+    boost::asio::io_context ioc;
+    SimulationHost host(ioc, make_test_config(), {});
+    require(host.handle_client_message(make_reset_message(
+                "select-sedan", "select-play-a", 1, 1, "test-map",
+                "unreal-test", simcore::RUNTIME_VEHICLE_CLASS_SEDAN), 1)
+            == ClientMessageResult::SimulationReset,
+        "first selected sedan must start a Play lifecycle");
+    simcore::Envelope sedan_world;
+    require(sedan_world.ParseFromString(host.make_initial_world_state())
+            && sedan_world.world_state().entities(0).runtime_vehicle_class()
+                == simcore::RUNTIME_VEHICLE_CLASS_SEDAN,
+        "WorldState must echo the authoritative selected Ego class");
+
+    require(host.handle_client_message(make_reset_message(
+                "select-reconnect", "select-play-a", 1, 2, "test-map",
+                "unreal-test", simcore::RUNTIME_VEHICLE_CLASS_TRUCK), 2)
+            == ClientMessageResult::Rejected,
+        "a reconnect cannot silently change physics within the same Play identity");
+
+    require(host.handle_client_message(make_reset_message(
+                "select-truck", "select-play-b", 1, 3, "test-map",
+                "unreal-test", simcore::RUNTIME_VEHICLE_CLASS_TRUCK), 3)
+            == ClientMessageResult::SimulationReset,
+        "a deliberate fresh Play identity may select a new profile");
+    simcore::Envelope truck_world;
+    require(truck_world.ParseFromString(host.make_initial_world_state()),
+        "selected truck WorldState must parse");
+    const auto& ego = truck_world.world_state().entities(0);
+    require(ego.runtime_vehicle_class() == simcore::RUNTIME_VEHICLE_CLASS_TRUCK
+            && std::abs(ego.collision_half_length() - 3.65f) < 1e-4f
+            && std::abs(ego.collision_half_width() - 1.22f) < 1e-4f
+            && std::abs(ego.collision_half_height() - 1.25f) < 1e-4f,
+        "selected truck must publish its server-owned collision profile");
 }
 
 std::string make_hello_message(
@@ -1331,6 +1390,7 @@ int main()
                 && observer.entities_size() == 1,
             "optional observer must preserve the frozen EntityStatePacket format");
     test_host_requires_verified_map_identity();
+    test_player_vehicle_selection_is_authoritative_and_reset_fenced();
     test_traffic_lifecycle_and_map_reload();
     test_authoritative_health_initial_reset_active_and_nonnegative_age();
     test_health_reports_tick_overruns_and_reset_clears_metrics();

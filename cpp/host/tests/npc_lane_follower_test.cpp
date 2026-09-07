@@ -580,6 +580,146 @@ bool same_state(const NpcLaneFollowerState& first, const NpcLaneFollowerState& s
         && first.safety_clamped == second.safety_clamped;
 }
 
+void test_planned_nonterminal_destination_and_position_preserving_reroute()
+{
+    const FlatGroundQuery ground;
+    auto network = signal_network();
+    network.lanes[0].successors.push_back(21);
+    network.lanes.push_back(lane(21, {{30, 0, 0}, {45, 8, 0}, {60, 0, 0}},
+                                {30}, 6.0, 0, false));
+    NpcLaneFollower follower;
+    follower.rebuild(network, ground, {10, 20}, false, 0.0, true);
+    const auto green = signal_snapshots(SignalAspect::Green);
+    follower.step(1.0, green);
+    const auto before = follower.state();
+    follower.reroute(network, {10, 21, 30});
+    require(same_state(before, follower.state()),
+            "rerouting before a junction must preserve position, speed, distance and state");
+    follower.step(step_seconds, green);
+    require(follower.state().speed_mps > before.speed_mps
+                && follower.state().distance_travelled_m > before.distance_travelled_m,
+            "reroute must continue acceleration without resetting accumulated distance");
+    const auto valid_before_failure = follower.state();
+    bool rejected = false;
+    try { follower.reroute(network, {21, 30}); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected && same_state(valid_before_failure, follower.state()),
+            "illegal reroute jump must reject transactionally without clearing the old route");
+
+    follower.rebuild(network, ground, {10, 20}, false, 0.0, true);
+    for (int index = 0; index < 1500; ++index) { follower.step(step_seconds, green); }
+    require(follower.destination_reached()
+                && near(follower.state().position_enu.east_m, 57.3, 0.02),
+            "opt-in nonterminal destination must stop at its front-clearance endpoint");
+    const auto reached = follower.state();
+    follower.reroute(network, {20, 30});
+    require(!follower.destination_reached() && follower.state().speed_mps == reached.speed_mps
+                && follower.state().distance_travelled_m == reached.distance_travelled_m,
+            "next destination must clear stale arrival without resetting travel or speed");
+    require_position(follower.state(), reached.position_enu.east_m, reached.position_enu.north_m,
+                     reached.position_enu.up_m, "next trip must start at the exact reached anchor");
+    follower.step(1.0, green);
+    require(follower.state().position_enu.east_m > reached.position_enu.east_m,
+            "next planned trip must resume from the previous destination");
+}
+
+void test_reroute_preserves_green_commitment_in_approach_and_connector()
+{
+    const FlatGroundQuery ground;
+    auto network = signal_network();
+    network.lanes[0].successors.push_back(21);
+    network.lanes.push_back(lane(21, {{30, 0, 0}, {45, 8, 0}, {60, 0, 0}},
+                                {30}, 6.0, 0, false));
+    NpcLaneFollower follower;
+    follower.rebuild(network, ground, {10, 20, 30}, false, 27.3);
+    const auto green = signal_snapshots(SignalAspect::Green);
+    const auto yellow = signal_snapshots(SignalAspect::Yellow);
+    for (int index = 0; index < 300 && !follower.state().stopline_committed; ++index) {
+        follower.step(step_seconds, green);
+    }
+    require(follower.state().stopline_committed && follower.state().lane_id == 10,
+            "fixture must obtain front-crossing commitment while centre is in approach");
+    const auto before = follower.state();
+    bool rejected = false;
+    try { follower.reroute(network, {10, 21, 30}); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected && same_state(before, follower.state()),
+            "a committed junction may not select a different connector mid-entry");
+    follower.reroute(network, {10, 20, 30});
+    require(same_state(before, follower.state()), "unchanged committed suffix must preserve every state");
+    for (int index = 0; index < 300 && follower.state().lane_id == 10; ++index) {
+        follower.step(step_seconds, yellow);
+    }
+    require(follower.state().lane_id == 20 && follower.state().stopline_committed,
+            "yellow after reroute must honor entry commitment through the connector");
+    const auto in_connector = follower.state();
+    follower.reroute(network, {20, 30});
+    require(follower.state().stopline_committed
+                && follower.state().committed_lane_id == in_connector.committed_lane_id
+                && follower.state().distance_travelled_m == in_connector.distance_travelled_m
+                && follower.state().speed_mps == in_connector.speed_mps,
+            "dropping an already traversed approach must retain its active green commitment");
+    for (int index = 0; index < 600 && follower.state().lane_id == 20; ++index) {
+        follower.step(step_seconds, yellow);
+    }
+    require(follower.state().lane_id == 30 && !follower.state().stopline_committed,
+            "rebased commitment must expire at the same physical connector endpoint");
+}
+
+void test_lane_change_completion_requires_authored_window_and_preserves_motion()
+{
+    const FlatGroundQuery ground;
+    TrafficNetwork network;
+    network.lanes = {
+        lane(10, {{0, 0, 0}, {80, 0, 0}}),
+        lane(20, {{0, 4, 0}, {80, 4, 0}}),
+    };
+    network.lanes[0].lane_changes.push_back({20, 10.0, 60.0, 10.0, 60.0});
+    NpcLaneFollower follower;
+    follower.rebuild(network, ground, {10}, false, 20.0);
+    follower.step(1.0, {});
+    const auto before = follower.state();
+    require(!follower.complete_lane_change(network, {20}, before.lane_offset_m + 2.0)
+                && same_state(before, follower.state()),
+            "lateral target must match authored station correspondence; failure preserves state");
+    auto unapproved = network;
+    unapproved.lanes[0].lane_changes.clear();
+    require(!follower.complete_lane_change(unapproved, {20}, before.lane_offset_m)
+                && same_state(before, follower.state()),
+            "same-direction geometry alone must not authorize an unmarked lane change");
+    require(follower.complete_lane_change(network, {20}, before.lane_offset_m),
+            "completed collision-checked blend may adopt its authored neighboring lane");
+    require(follower.state().lane_id == 20 && near(follower.state().position_enu.north_m, 4.0)
+                && follower.state().speed_mps == before.speed_mps
+                && follower.state().distance_travelled_m == before.distance_travelled_m
+                && follower.state().lane_offset_m == before.lane_offset_m,
+            "lane adoption must preserve longitudinal station, speed and accumulated distance");
+    follower.step(step_seconds, {});
+    require(follower.state().speed_mps > before.speed_mps
+                && follower.state().distance_travelled_m > before.distance_travelled_m,
+            "completed lane change must continue bounded acceleration without restarting");
+    follower.rebuild(network, ground, {10}, false, 5.0);
+    const auto outside = follower.state();
+    require(!follower.complete_lane_change(network, {20}, 5.0)
+                && same_state(outside, follower.state()),
+            "lane change outside authored safe corridor must fail closed");
+    follower.reset(20.0);
+    const auto correct_heading = follower.state();
+    auto opposing = network;
+    std::reverse(opposing.lanes[1].points.begin(), opposing.lanes[1].points.end());
+    require(!follower.complete_lane_change(opposing, {20}, 20.0)
+                && same_state(correct_heading, follower.state()),
+            "forged station metadata must not authorize entry to an opposing lane");
+    SwitchableGround switchable;
+    follower.rebuild(network, switchable, {10}, false, 20.0);
+    follower.step(1.0, {});
+    const auto supported = follower.state();
+    switchable.available = false;
+    require(!follower.complete_lane_change(network, {20}, supported.lane_offset_m)
+                && same_state(supported, follower.state()),
+            "unsupported target must reject without clearing the last supported source anchor");
+}
+
 void test_loop_lap_distance_and_exact_deterministic_reset()
 {
     const FlatGroundQuery ground;
@@ -609,6 +749,21 @@ void test_loop_lap_distance_and_exact_deterministic_reset()
         require(same_state(follower.step(10.0, {}), expected),
                 "identical reset and step sequence must reproduce every published state bit exactly");
     }
+    const auto before_reroute = follower.state();
+    std::vector<std::uint32_t> suffix;
+    for (std::size_t index = 0; index < square.lanes.size(); ++index) {
+        suffix.push_back(square.lanes[(before_reroute.route_index + index) % square.lanes.size()].id);
+    }
+    follower.reroute(square, suffix, false, true);
+    require_position(follower.state(), before_reroute.position_enu.east_m,
+                     before_reroute.position_enu.north_m, before_reroute.position_enu.up_m,
+                     "rerouting after several laps must not snap back to the first lap");
+    require(follower.state().distance_travelled_m == before_reroute.distance_travelled_m
+                && follower.state().speed_mps == before_reroute.speed_mps,
+            "unwrapped travel distance and speed must survive loop-to-destination replanning");
+    follower.step(step_seconds, {});
+    require(follower.state().distance_travelled_m > before_reroute.distance_travelled_m,
+            "rebased route must continue the original distance counter across complete laps");
     follower.clear();
     require(!follower.state().valid && follower.state().stopped
                 && follower.state().stop_reason == NpcLaneStopReason::Uninitialized
@@ -616,6 +771,36 @@ void test_loop_lap_distance_and_exact_deterministic_reset()
             "clear must erase route and publish the uninitialized stop state");
     require(!follower.sample_ahead(0), "cleared follower must not expose stale geometry");
     require(!follower.step(step_seconds, {}).valid, "cleared follower must not move without a rebuild");
+}
+
+void test_bounded_host_escape_retreat_stays_on_current_lane()
+{
+    const FlatGroundQuery ground;
+    auto network = straight_network(100.0);
+    NpcLaneFollower follower;
+    follower.rebuild(network, ground, {10}, false, 20.0);
+    const auto behind = follower.sample_behind(3.0);
+    require(behind && behind->lane_id == 10,
+        "a stopped follower must expose supported rear geometry on its occupied lane");
+    require_position(*behind, 17.0, 0.0, 0.0,
+        "rear sampling must use authored lane arc distance");
+    require(follower.retreat_for_obstacle(3.0),
+        "the host may authorize a bounded stopped retreat after sweeping collision");
+    require_position(follower.state(), 17.0, 0.0, 0.0,
+        "escape retreat must update the authoritative route anchor without teleporting lanes");
+    require(near(follower.state().distance_travelled_m, -3.0)
+            && follower.state().stopped
+            && follower.state().stop_reason == NpcLaneStopReason::Blocked,
+        "escape retreat must remain a stopped reverse manoeuvre with signed net route progress");
+    require(!follower.sample_behind(18.0)
+            && !follower.retreat_for_obstacle(18.0),
+        "escape retreat must never cross the beginning of the occupied authored lane");
+
+    follower.reset(20.0);
+    follower.step(1.0, {});
+    require(follower.state().speed_mps > 0.0
+            && !follower.retreat_for_obstacle(0.1),
+        "a moving route follower must brake before host-authorized reverse begins");
 }
 
 } // namespace
@@ -633,6 +818,10 @@ int main()
         test_terminal_stop_and_blocked_centre_distance_semantics();
         test_disabled_missing_ground_and_invalid_inputs_freeze_safely();
         test_bad_routes_reject_and_clear_including_open_and_loop_closure();
+        test_planned_nonterminal_destination_and_position_preserving_reroute();
+        test_reroute_preserves_green_commitment_in_approach_and_connector();
+        test_lane_change_completion_requires_authored_window_and_preserves_motion();
+        test_bounded_host_escape_retreat_stays_on_current_lane();
         test_loop_lap_distance_and_exact_deterministic_reset();
         std::cout << "npc_lane_follower_test: all checks passed\n";
         return 0;

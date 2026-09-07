@@ -1,5 +1,6 @@
 #include "simulation_host.hpp"
 
+#include "player_vehicle_profile.hpp"
 #include "simulation_host_session_detail.hpp"
 
 #include <boost/asio/error.hpp>
@@ -22,11 +23,7 @@ using simcore_host::simulation_host_session_detail::
     kMaxLifecycleIdentifierBytes;
 
 constexpr std::size_t kMaxRuntimeEntities = 255;
-constexpr std::uint32_t kRuntimeReactionHoldTicks = 18;
-constexpr double kNpcMaximumReactionSpeedMps = 30.0;
-constexpr double kPedestrianMaximumReactionSpeedMps = 15.0;
-constexpr double kNpcMaximumReactionOffsetM = 8.0;
-constexpr double kPedestrianMaximumReactionOffsetM = 6.0;
+constexpr double kPedestrianMaximumReactionSpeedMps = 60.0;
 
 bool finite_vector(const simcore_host::CollisionVector2& vector)
 {
@@ -106,6 +103,8 @@ void validate_and_order_runtime_entities(
                 "runtime collision proxy IDs must be non-empty and unique");
         }
         if (!finite_vector(proxy.linear_velocity_enu_mps)
+            || !std::isfinite(entity.pitch_rad) || !std::isfinite(entity.roll_rad)
+            || !std::isfinite(entity.pitch_rate_rad_s) || !std::isfinite(entity.roll_rate_rad_s)
             || !std::isfinite(proxy.heading_rate_rad_s)
             || !std::isfinite(proxy.material.friction)
             || !std::isfinite(proxy.material.restitution)
@@ -137,8 +136,8 @@ void validate_and_order_runtime_entities(
                         "runtime collision proxy contains a non-finite center");
                 }
                 if constexpr (std::is_same_v<Shape, simcore_host::ObbPrism>) {
-                    if (entity.kind
-                            != simcore_host::RuntimeEntityKind::NpcVehicle
+                    if ((entity.kind != simcore_host::RuntimeEntityKind::NpcVehicle
+                            && !(entity.kind == simcore_host::RuntimeEntityKind::Pedestrian && entity.pedestrian_downed))
                         || !std::isfinite(shape.heading_rad)
                         || !std::isfinite(shape.half_length_m)
                         || !std::isfinite(shape.half_width_m)
@@ -150,7 +149,7 @@ void validate_and_order_runtime_entities(
                             && (proxy.yaw_inertia_kg_m2 < 1.0
                                 || proxy.yaw_inertia_kg_m2 > 100'000'000.0))) {
                         throw std::invalid_argument(
-                            "NPC runtime entity requires a valid OBB prism");
+                            "NPC/downed pedestrian runtime entity requires a valid OBB prism");
                     }
                 } else {
                     if (entity.kind
@@ -175,6 +174,7 @@ SimulationHost::SimulationHost(boost::asio::io_context& ioc,
                                SimulationHostConfig config,
                                SimulationHostCallbacks callbacks)
     : config_(std::move(config))
+    , base_vehicle_parameters_(config_.vehicle_parameters)
     , callbacks_(std::move(callbacks))
     , physics_(config_.origin_lat, config_.origin_lon, config_.origin_alt,
                config_.spawn_heading, config_.vehicle_parameters,
@@ -203,10 +203,11 @@ SimulationHost::SimulationHost(boost::asio::io_context& ioc,
     }
     initial_runtime_entities_ = config_.runtime_entities;
     runtime_entities_ = initial_runtime_entities_;
+    rebuild_structure_damage();
     rebuild_lane_npc();
     rebuild_pedestrians();
     last_logged_input_ = make_safe_stop_input();
-    physics_.set_input(last_logged_input_);
+    apply_vehicle_input(last_logged_input_);
 }
 
 SimulationHost::~SimulationHost()
@@ -252,10 +253,34 @@ std::string SimulationHost::serialize_current_world_state(Clock::time_point now)
         && health.status == simcore_host::HealthStatus::Active;
     return simcore_host::serialize_world_state_envelope(
         physics_.get_state(), runtime_entities_, make_metadata(), health,
-        network ? network->signals_at(simulation_clock_.simulation_time_ns(), traffic_enabled)
-                : std::vector<simcore_host::TrafficSignalSnapshot>{},
+        current_traffic_signals(traffic_enabled),
         network && !network->signals.empty()
-            ? std::string_view(network->checksum) : std::string_view{});
+            ? std::string_view(network->checksum) : std::string_view{},
+        structure_damage_.snapshots(), active_vehicle_class_);
+}
+
+std::vector<simcore_host::TrafficSignalSnapshot> SimulationHost::current_traffic_signals(bool enabled) const
+{
+    auto signals = config_.traffic_network
+        ? config_.traffic_network->signals_at(simulation_clock_.simulation_time_ns(), enabled)
+        : std::vector<simcore_host::TrafficSignalSnapshot>{};
+    structure_damage_.apply_signal_faults(signals);
+    return signals;
+}
+
+void SimulationHost::rebuild_structure_damage()
+{
+    const auto* network = config_.traffic_network
+        && config_.traffic_network->source_map_checksum == config_.map_package_checksum
+        ? config_.traffic_network.get() : nullptr;
+    structure_damage_.rebuild(config_.collision_world
+        ? config_.collision_world->static_colliders() : std::vector<simcore_host::StaticObbCollider>{}, network);
+    for (const auto& pole : structure_damage_.collision_proxies()) {
+        for (const auto& entity : initial_runtime_entities_) {
+            if (pole.proxy_id == entity.collision_proxy.proxy_id)
+                throw std::invalid_argument("runtime entity uses a reserved signal pole collision ID");
+        }
+    }
 }
 
 void SimulationHost::queue_traffic_network_reload(
@@ -273,7 +298,11 @@ void SimulationHost::apply_pending_traffic_network_reload()
         || pending_traffic_network_->source_map_checksum != config_.map_package_checksum) return;
     if (!config_.traffic_network
         || config_.traffic_network->checksum != pending_traffic_network_->checksum) {
+        if (config_.physics_replay) {
+            config_.physics_replay->invalidate("traffic_network_reloaded");
+        }
         config_.traffic_network = std::move(pending_traffic_network_);
+        rebuild_structure_damage();
         rebuild_lane_npc();
         rebuild_pedestrians();
         std::cout << "[Traffic] applied verified network checksum="
@@ -329,7 +358,8 @@ void SimulationHost::publish_current_state()
     }
     if (callbacks_.publish_observer_state) {
         callbacks_.publish_observer_state(
-            simcore_host::serialize_entity_state_packet(state));
+            simcore_host::serialize_entity_state_packet(
+                state, active_vehicle_class_));
     }
 }
 
@@ -340,14 +370,47 @@ SimulationHost::make_runtime_collision_snapshot() const
     proxies.reserve(runtime_entities_.size());
     for (const auto& entity : runtime_entities_) {
         proxies.push_back(entity.collision_proxy);
+        const auto npc = std::find_if(lane_npcs_.begin(), lane_npcs_.end(),
+            [&](const auto& candidate) { return candidate.entity_id == entity.entity_id; });
+        if (npc != lane_npcs_.end() && npc->pending) {
+            auto& shape = std::get<simcore_host::ObbPrism>(proxies.back().shape);
+            const auto& accepted = std::get<simcore_host::ObbPrism>(npc->pending->collision_proxy.shape);
+            // Planar solver still starts at the tick-start XY/yaw, but must
+            // use the accepted attitude envelope and grounded height. Its
+            // resolved proxy is also the final authoritative wire geometry.
+            shape.center_up_m = accepted.center_up_m;
+            shape.half_length_m = accepted.half_length_m;
+            shape.half_width_m = accepted.half_width_m;
+            shape.half_height_m = accepted.half_height_m;
+        }
+        const auto pedestrian = std::find_if(pedestrians_.begin(), pedestrians_.end(),
+            [&](const auto& candidate) { return candidate.entity_id == entity.entity_id; });
+        if (pedestrian != pedestrians_.end() && pedestrian->pending) {
+            const auto center = std::visit([](const auto& shape) { return shape.center_enu; }, proxies.back().shape);
+            const auto velocity = proxies.back().linear_velocity_enu_mps;
+            proxies.back() = pedestrian->pending->collision_proxy;
+            proxies.back().linear_velocity_enu_mps = velocity;
+            std::visit([&](auto& shape) { shape.center_enu = center; }, proxies.back().shape);
+        }
     }
+    const auto& structures = structure_damage_.collision_proxies();
+    proxies.insert(proxies.end(), structures.begin(), structures.end());
     return proxies;
 }
 
 void SimulationHost::advance_runtime_entities(double dt_seconds)
 {
     const auto& resolved_proxies = physics_.get_last_resolved_dynamic_proxies();
-    const auto& contacts = physics_.get_last_collision_contacts();
+    auto contacts = physics_.get_last_collision_contacts();
+    // Pair impulses were solved inside Ego's bounded collision microsteps;
+    // consume them without advancing a proxy again or adding Ego damage.
+    for (const auto& pair : physics_.get_last_runtime_proxy_contacts()) {
+        auto contact = pair.contact;
+        contact.collider_id = pair.proxy_id;
+        contact.normal_enu.east_m *= -1.0;
+        contact.normal_enu.north_m *= -1.0;
+        contacts.push_back(std::move(contact));
+    }
     const auto resolved_proxy = [&](std::string_view proxy_id) {
         return std::lower_bound(
             resolved_proxies.begin(), resolved_proxies.end(), proxy_id,
@@ -355,10 +418,13 @@ void SimulationHost::advance_runtime_entities(double dt_seconds)
                 return proxy.proxy_id < searched_id;
             });
     };
-    const auto contacted = [&](std::string_view proxy_id) {
-        return std::any_of(contacts.begin(), contacts.end(), [&](const auto& contact) {
-            return contact.collider_id == proxy_id;
-        });
+    const auto normal_impulse = [&](std::string_view proxy_id) {
+        double impulse = 0.0;
+        for (const auto& contact : contacts) {
+            if (contact.collider_id == proxy_id)
+                impulse += contact.accumulated_normal_impulse_n_s;
+        }
+        return impulse;
     };
     const auto clamp_vector = [](simcore_host::CollisionVector2& value,
                                  double maximum) {
@@ -394,24 +460,39 @@ void SimulationHost::advance_runtime_entities(double dt_seconds)
                     lane_npc->reaction.offset_enu_m = {
                         actual.center_enu.east_m - nominal.center_enu.east_m,
                         actual.center_enu.north_m - nominal.center_enu.north_m};
-                    lane_npc->reaction.velocity_enu_mps = {
+                    // Keep physical coasting separate from commanded route/
+                    // recovery motion. Feeding the latter back as an impulse
+                    // turns the return into an accelerating rubber band.
+                    lane_npc->reaction.velocity_enu_mps.east_m +=
                         entity.collision_proxy.linear_velocity_enu_mps.east_m
-                            - lane_npc->reaction.nominal_velocity_enu_mps.east_m,
+                            - lane_npc->pending->collision_proxy.linear_velocity_enu_mps.east_m;
+                    lane_npc->reaction.velocity_enu_mps.north_m +=
                         entity.collision_proxy.linear_velocity_enu_mps.north_m
-                            - lane_npc->reaction.nominal_velocity_enu_mps.north_m};
+                            - lane_npc->pending->collision_proxy.linear_velocity_enu_mps.north_m;
                     lane_npc->reaction.heading_offset_rad = std::remainder(
                         actual.heading_rad - nominal.heading_rad,
                         2.0 * std::numbers::pi);
-                    lane_npc->reaction.heading_rate_rad_s =
-                        entity.collision_proxy.heading_rate_rad_s
-                        - lane_npc->reaction.nominal_heading_rate_rad_s;
-                    clamp_vector(lane_npc->reaction.offset_enu_m,
-                                 kNpcMaximumReactionOffsetM);
+                    // Numerical/authored yaw-rate bounds are not external
+                    // torque. Only a real contact may add reaction momentum.
+                    if (normal_impulse(entity.collision_proxy.proxy_id) > 0.0) {
+                        lane_npc->reaction.heading_rate_rad_s +=
+                            entity.collision_proxy.heading_rate_rad_s
+                            - lane_npc->pending->collision_proxy.heading_rate_rad_s;
+                    }
                     clamp_vector(lane_npc->reaction.velocity_enu_mps,
-                                 kNpcMaximumReactionSpeedMps);
+                                 lane_npc->maximum_reaction_speed_mps);
                 }
-                if (contacted(entity.collision_proxy.proxy_id)) {
-                    lane_npc->reaction.hold_ticks = kRuntimeReactionHoldTicks;
+                lane_npc->reaction.recovery.record_contact(
+                    normal_impulse(entity.collision_proxy.proxy_id), entity.collision_proxy.mass_kg);
+                const auto& body = std::get<simcore_host::ObbPrism>(entity.collision_proxy.shape);
+                for (const auto& contact : contacts) {
+                    if (contact.collider_id == entity.collision_proxy.proxy_id) {
+                        // Solver normal points NPC -> Ego; NPC receives the
+                        // opposite impulse at the assumed bumper contact height.
+                        lane_npc->tumble.apply_contact(contact.accumulated_normal_impulse_n_s,
+                            {-contact.normal_enu.east_m, -contact.normal_enu.north_m},
+                            body.heading_rad, lane_npc->tumble_dimensions);
+                    }
                 }
             }
             continue;
@@ -435,19 +516,17 @@ void SimulationHost::advance_runtime_entities(double dt_seconds)
                     pedestrian->reaction.offset_enu_m = {
                         actual.east_m - nominal.east_m,
                         actual.north_m - nominal.north_m};
-                    pedestrian->reaction.velocity_enu_mps = {
+                    pedestrian->reaction.velocity_enu_mps.east_m +=
                         entity.collision_proxy.linear_velocity_enu_mps.east_m
-                            - pedestrian->reaction.nominal_velocity_enu_mps.east_m,
+                            - pedestrian->pending->collision_proxy.linear_velocity_enu_mps.east_m;
+                    pedestrian->reaction.velocity_enu_mps.north_m +=
                         entity.collision_proxy.linear_velocity_enu_mps.north_m
-                            - pedestrian->reaction.nominal_velocity_enu_mps.north_m};
-                    clamp_vector(pedestrian->reaction.offset_enu_m,
-                                 kPedestrianMaximumReactionOffsetM);
+                            - pedestrian->pending->collision_proxy.linear_velocity_enu_mps.north_m;
                     clamp_vector(pedestrian->reaction.velocity_enu_mps,
                                  kPedestrianMaximumReactionSpeedMps);
                 }
-                if (contacted(entity.collision_proxy.proxy_id)) {
-                    pedestrian->reaction.hold_ticks = kRuntimeReactionHoldTicks;
-                }
+                pedestrian->reaction.recovery.record_contact(
+                    normal_impulse(entity.collision_proxy.proxy_id), entity.collision_proxy.mass_kg);
             }
             continue;
         }
@@ -473,6 +552,7 @@ void SimulationHost::advance_runtime_entities(double dt_seconds)
             },
             proxy.shape);
     }
+    finish_runtime_impact_contacts(contacts);
 }
 
 simcore_host::EnvelopeMetadata SimulationHost::make_metadata()
@@ -557,13 +637,19 @@ void SimulationHost::run_tick()
         const auto command_age_ms = std::chrono::duration<double, std::milli>(
             command_age).count();
         last_logged_input_ = make_safe_stop_input();
-        physics_.set_input(last_logged_input_);
+        apply_vehicle_input(last_logged_input_);
+        if (config_.physics_replay) {
+            config_.physics_replay->event(simcore_host::PhysicsReplayEvent::SafeStop);
+        }
         std::cerr << "[Safety] command timeout age_ms=" << command_age_ms
                   << " source=" << control_lease_.active_source_id()
                   << " session=" << control_lease_.active_session_id()
                   << "; SafeStop applied; lease retained\n";
     }
     if (control_lease_.update_hard_timeout(started_at)) {
+        if (config_.physics_replay) {
+            config_.physics_replay->event(simcore_host::PhysicsReplayEvent::HardTimeout);
+        }
         const auto command_age = control_lease_.command_age(started_at);
         const auto command_age_ms = std::chrono::duration<double, std::milli>(
             command_age).count();
@@ -578,11 +664,45 @@ void SimulationHost::run_tick()
     }
 
     const double dt_seconds = 1.0 / config_.physics_frequency_hz;
+    const bool structures_enabled = lifecycle_active_ && !estop_latched_
+        && make_health_snapshot(started_at).status == simcore_host::HealthStatus::Active;
+    // Consume last tick's solved contacts before taking this tick's collision
+    // snapshot. Wire pose and the pole's actual collision geometry stay atomic.
+    structure_damage_.tick(dt_seconds, structures_enabled);
     prepare_lane_npc(dt_seconds, started_at);
     prepare_pedestrians(dt_seconds, started_at);
-    const auto state = physics_.update(
-        dt_seconds, make_runtime_collision_snapshot());
+    auto collision_snapshot = make_runtime_collision_snapshot();
+    // Copy only in capture mode; ordinary ticks still transfer one snapshot.
+    const auto recorded_proxies = config_.physics_replay
+        ? collision_snapshot : std::vector<simcore_host::KinematicCollisionProxy>{};
+    const auto state = physics_.update(dt_seconds, std::move(collision_snapshot));
+    if (config_.physics_replay) {
+        config_.physics_replay->tick(applied_input_, recorded_proxies, state);
+    }
     advance_runtime_entities(dt_seconds);
+    if (structures_enabled) {
+        const simcore_host::ObbPrism impact_body{
+            {state.position_enu.x, state.position_enu.y}, state.position_enu.z,
+            state.heading * std::numbers::pi / 180.0,
+            state.collision_half_length_m, state.collision_half_width_m, state.collision_half_height_m};
+        structure_damage_.record_contacts(physics_.get_last_collision_contacts(), state.position_enu.z, &impact_body);
+        for (const auto& pair : physics_.get_last_runtime_proxy_contacts()) {
+            if (!pair.proxy_id.starts_with("signal-pole-")) continue;
+            auto contact = pair.contact;
+            contact.collider_id = pair.proxy_id;
+            contact.normal_enu.east_m *= -1.0;
+            contact.normal_enu.north_m *= -1.0;
+            double impact_height = state.position_enu.z;
+            for (const auto& proxy : physics_.get_last_resolved_dynamic_proxies()) {
+                if (proxy.proxy_id == pair.contact.collider_id) {
+                    impact_height = std::visit([](const auto& shape) { return shape.center_up_m; }, proxy.shape);
+                    break;
+                }
+            }
+            structure_damage_.record_contacts({contact}, impact_height);
+        }
+        structure_damage_.accept_resolved_proxies(physics_.get_last_resolved_dynamic_proxies());
+    }
     if (reported_control_change_revision_ != control_change_revision_) {
         const auto command_to_tick = std::chrono::duration<double, std::milli>(
             started_at - last_control_change_time_).count();
@@ -614,7 +734,8 @@ void SimulationHost::run_tick()
     }
     if (callbacks_.publish_observer_state) {
         callbacks_.publish_observer_state(
-            simcore_host::serialize_entity_state_packet(state));
+            simcore_host::serialize_entity_state_packet(
+                state, active_vehicle_class_));
     }
 }
 
@@ -632,6 +753,9 @@ bool SimulationHost::apply_pending_map_package_reload(
     }
 
     const std::string previous_checksum = config_.map_package_checksum;
+    if (config_.physics_replay) {
+        config_.physics_replay->invalidate("map_package_reloaded");
+    }
     // The follower's ground pointer must be retired before releasing the map.
     lane_npcs_.clear();
     pedestrians_.clear();
@@ -649,7 +773,7 @@ bool SimulationHost::apply_pending_map_package_reload(
     }
     runtime_entities_ = initial_runtime_entities_;
     last_logged_input_ = make_safe_stop_input();
-    physics_.set_input(last_logged_input_);
+    apply_vehicle_input(last_logged_input_);
     control_lease_.reset_for_new_simulation();
     simulation_clock_.restart(tick_started_at);
     last_reported_overrun_count_ = 0;
@@ -672,6 +796,7 @@ bool SimulationHost::apply_pending_map_package_reload(
     lifecycle_last_client_time_ns_ = 0;
     lifecycle_active_ = false;
     hello_connection_states_.clear();
+    rebuild_structure_damage();
     rebuild_lane_npc();
     rebuild_pedestrians();
 

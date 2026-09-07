@@ -4,17 +4,39 @@
 
 | 항목 | 값 |
 |---|---|
-| 버전 | 2.20 |
+| 버전 | 2.23 |
 | 작성일 | 2026-08-19 |
-| 최종 수정 | 2026-09-02 |
+| 최종 수정 | 2026-09-07 |
 | 대상 릴리스 | R1 Manual Driving Vertical Slice |
 | 기존 목표일 | 핵심 R1 2026-08-27, 확장 포함 2026-08-31(8/19 AI 기준선, 미달성) |
-| 현재 관리 목표 | Core RC 2026-09-07(수정 버퍼 9/8), Should 확장 포함 2026-09-11(위험 버퍼 9/14); 조건부 선행 인수 후보 2026-09-04 |
+| 현재 관리 목표 | Core RC 2026-09-07(수정 버퍼 9/8), Should 확장 포함 2026-09-11(위험 버퍼 9/14); 9/4 조건부 조기 인수는 미달성 |
 | 개발 인원 | 1명 |
 | 기준 작업량 | 1일 8시간 |
 | 관련 문서 | [기능표](./02_feature_matrix.md), [아키텍처](./03_architecture.md), [배경 제작안](./04_environment_plan.md) |
 
 ## 2. 일정 전제
+
+### 9/7 현재 상태
+
+9/4~5 구현과 검증 기록을 반영했다. `L_SignalCity`는 58 lanes·신호 head 16개·교차로 2곳,
+NPC 10대·보행자 8명이며, NPC의 근접 장애물 후진·회피, 충돌 후 주행 복귀, 보행자 낙상과
+구조물·차체 파손 표현을 보완했다. 네 collector 커브의 차선 교차를 v3로 수정해 저장 맵에
+적용했고, 플레이어도 `1/2/3/4`로 세단·경차·트럭·오토바이를 선택할 수 있다. 차종 변경은
+출발점 reset과 차종별 물리·충돌 외곽 변경을 동반한다. 기록·재생에는 차종을 남기며
+SensorRig의 sequence/cadence도 새 주행 세션에 맞춰 초기화한다.
+
+9/5 최종 검증은 C++ **34/34**, 후속 관련 검사 **4/4**, Unreal **84/84** 통과다.
+Unreal은 경고 없는 성공 79개·기존 예상 경고 포함 성공 5개이며 실패는 없다.
+이는 자동 검증 결과다. 최신 수정본의 PIE 통합 인수, 운전석·외부 카메라 잔여,
+패키징·서버 주소 설정, 목표 PC 1080p 60fps·입력 지연·30분 안정성, 촬영 인수는 남아 있다.
+SensorRig 좌표·시간 계약은 Core 범위지만 RGB 캡처는 Should, LiDAR payload는 Future다.
+오토바이는 네 접점 축약 물리이며 실제 이륜 균형 모델이 아니다.
+
+9/4 조기 인수 목표는 충족하지 못했다. 오늘 9/7은 Core 관리 목표 당일이며 아직 완료로
+판정하지 않는다. 9/8 수정 버퍼, 9/11 확장 목표와 9/14 위험 버퍼를 유지한다. 잔여 시간을
+새로 계측하지 않았으므로 완료일을 보장하지 않는다. 9/5는 주말 계획에서 제외하되 실제
+수행한 작업은 실적으로 기록한다. 자세한 내용은 [9/4](./worklogs/2026-09-04.md)·
+[9/5 작업일지](./worklogs/2026-09-05.md)를 따른다. 아래 날짜별 설명의 이전 수치는 당시 이력이다.
 
 ### 2.1 현재 실적과 남은 평일
 
@@ -193,6 +215,36 @@ side-brake drift, Ego↔NPC/보행자 유한질량 반작용과 6구역 국부 W
 서버는 공통 launcher가 port9000 listener PID와 실행 로그를 확인한다. 사용자 PIE의
 조작감·충돌/dent 화면 일치·실제 HUD 가독성·60fps·30분 안정성은 계속 수동 gate다.
 
+### 2.1.9 9/3 Core 자동 검증·입력 replay·성능 도구
+
+오늘 계획의 자동 범위를 `scripts/check_core.py` 한 명령으로 묶었다. C++/UE build,
+전체 회귀, Proto, map/traffic ValidateOnly와 격리된 실제 WebSocket 시험 결과를 단계별
+로그와 JSON 보고서로 남긴다. 시험 생략·빈 시험은 전체 자동 통과로 인정하지 않는다.
+
+서버 `--record-physics`가 정확한 적용 입력·reset/lifecycle·외부 동적 충돌 입력을 기록하고,
+`--verify-physics-replay`가 같은 executable/cfg/map/origin/Hz에서 Ego 물리를 다시 계산한다.
+기존 F5/F6 visual ghost와 구분하며 NPC·보행자 AI 자체를 재실행하는 기능은 아니다.
+Unreal 성능 캡처는 opt-in이며 frame/state 간격·실행 모드·해상도·제한 설정을 남긴다.
+자동 실행 중 발견한 반복 재접속의 상대 맵 경로 누적도 절대 경로 정규화와 회귀로 수정했다.
+
+구체적인 최종 수치·로그는 [9/3 작업일지](./worklogs/2026-09-03.md), 사용법은
+[Core 검증 안내](./core_validation.md)를 따른다. 실제 사용자 주행/충돌/신호/녹화 확인,
+sensor payload 잔여 범위, 패키징·목표 PC 성능·입력 지연·30분 안정성은 완료로 올리지 않는다.
+**오늘 자동 작업 진척만으로 9/4 Core RC를 확정하거나 9/7 관리 목표를 변경하지 않는다.**
+
+### 2.1.10 9/3 사용자 승인 NPC 경로 판단 확장
+
+추가 요청한 **NPC 차량의 목적지 선택·장애물 우회·차선 변경**을 진행했다.
+기존 신호 도심 외형·지면은 보존하고, 4개 접근도로에 같은 방향 인접 차선 정보를
+추가해 총 46 lanes로 확장했다. Signal City의 기존 두 route는 spawn 배치에 사용하고
+이후에는 서버가 도달 가능한 목적지를 선택한다. 보행자 목적지 탐색·전체 NPC 차량
+동역학·FSD는 이번 확장에 포함하지 않는다. 구현 계약과 제한은
+[NPC 경로 판단](./npc_navigation.md), 검증 결과는 [9/3 작업일지](./worklogs/2026-09-03.md)를 따른다.
+
+이는 당초 자동 통합 작업 이후 승인된 추가 범위다. PIE에서는 차선 변경의 연속성,
+주변 간격 부족 시 대기, 신호 준수와 재Play 초기화를 추가 확인한다. 기존 수동·성능·
+패키지 인수는 생략하지 않으며, 이 추가만으로 관리 완료일을 앞당기거나 확정하지 않는다.
+
 ### 2.2 이전 AI 협업 일정 전제(이력)
 
 > 8/31 후속 구현: 위 2.1.2의 "제작 예정" 단계 이후 실제 `L_VirtualCity`와
@@ -244,7 +296,7 @@ AI는 코드 초안, 반복 수정, 자동 시험, 빌드 오류 분석, 문서 
 
 ### 2.3 AI 협업 재기준선(8/26 수립·8/31 배경 변경 반영)
 
-AI가 독립적인 코드·시험·문서 작업을 2~3개 흐름으로 병렬 처리하는 것을 전제로 한다. 다만 공통 schema 확정, 동일 파일 통합, Unreal 빌드, PIE 시각 확인, 목표 PC 성능·30분 안정성 시험은 순차 게이트로 남는다. 현재 blockout·LaneGraph·차량/보행 신호, NPC4·보행자8, SensorRig metadata와 snapshot CSV/visual ghost 골격은 구현됐다. 실제 sensor payload, command/event 기반 결정적 물리 재생과 사용자 PIE·성능·30분 gate는 남아 있으므로 이를 단순 마감 작업으로 계산하지 않는다.
+AI가 독립적인 코드·시험·문서 작업을 2~3개 흐름으로 병렬 처리하는 것을 전제로 한다. 다만 공통 schema 확정, 동일 파일 통합, Unreal 빌드, PIE 시각 확인, 목표 PC 성능·30분 안정성 시험은 순차 게이트로 남는다. 9/7 현재 58-lane Signal City·차량/보행 신호, NPC10·보행자8, SensorRig metadata, snapshot CSV/visual ghost와 적용 입력 기반 Ego 물리 재생을 구현했다. 사용자 PIE·카메라·패키징·성능·30분 gate는 남아 있다. 실제 RGB payload는 Should, LiDAR payload는 Future로 유지한다.
 
 8/31 사용자 주행 뒤 코너링 조향 profile 보완, 마우스 orbit/줌/C 복귀,
 자체 세단 메시·재질을 선행 구현했다. C++ 15/15·UE Automation 15/15와 실제 카메라
@@ -296,6 +348,7 @@ Landscape 회귀의 roll 65.681°>45° 실패로 되돌렸고 최신 구성에 �
 | Must/Core RC | 30.5~45h(8/31 blockout·lane/신호 선행 구현 전 추정; 재산정 대기) | 2026-09-07 | 2026-09-08 | 가상 도심으로 변경한 R1 Must, AT-01~10, 1080p 60fps, 30분 안정성, 패키지 후보 |
 | Should 확장 | 15~21h(기존 추정; 선행 카메라 작업 후 재산정 대기) | 2026-09-11 | 2026-09-14 | Core RC를 유지하면서 운전 UX·4종 카메라·디버그·replay UI·데모 프리셋 통과 |
 
+다음은 8/31 당시 선행 계획 이력이다. 9/4 조기 인수는 미달성했으며 현재 상태는 상단 요약을 따른다.
 수동 gate와 독립인 세 작업 흐름을 선행하면 9월 3일 자동 통합 후보, 9월 4일 사용자 인수
 후보가 가능하다. 9월 4일에 모든 Must·AT-01~10·1080p·30분 시험을 통과하면 Core RC
 완료일을 그날로 앞당긴다. 이는 조건부 stretch target이며, 사용자 PIE와 목표 PC 인수
@@ -312,9 +365,9 @@ Landscape 회귀의 roll 65.681°>45° 실패로 되돌렸고 최신 구성에 �
 | 1 | WP-03 수동 게이트: 연석 등판·PIE 정적/동적 충돌 | 1~2h | Ground390/static228 Bake·연석 package 회귀·최종 빌드 통과 | 실행 절차·로그 진단·새 checksum 준비 | 속도/각도별 연석 앞축→뒤축 상승, 벽·Barrier·demo entity 비관통과 화면 일치 30~60분 |
 | 완료 | GeoTransform·quaternion·`Hello`·HUD·외부 실행 설정 자동 범위 | 0h 잔여 | 없음 | 8/28 좌표/통신/HUD 자동 범위에 이어 8/31 WorldState Health와 authoritative SafeStop HUD·지면 QA 구현; C++ 14/14·UE 8/8·Editor/Game build 통과 | 실제 좌표·Health·재연결 확인은 아래 별도 수동 gate |
 | 2 | Health/HUD·좌표·재연결 PIE | 0.5~1h | 최신 C++/Unreal build | 상태 로그·재현 절차 준비 | 정상·SafeStop·끊김/복구 표시, FLU↔FRU 자세 확인 |
-| 3 | 가상 도심·LaneGraph 수동 정렬 확인·최소 배경 마감 | 기존 전체 6~9h; 잔여 미계측 | blockout·25-lane graph/export/validator 구현됨 | 실제 검증 피드백 수정, 제한된 반복 모듈·기본 조명 | 주행 루프·도로/lane/충돌 정렬·보행 구역·사용 에셋 라이선스 확인 |
-| 4 | LaneGraph 기반 NPC·보행자 동작 | 기존 전체 6~8h; 잔여 미계측 | `signal_city_v2` 42lane/16head/2controller와 NPC4·보행자8 자동 통합, 2,280-state smoke 통과 | 실제 PIE에서 위치·신호·간격·충돌·반복 동작 수정 | 목표 개체 수와 신호 반복 동작 45~60분 |
-| 5 | SensorRig·기록/재생 골격과 결정적 재생 잔여 | 기존 7~9h; 잔여 미계측 | Sensor mount/time metadata와 F5 snapshot CSV·F6 ghost 자동 골격 구현 | 실제 sensor payload 및 command/event deterministic physics re-simulation·checksum 회귀 | AT-07 오차 기준 replay 확인 30분 |
+| 3 | 가상 도심·LaneGraph 수동 정렬 확인·최소 배경 마감 | 기존 전체 6~9h; 잔여 미계측 | 58-lane graph/export/validator와 네 collector 커브 v3 저장 맵 적용 | 실제 검증 피드백 수정, 제한된 반복 모듈·기본 조명 | 주행 루프·도로/lane/충돌 정렬·보행 구역·사용 에셋 라이선스 확인 |
+| 4 | LaneGraph 기반 NPC·보행자 동작 | 기존 전체 6~8h; 잔여 미계측 | `signal_city_v2` 58lane/16head/2controller·NPC10·보행자8, 목적지·우회·근접 후진 회피와 충돌 반작용 구현 | 실제 PIE에서 위치·신호·간격·충돌·반복 동작 수정 | 목표 개체 수와 신호 반복 동작 45~60분 |
+| 5 | SensorRig·기록/재생 잔여 | 기존 7~9h; 잔여 미계측 | Sensor metadata·세션 reset, F5/F6 ghost와 서버 Ego replay의 차종 기록 구현 | 사용자 기록 replay와 environment gate 회귀; RGB는 Should, LiDAR는 Future | AT-07 사용자 기록·재생 확인 30분 |
 | 6 | 패키징·성능·30분 안정성·전체 인수·수정 | 9~15h | 모든 Must | 빌드·측정 도구·문서 | 목표 PC 60~90분 |
 
 30.5~45h는 실제 투입 시간 계측이 아니라 **8/31 선행 구현 전 계획 추정 이력**이다.
@@ -330,20 +383,21 @@ AI 사용이나 배경 변경 이유로 다시 일괄 절반으로 줄인 값이
 검증과 모듈 에셋 확보·라이선스 확인 뒤 잔여를 다시 추정한다. 구현 건수만으로 Core
 날짜를 앞당기거나 완료를 보장하지 않는다.
 
-### 2.4 Core 완료일 단축을 위한 병렬 선행 계획
+### 2.4 Core 완료일 단축을 위한 병렬 선행 계획(9/4 조기 인수 미달성 이력)
 
 아래 흐름은 8/31 승인된 가상 도심 완료 기준을 유지하면서 wall-clock을 단축한다. 공통 schema, 동일 파일 병합,
 C++/UE 최종 빌드와 PIE는 한 통합 흐름에서 순차 처리한다. A 흐름의 자동 P2 범위는 8월
 28일에 선행 완료했고 B는 blockout·lane/신호·NPC4·보행자8 자동 범위까지 진행했다.
-C는 metadata/snapshot ghost 골격까지 구현됐다. B/C의 사용자 PIE, 실제 sensor payload,
-결정적 physics replay와 수동 gate는 완료로 계산하지 않는다.
+C는 metadata/snapshot ghost와 9/3 적용 입력 기반 Ego physics replay까지 구현됐다.
+B/C의 사용자 PIE와 수동 gate는 완료로 계산하지 않는다. 실제 RGB payload는 Should,
+LiDAR payload는 Future이며 Core 필수 잔여로 포함하지 않는다.
 
 | 흐름 | 8/28·8/31 선행 범위 | 9/1~3 통합 범위 | 사용자 병렬 gate | 완료 조건 |
 |---|---|---|---|---|
 | P0 차량·지면·충돌 | v7 강성·hard-stop·표시 보완에 이어 Ground390/static228·support 기반 Curb 등판, 보도/연석 top 24cm 정합과 실제 package 회귀, CTest18/18·UE35/35·Editor/Game·두 ValidateOnly·격리 smoke 통과 | 극한 full-lock yaw 원인·모델 한계 확인, 사용자 PIE 결과 blocker 수정·회귀 | 조향 감각·경사·요철, 속도/각도별 연석 등판, 벽·Barrier·재Bake 재연결 PIE | 기존 자동 계약 유지·극한 응답 확인·M2 수동 gate와 AT-03 통과 |
 | A 좌표·통신·UI | **자동 범위 완료:** GeoTransform/quaternion round-trip, 양방향 `Hello`, strict 외부 실행 설정, 진단 HUD와 WorldState Health/SafeStop 표시 | 실제 PIE 좌표·Health·재연결 확인과 발견 문제 수정 | FLU↔FRU 자세와 HUD 30~60분 | 자동 계약은 통과; AT-01·06·10 수동/통합 gate 통과 시 완료 |
 | B 지도·traffic | **자동 범위 구현:** `signal_city_v2` 42lane/차량8+보행8 head/2controller, NPC4·보행자8와 route/crosswalk·신호 lifecycle. 실제 package CTest 5그룹과 2,280-state smoke 통과 | 사용자 PIE에서 위치·신호·충돌·반복 동작 수정 | 주행 루프·도로/lane/충돌 정렬·모듈 배경/라이선스와 신호 반복 확인 | M4와 AT-04·05 수동 통과 |
-| C 센서·재생 | **골격 구현:** `base_link` FLU mount config, authoritative `SimulationTimeNs` metadata, F5 snapshot CSV와 F6 collision-free visual ghost | 실제 image/point cloud와 command/event deterministic physics re-simulation·checksum 회귀 | 동일 기록 재생과 ghost/HUD 확인 30분 | M5와 AT-07 통과; 현재 ghost만으로 AT-07 완료 금지 |
+| C 센서·재생 | **구현:** FLU sensor metadata, F5/F6 ghost와 9/3 서버 적용 입력 기반 Ego physics replay | 사용자 기록과 동일 환경/checksum 회귀; RGB는 Should, LiDAR는 Future | 동일 기록 재생과 ghost/HUD 확인 30분 | M5와 AT-07 통과; ghost만으로 완료 금지, 서버 자동 replay와 사용자 인수 구분 |
 | I 통합·릴리스 | 각 흐름의 작은 자동 회귀를 계속 실행 | 9/3 전체 자동 후보, 9/4 목표 PC 인수 후보 | 1080p·지연·30분 연속 주행 60~90분 | 모든 Must·AT-01~10 통과 시 9/4 Core RC |
 
 이전 선행 계획의 **8월 31일 P0 수동 gate 완료 조건은 아직 충족되지 않았다.** 따라서
@@ -428,10 +482,10 @@ D6 이후 96시간을 AI 협업 48시간으로 계산했던 기준선은 2.2에 
 | 8/31 월 | 실제: Health/HUD·지면 QA, 가상 도심/lane/신호 기반, v6 조향 후 v7·지지력/표시 수정 자동 검증 | 기존 맵과 25 lanes·3 heads 유지. v6·25/25는 이전 이력. v7 고정 강성 60k/50k·hard-stop 반력·접지 상실 표시 수정의 CTest 16/16(4.92초)·UE 26/26·Editor/Game·Health smoke와 새 서버 적용 통과 | 하중 비례 후보는 지형 회귀 실패로 미채택. 180km/h full-lock 과도 yaw·사용자 PIE·NPC/보행자·SensorRig/replay·패키징/성능은 미완료 |
 | 9/1 화 | 극한 조향 모델·일괄 PIE 인수, NPC 다중화 후속 | NPC 1대는 8/31 선행 구현(2.1.4). 고속 yaw 모델 보완과 차선/신호/장애물 통합 인수 후 NPC 3~4대·보행자 6~8명, SensorRig·recorder로 진행 | 조향각/궤적/타이어 힘 구분, NPC 신호·간격·lifecycle 인수. 잔여량·9/4 조건 재검토 |
 | 9/2 수 | B NPC/보행자와 C replay 통합 | 기존 도로/lane/marker 정렬 피드백 수정, 제한된 모듈 배경, 서버 신호를 따르는 NPC·보행자 intent, frame metadata·기록 재생 | 코스 주행성·도로/lane/collision 정렬·신호 준수·replay 확인; M4 후보 |
-| 9/3 목 | 전체 Core 자동 통합 후보 | C++/UE build, AT 자동 범위, schema/checksum/replay 결정성, 성능 측정 도구 | 수동 gate 미해결 항목이 없어야 9/4 인수 진입; M5 후보 |
-| 9/4 금 | **조건부 선행 Core RC 인수** | 패키지 후보, 전체 회귀, 알려진 문제와 문서 | 목표 PC 1080p·지연·30분 주행과 AT-01~10 통과 시 Core RC 완료일을 9/4로 앞당김 |
-| 9/5~6 | 주말 | 작업 없음 | 일정·완료일 산정에서 제외 |
-| 9/7 월 | Core RC 관리 목표/backstop | 9/4 미통과 Must 수정, 패키지 후보, 1080p·지연 측정, 알려진 문제·문서 | 목표 PC 30분 주행과 AT-01~10 통과 시 **Core RC** |
+| 9/3 목 | 전체 Core 자동 통합 후보 | 한 명령 C++/UE·Proto/맵·wire 검증, 적용 입력 기반 Ego replay, opt-in 성능 캡처/분석과 재접속 경로 회귀 구현; 실적은 2.1.9와 작업일지 참조 | 수동 gate 미해결 항목이 없어야 9/4 인수 진입; M5/RC 완료 선언 아님 |
+| 9/4 금 | **조건부 선행 Core RC 인수 미달성** | 실제: 충돌 후 진행·사고차 회피·근접 후진, 운전자/실내·조명·NPC 차종과 차선 표시 보완 | 최신 PIE·카메라·패키징·1080p·지연·30분 인수 미완료, Core RC 선언 없음 |
+| 9/5~6 | 주말(계획 제외) | 9/5 실제: 커브 차선 v3 저장 맵 반영, 플레이어 4차종 선택·물리 profile·기록 호환, C++34/34+후속4/4·UE84/84 | 주말 실적만 기록하며 계획 작업일·완료일 산정에서 제외; 최신 PIE 확인은 대기 |
+| 9/7 월 | **Core RC 관리 목표 당일·미인수** | 진행 내역 문서 동기화·저장, 잔여 Must와 최신 통합 PIE 확인, 카메라·패키지 후보·1080p·지연 측정 준비 | 목표 PC 30분 주행과 AT-01~10 등 잔여 인수 통과 시 **Core RC**; 현재 완료 확정 아님 |
 | 9/8 화 | Must 수정 버퍼 또는 EXP-01 시작 | 실패한 Must만 수정; 통과했다면 운전 UX·복구 조작 | Core 미통과 시 Should 시작 금지 |
 | 9/9 수 | EXP-01/02 | 통합 대시보드, 카메라·디버그 오버레이 | 실행 중 전환과 기본값 성능 확인 |
 | 9/10 목 | EXP-03 | replay UI·데모 프리셋 | 같은 기록의 play/pause·배속·seek 확인 |
@@ -448,7 +502,7 @@ D6 이후 96시간을 AI 협업 48시간으로 계산했던 기준선은 2.2에 
 | M2 C++ 차량 기반 완료 | 자동 게이트 8/25 완료, Unreal 확인 대기 | ADR-011 schema·좌표 회귀, 외부 차량 설정, MapPackage 지면, 조향·가감속·경사·서스펜션·저속 안정성 시험 통과 | 최신 지형 등판·선회·z·pitch·roll을 Unreal PIE에서 확인하면 최종 통과 |
 | M3 충돌 일치 수동운전 | 8/31 목표·수동 gate 미완료, 9/1 우선 확인 | 동일 충돌 소스와 체크섬, 지속 관통 없음, Unreal 임의 보정 없음, FLU↔FRU 자세·회전 시각 검증, 재연결·authoritative SafeStop/Health 표시 | NPC 통합보다 정적 충돌·좌표 adapter·Health 수동 gate부터 복구 |
 | M4 가상 도심 주행 루프 | 9/2 | 짧은 코스의 로컬 주행면·저작 LaneGraph·충돌이 정렬되고 교차로·보행 구역 진입 제한·제한된 모듈 배경이 확인됨 | 장식 확대보다 주행면·lane·충돌 정렬과 루프 주행성을 우선 |
-| M5 도시 동작·기록 골격 | 9/4 | 자동 범위는 42lane·차량8+보행8 head·controller2·NPC4·보행자8, SensorRig metadata와 F5 CSV/F6 ghost까지 구현. 실제 sensor payload·결정적 physics replay와 수동 반복 동작은 미완료 | 신호 준수·기록을 유지하며 PIE 수정; `REC-002/AT-07`은 command/event 재시뮬레이션 오차 기준 통과 전 완료 금지 |
+| M5 도시 동작·기록 골격 | 9/4 목표·9/7 수동 인수 대기 | 58lane·신호head16·controller2·NPC10·보행자8, SensorRig metadata/reset·F5/F6 ghost·차종별 입력 기반 Ego replay 자동 범위 구현. 수동 반복/녹화 확인은 미완료. RGB는 Should, LiDAR는 Future | 신호 준수·기록을 유지하며 PIE 수정; `REC-002/AT-07`은 자동 오차 검증과 사용자 실제 기록 확인을 함께 요구 |
 | M6 핵심 R1 Core RC | 9/7(9/8 수정 버퍼) | 기능표의 모든 R1 Must와 1080p 성능·30분 안정성·패키지 후보 통과 | 추가 기능을 시작하지 않고 Must 게이트 복구에 전력 사용 |
 | M6.5 확장 기능 후보 | 9/10 | 운전 UX·카메라·디버그·replay·데모 프리셋이 Core RC 회귀를 통과 | 실패한 Should 확장만 제외하고 Core RC 유지 |
 | M7 확장 포함 R1 릴리스 | 9/11(위험 버퍼 9/14) | 최종 패키지, 시험 기록, replay, 영상, 알려진 문제, 문서 확보 | 완료되지 않은 Must가 있으면 완료 선언 대신 일정 변경 |
@@ -612,6 +666,9 @@ D6 이후 96시간을 AI 협업 48시간으로 계산했던 기준선은 2.2에 
 
 | 버전 | 날짜 | 변경 내용 |
 |---|---|---|
+| 2.23 | 2026-09-07 | 9/4~5 실적과 9/7 인수 대기를 동기화. 58lane/NPC10·근접 후진 회피·충돌 보완·커브v3·플레이어4차종·차종 replay/SensorRig reset, C++34/34+후속4/4·UE84/84(79 경고 없음+5 예상 경고) 반영. 9/4 조기목표 미달성·9/5 주말 실제 작업을 구분하고 9/7·9/8·9/11·9/14 목표와 센서 우선순위를 유지 |
+| 2.22 | 2026-09-03 | 사용자 승인 NPC 목적지 선택·우회·같은 방향 차선 변경과 46-lane 데이터 확장을 추가. 기존 맵과 보행자 경로는 유지하며 PIE 추가 확인·기존 Core 수동 인수는 별도 |
+| 2.21 | 2026-09-03 | 한 명령 Core 자동 검증, 적용 입력 기반 Ego 물리 replay, opt-in frame/state 측정 및 재접속 경로 누적 회귀. CTest21/21·UE48/48·Python30/30·wire2,280states·replay480ticks(오차0) 통과. 수동·패키지 인수와 관리 목표는 유지 |
 | 2.20 | 2026-09-02 | 기능·wire 계약을 유지한 C++/Unreal 책임 분리와 공통 Windows launcher를 반영. 비정상 NPC 각속도의 partial-tick 전파도 차단하고 C++ build·CTest20/20, UE Editor/Game·Automation47/47, launcher 3 profiles, Python Proto1/1·helper10/10 및 엄격한 Signal City 2,280-state 격리 smoke를 통과했으며 실제 PIE·성능 gate는 유지 |
 | 2.19 | 2026-09-02 | keyboard 미세 조향·rear side-brake drift, Ego↔NPC/보행자 유한질량 반작용과 6구역 국부 WPO dent를 반영. CTest20/20·UE46/46·Editor/Game 빌드 통과와 PID24136/port9000 최신 실행을 확인했으며 실제 PIE 조작감·ragdoll·collision-shape 변형·성능 gate는 미완료 유지 |
 | 2.18 | 2026-09-02 | frame-independent 조향·F3 overlay·full-body rollover contact·damage/deformation, Signal City 42lane/16head/2controller/NPC4/보행자8, SensorRig metadata·F5 snapshot CSV/F6 visual ghost와 최종 CTest20/20·UE45/45·2,280-state smoke를 반영. 최종 테스트 인계용 PID3840/port9000 실행을 확인했으며 실제 sensor payload·결정적 physics replay·PIE/60fps/30분 gate는 미완료 유지 |

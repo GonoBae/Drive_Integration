@@ -74,7 +74,7 @@ float FZoneWeights::Get(const SimCoreProtocol::EVehicleDamageZone Zone) const
 	}
 }
 
-bool Advance(
+static bool AdvanceZoneWeights(
 	FAccumulator& Accumulator,
 	const SimCoreProtocol::FVehicleState& State)
 {
@@ -101,13 +101,20 @@ bool Advance(
 		return bHadDent || !Accumulator.Weights.IsNearlyZero();
 	}
 
-	if (State.CollisionEventSequence == Accumulator.LastCollisionEventSequence)
+	const bool bNewEvent = State.CollisionEventSequence != Accumulator.LastCollisionEventSequence;
+	if (!bNewEvent && DamagePercent <= Accumulator.LastDamagePercent)
 	{
 		return false;
 	}
 
-	const float DeltaDamage = FMath::Max(
+	float DeltaDamage = FMath::Max(
 		0.0f, DamagePercent - Accumulator.LastDamagePercent);
+	// A saturated 100% total must not make a later impact on another panel invisible.
+	// This is bounded cosmetic damage only; never feed it back into vehicle physics.
+	if (bNewEvent && DamagePercent >= 100.0f && FMath::IsFinite(State.LastImpactImpulseNs))
+	{
+		DeltaDamage = FMath::Max(DeltaDamage, FMath::Clamp((State.LastImpactImpulseNs - 2500.0f) / 500.0f, 0.0f, 35.0f));
+	}
 	const float PreviousWeight = Accumulator.Weights.Get(State.DamageZone);
 	AddDamage(Accumulator.Weights, State.DamageZone, DeltaDamage);
 	Accumulator.LastDamagePercent = DamagePercent;
@@ -116,6 +123,16 @@ bool Advance(
 	return !FMath::IsNearlyEqual(
 		PreviousWeight,
 		Accumulator.Weights.Get(State.DamageZone));
+}
+
+bool Advance(FAccumulator& Accumulator, const SimCoreProtocol::FVehicleState& State)
+{
+	if (!FMath::IsFinite(State.DamagePercent) || State.DentPatches.Num() > 16) return false;
+	const auto PreviousDents = Accumulator.Weights.Dents;
+	const bool bZoneChanged = AdvanceZoneWeights(Accumulator,State);
+	Accumulator.Weights.bContactLocal = true;
+	Accumulator.Weights.Dents = State.DentPatches;
+	return bZoneChanged || PreviousDents != State.DentPatches;
 }
 
 FName MaterialParameterName(const SimCoreProtocol::EVehicleDamageZone Zone)

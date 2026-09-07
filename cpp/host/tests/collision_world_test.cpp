@@ -757,6 +757,63 @@ void test_tire_supported_bypass_is_restricted_to_curb_semantics()
         "unknown", "the tire-supported API must reject unknown IDs");
 }
 
+void test_fast_npc_crossing_pedestrian_uses_shared_microsteps()
+{
+    using namespace simcore_host;
+    auto ego = make_body({100,100}, {});
+    const std::vector<KinematicCollisionProxy> proxies{
+        {"npc-fast", ObbPrism{{0,0},.85,std::numbers::pi/2,2.2,1,.75}, {60,0},0,{.8,0},1500,2600,60},
+        {"ped-fast-crossing", VerticalCapsule{{3.2,0},.9,.35,.9}, {},0,{.7,0},80,0,15}};
+    // Without intermediate pair solves, the car moves from E=0 to E=6 and
+    // completely crosses the person: neither endpoint's shapes overlap.
+    const auto result = CollisionWorld{}.integrate(ego, .1, proxies);
+    require(result.substep_count >= 60 && !result.motion_clamped && result.contacts.empty()
+        && !result.runtime_proxy_contacts.empty(),
+        "fast NPC/ped crossing must be caught inside microsteps and not reported as Ego damage");
+    require(result.resolved_dynamic_proxies[1].linear_velocity_enu_mps.east_m > 1.0
+        && std::get<VerticalCapsule>(result.resolved_dynamic_proxies[1].shape).center_enu.east_m > 3.2,
+        "a high-speed NPC must transfer finite momentum instead of passing through a pedestrian");
+    auto clear = proxies;
+    std::get<VerticalCapsule>(clear[1].shape).center_enu.north_m = 20;
+    const auto free = CollisionWorld{}.integrate(ego, .1, clear);
+    require(free.runtime_proxy_contacts.empty()
+        && near(std::get<ObbPrism>(free.resolved_dynamic_proxies[0].shape).center_enu.east_m, 6, 1e-6),
+        "pair checking must not advance unaffected NPC motion a second time");
+}
+
+void test_runtime_vehicle_pedestrian_pairs_are_finite_and_height_aware()
+{
+    using namespace simcore_host;
+    const std::vector<KinematicCollisionProxy> initial{
+        {"npc", ObbPrism{{0,0},.85,std::numbers::pi/2,2.2,1,.75}, {6,0},0,{.8,0},1500,2600,30},
+        {"ped", VerticalCapsule{{2.45,0},.9,.35,.9}, {},0,{.7,0},80,0,15}};
+    auto proxies = initial;
+    const auto contacts = resolve_runtime_proxy_pairs(proxies);
+    require(contacts.size()==2 && contacts[0].proxy_id == "npc" && contacts[1].proxy_id == "ped"
+        && contacts[1].contact.accumulated_normal_impulse_n_s > 0
+        && contacts[1].contact.normal_enu.east_m > .9,
+        "NPC/ped collision must emit separate equal/opposite receiver contacts, not Ego contacts");
+    require(proxies[0].linear_velocity_enu_mps.east_m < 6
+        && proxies[1].linear_velocity_enu_mps.east_m > 1
+        && near(1500 * proxies[0].linear_velocity_enu_mps.east_m
+              + 80 * proxies[1].linear_velocity_enu_mps.east_m, 9000, 1e-5),
+        "runtime pair collision must transfer momentum without treating the pedestrian as kinematic");
+    auto reverse = initial;
+    std::reverse(reverse.begin(), reverse.end());
+    (void)resolve_runtime_proxy_pairs(reverse);
+    require(near(reverse[1].linear_velocity_enu_mps.east_m, proxies[1].linear_velocity_enu_mps.east_m),
+        "runtime pair solve must remain deterministic under input ordering");
+    proxies = initial;
+    proxies[1].shape = ObbPrism{{2.45,0}, .25, std::numbers::pi/2, .95,.35,.25};
+    proxies[1].yaw_inertia_kg_m2 = 30;
+    std::get<ObbPrism>(proxies[0].shape).center_up_m = 1.6; // min Z=.85, clear of downed max Z=.5
+    require(resolve_runtime_proxy_pairs(proxies).empty(),
+        "a low downed collider cannot leave a blocking upright-capsule ghost above it");
+    std::get<ObbPrism>(proxies[0].shape).center_up_m = .85;
+    require(!resolve_runtime_proxy_pairs(proxies).empty(),
+        "a ground-level NPC must still physically contact a downed body");
+}
+
 } // namespace
 
 int main()
@@ -783,6 +840,8 @@ int main()
         test_grid_boundary_contact_and_duplicate_candidate_removal();
         test_dynamic_proxy_validation_fails_closed();
         test_tire_supported_bypass_is_restricted_to_curb_semantics();
+        test_runtime_vehicle_pedestrian_pairs_are_finite_and_height_aware();
+        test_fast_npc_crossing_pedestrian_uses_shared_microsteps();
         std::cout << "collision_world_tests: all tests passed\n";
         return 0;
     } catch (const std::exception& error) {

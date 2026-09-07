@@ -38,6 +38,25 @@ bool FSimCoreSensorRigConfigTest::RunTest(const FString& Parameters)
 		Rig->GetRecentMetadata().Last().ParentFrame == TEXT("base_link")
 		&& Rig->GetRecentMetadata().Last().MapChecksum == State.MapPackageChecksum
 		&& Rig->GetRecentMetadata().Last().SourceSequence == State.Sequence);
+	State.MapPackageChecksum = TEXT("fnv1a64:fedcba9876543210");
+	State.PlaySessionId = TEXT("sensor-test-next-play");
+	State.Sequence = 1;
+	State.SimulationTimeNs = 0;
+	bOk &= TestEqual(TEXT("new map/play lifecycle emits immediately from simulation time zero"),
+		Rig->ObserveAuthoritativeState(State), 2);
+	State.Sequence = 2;
+	State.SimulationTimeNs = 10'000'000;
+	bOk &= TestEqual(TEXT("time-zero capture still enforces each sensor period"),
+		Rig->ObserveAuthoritativeState(State), 0);
+	State.Sequence = 3;
+	State.SimulationTimeNs = 50'000'000;
+	bOk &= TestEqual(TEXT("new lifecycle retains independent per-sensor cadence"),
+		Rig->ObserveAuthoritativeState(State), 1);
+	State.PlaySessionId = TEXT("sensor-test-third-play");
+	State.Sequence = 1;
+	State.SimulationTimeNs = 0;
+	bOk &= TestEqual(TEXT("play-only identity change also resets sequence and cadence"),
+		Rig->ObserveAuthoritativeState(State), 2);
 	FString Bad = FString(Config).Replace(TEXT("\"rate_hz\":10"), TEXT("\"rate_hz\":0"));
 	bOk &= TestFalse(TEXT("invalid sensor rate fails closed"),
 		SimCoreSensorRig::ParseConfigJson(Bad, Sensors, Error));

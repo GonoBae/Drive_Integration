@@ -36,6 +36,7 @@ class Expectations:
     network_checksum: str
     heads: dict
     plans: dict
+    pedestrian_only_groups: frozenset
 
     @property
     def group_keys(self):
@@ -72,6 +73,11 @@ def network_expectations(data):
     require(0 < len(signals) <= 32, "traffic smoke requires 1..32 authored signal heads")
     plans = {}
     group_owners = {}
+    pedestrian_groups = {(signal.get("controller_id", 1), signal.get("group_id"))
+                         for signal in signals if signal.get("kind") == "pedestrian"}
+    vehicle_groups = {(signal.get("controller_id", 1), signal.get("group_id"))
+                      for signal in signals if signal.get("kind", "vehicle") != "pedestrian"}
+    pedestrian_only_groups = frozenset(pedestrian_groups - vehicle_groups)
     if version == 2:
         raw_plans = network.get("signal_plans")
         require(type(raw_plans) is list and 0 < len(raw_plans) <= 32,
@@ -97,9 +103,10 @@ def network_expectations(data):
                         and len(set(green)) == len(green) and len(set(yellow)) == len(yellow)
                         and not set(green).intersection(yellow)
                         and set(green).union(yellow).issubset(groups), "invalid phase group sets")
-                # signal_city's plans model mutually conflicting approaches per
-                # controller. A future conflict matrix capability can relax this.
-                require(len(green) + len(yellow) <= 1,
+                # One protected vehicle approach at a time. Independent WALK
+                # groups may coexist only when every vehicle approach is red.
+                active_groups = {(identity, group) for group in [*green, *yellow]}
+                require(len(active_groups) <= 1 or active_groups.issubset(pedestrian_only_groups),
                         "one controller phase grants conflicting groups together")
                 phases.append((duration_ms * 1_000_000, frozenset(green), frozenset(yellow)))
             require(0 < len(phases) <= 64, "invalid signal phase count")
@@ -136,7 +143,7 @@ def network_expectations(data):
     fnv = 14695981039346656037
     for byte in data:
         fnv = ((fnv ^ byte) * 1099511628211) & ((1 << 64) - 1)
-    return Expectations(version, checksum, f"fnv1a64:{fnv:016x}", heads, plans)
+    return Expectations(version, checksum, f"fnv1a64:{fnv:016x}", heads, plans, pedestrian_only_groups)
 
 
 def expected_phase(group, elapsed_ns, active):
@@ -233,8 +240,9 @@ def validate_world(message, expected):
         require(key not in groups or groups[key] == state, "heads within one controller/group disagree")
         groups[key] = state
     for controller in {key[0] for key in groups}:
-        require(sum(aspect != pb.TRAFFIC_SIGNAL_RED
-                    for (owner, _), (aspect, _) in groups.items() if owner == controller) <= 1,
+        active_groups = {key for key, (aspect, _) in groups.items()
+                         if key[0] == controller and aspect != pb.TRAFFIC_SIGNAL_RED}
+        require(len(active_groups) <= 1 or active_groups.issubset(expected.pedestrian_only_groups),
                 "one controller has simultaneous conflicting non-red groups")
     return groups
 

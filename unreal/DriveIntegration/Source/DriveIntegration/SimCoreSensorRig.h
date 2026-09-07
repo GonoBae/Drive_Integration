@@ -60,5 +60,7 @@ private:
 	TArray<SimCoreSensorRig::FSensorDefinition> Sensors;
 	TArray<SimCoreSensorRig::FFrameMetadata> RecentMetadata;
 	TMap<FString, uint64> LastCaptureTimeBySensor;
+	FString ObservedMapChecksum;
+	FString ObservedPlaySessionId;
 	uint64 LastObservedSequence = 0;
 };

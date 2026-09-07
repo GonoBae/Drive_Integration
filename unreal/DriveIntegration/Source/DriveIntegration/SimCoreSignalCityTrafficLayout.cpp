@@ -100,13 +100,12 @@ namespace
 	void AddCollector(FTrafficLayout& Layout, uint32 Id,
 		const FVector2D& A, const FVector2D& B, const FVector2D& C, const FVector2D& D,
 		bool bReverse, const FVector2D& ExactStart, const FVector2D& ExactEnd,
-		uint32 Successor)
+		uint32 Successor, const FVector2D& IncomingForward, const FVector2D& OutgoingForward)
 	{
 		TArray<FVector> Center;
 		Cubic(Center, A, B, C, D, 48);
 		if (bReverse) { Algo::Reverse(Center); }
-		TArray<FVector>& Points = Add(Layout, Id, {Successor}, 0, 6.944444).PointsEnuM;
-		Point(Points, ExactStart);
+		TArray<FVector> OffsetCenter;
 		for (int32 Index = 0; Index < Center.Num(); ++Index)
 		{
 			const FVector Previous = Center[FMath::Max(0, Index-1)];
@@ -114,15 +113,148 @@ namespace
 			const FVector2D Tangent(Next.X-Previous.X, Next.Y-Previous.Y);
 			const FVector2D Right(Tangent.Y, -Tangent.X);
 			const FVector2D Position(Center[Index].X, Center[Index].Y);
-			Point(Points, Position + Right.GetSafeNormal() * 2.0);
+			Point(OffsetCenter, Position + Right.GetSafeNormal() * 2.0);
 		}
-		Point(Points, ExactEnd);
+		// An exact endpoint followed by the raw offset curve made a cusp (and
+		// sometimes a short backwards segment) at collector entrances. Replace
+		// only the two 12m merge ends with tangent-matched cubic transitions;
+		// their footprint stays inside the existing asphalt merge aprons.
+		int32 EntryIndex = 1, ExitIndex = OffsetCenter.Num()-2;
+		double Distance = 0.0;
+		for (int32 Index = 1; Index < OffsetCenter.Num()-2; ++Index)
+		{
+			Distance += FVector::Dist2D(OffsetCenter[Index-1], OffsetCenter[Index]);
+			EntryIndex = Index;
+			if (Distance >= 12.0) break;
+		}
+		Distance = 0.0;
+		for (int32 Index = OffsetCenter.Num()-2; Index > EntryIndex+1; --Index)
+		{
+			Distance += FVector::Dist2D(OffsetCenter[Index+1], OffsetCenter[Index]);
+			ExitIndex = Index;
+			if (Distance >= 12.0) break;
+		}
+		const auto Enu2 = [](const FVector& Value) { return FVector2D(Value.X, Value.Y); };
+		const FVector2D Entry = Enu2(OffsetCenter[EntryIndex]);
+		const FVector2D Exit = Enu2(OffsetCenter[ExitIndex]);
+		const FVector2D EntryForward = (Enu2(OffsetCenter[EntryIndex+1]) - Entry).GetSafeNormal();
+		const FVector2D ExitForward = (Exit - Enu2(OffsetCenter[ExitIndex-1])).GetSafeNormal();
+		TArray<FVector>& Points = Add(Layout, Id, {Successor}, 0, 6.944444).PointsEnuM;
+		Cubic(Points, ExactStart, ExactStart + IncomingForward * 4.0,
+			Entry - EntryForward * 4.0, Entry, 64);
+		for (int32 Index = EntryIndex+1; Index <= ExitIndex; ++Index)
+		{
+			Point(Points, Enu2(OffsetCenter[Index]));
+		}
+		Cubic(Points, Exit, Exit + ExitForward * 4.0,
+			ExactEnd - OutgoingForward * 4.0, ExactEnd, 64);
 	}
 
 	void AddMovement(FTrafficLayout& Layout, uint32 Id, FVector2D A, FVector2D B,
 		FVector2D C, FVector2D D, uint32 Successor)
 	{
 		Cubic(Add(Layout, Id, {Successor}, 0, 4.166667).PointsEnuM, A, B, C, D, 16);
+	}
+
+	double ArcLength(const TArray<FVector>& Points, int32 EndIndex = INDEX_NONE)
+	{
+		const int32 End = EndIndex == INDEX_NONE ? Points.Num() - 1 : EndIndex;
+		double Result = 0.0;
+		for (int32 Index = 1; Index <= End; ++Index)
+		{
+			Result += FVector::Dist(Points[Index-1], Points[Index]);
+		}
+		return Result;
+	}
+
+	void AddDedicatedApproach(FTrafficLayout& Layout, uint32 SourceId)
+	{
+		const int32 SourceIndex = Layout.Lanes.IndexOfByPredicate(
+			[SourceId](const FTrafficLane& Lane) { return Lane.Id == SourceId; });
+		check(SourceIndex != INDEX_NONE);
+		const TArray<FVector> Prior = Layout.Lanes[SourceIndex].PointsEnuM;
+		const FVector Travel = (Prior.Last() - Prior[0]).GetSafeNormal2D();
+		const FVector Stop = Prior.Last() - Travel * 8.0;
+		TArray<FVector> Original;
+		// Controlled endpoints must precede the outer crosswalk, not sit inside
+		// the widened perpendicular carriageway. Connectors inherit this move below.
+		Straight(Original, FVector2D(Prior[0].X, Prior[0].Y), FVector2D(Stop.X, Stop.Y));
+		const TArray<uint32> Movements = Layout.Lanes[SourceIndex].Successors;
+		check(Movements.Num() == 3);
+		FTrafficLane Center = Layout.Lanes[SourceIndex];
+		Center.PointsEnuM = Original;
+		FTrafficLane Left = Center, RightLane = Center;
+		Left.Id = SourceId == 1034 ? 2035 : SourceId + 5;
+		RightLane.Id = SourceId == 1034 ? 2036 : SourceId + 6;
+		Center.WidthM = Left.WidthM = RightLane.WidthM = 3.2;
+		Center.Successors = {Movements[0]};
+		Left.Successors = {Movements[2]};
+		RightLane.Successors = {Movements[1]};
+		const double Length = FVector::Dist2D(Original[0], Original.Last());
+		const FVector Forward = (Original.Last() - Original[0]).GetSafeNormal2D();
+		const FVector Right(Forward.Y, -Forward.X, 0.0);
+		int32 BeginIndex = 0;
+		int32 EndIndex = Original.Num()-1;
+		for (int32 Index = 0; Index < Original.Num(); ++Index)
+		{
+			const double Progress = FVector::Dist2D(Original[0], Original[Index]);
+			// One bounded entry fan preserves the existing collector join. At the
+			// stop line all three centers stay distinct; each has its own legal
+			// movement, not three arrows over one merged centerline.
+			const double T = FMath::Clamp(Progress / 10.0, 0.0, 1.0);
+			const double Blend = T*T*T*(10.0 + T*(-15.0 + 6.0*T));
+			Center.PointsEnuM[Index] = Original[Index] + Right * (3.0 * Blend);
+			Left.PointsEnuM[Index] = Original[Index] - Right * (0.3 * Blend);
+			RightLane.PointsEnuM[Index] = Original[Index] + Right * (6.3 * Blend);
+			if (Progress <= 14.0 + 1.e-6) { BeginIndex = Index; }
+			if (Progress <= Length - 8.0 + 1.e-6) { EndIndex = Index; }
+		}
+		for (FTrafficLane* Neighbor : {&Left, &RightLane})
+		{
+			const double Begin = ArcLength(Center.PointsEnuM, BeginIndex), End = ArcLength(Center.PointsEnuM, EndIndex);
+			const double OtherBegin = ArcLength(Neighbor->PointsEnuM, BeginIndex), OtherEnd = ArcLength(Neighbor->PointsEnuM, EndIndex);
+			Center.LaneChanges.Add({Neighbor->Id, Begin, End, OtherBegin, OtherEnd});
+			Neighbor->LaneChanges.Add({Center.Id, OtherBegin, OtherEnd, Begin, End});
+		}
+		// Every inbound predecessor can choose the left/straight/right lane at
+		// its common fan entrance. Mid-approach passing still requires adjacency.
+		for (FTrafficLane& Lane : Layout.Lanes)
+		{
+			if (Lane.Successors.Contains(SourceId)) { Lane.Successors.Add(Left.Id); Lane.Successors.Add(RightLane.Id); }
+		}
+		for (const FTrafficLane* Approach : {&Center, &Left, &RightLane})
+		{
+			FTrafficLane* Movement = Layout.Lanes.FindByPredicate(
+				[&](const FTrafficLane& Lane) { return Lane.Id == Approach->Successors[0]; });
+			check(Movement);
+			const FVector Delta = Approach->PointsEnuM.Last() - Movement->PointsEnuM[0];
+			for (int32 Index = 0; Index < Movement->PointsEnuM.Num(); ++Index)
+			{
+				const double T = static_cast<double>(Index) / (Movement->PointsEnuM.Num() - 1);
+				const double Blend = 1.0 - T*T*T*(10.0 + T*(-15.0 + 6.0*T));
+				Movement->PointsEnuM[Index] += Delta * Blend;
+			}
+		}
+		Layout.Lanes[SourceIndex] = MoveTemp(Center);
+		Layout.Lanes.Add(MoveTemp(Left));
+		Layout.Lanes.Add(MoveTemp(RightLane));
+	}
+
+	FVector SampleArc(const FTrafficLane& Lane, double Station, FVector* Tangent = nullptr)
+	{
+		for (int32 Index = 1; Index < Lane.PointsEnuM.Num(); ++Index)
+		{
+			const FVector A = Lane.PointsEnuM[Index-1];
+			const FVector B = Lane.PointsEnuM[Index];
+			const double Span = FVector::Dist(A, B);
+			if (Station <= Span || Index == Lane.PointsEnuM.Num()-1)
+			{
+				if (Tangent) { *Tangent = (B-A).GetSafeNormal2D(); }
+				return FMath::Lerp(A, B, FMath::Clamp(Station / Span, 0.0, 1.0));
+			}
+			Station -= Span;
+		}
+		return FVector::ZeroVector;
 	}
 
 	bool CheckChecksum(const FString& Checksum)
@@ -140,7 +272,7 @@ namespace
 FTrafficLayout BuildTrafficLayout()
 {
 	FTrafficLayout Result;
-	Result.Lanes.Reserve(44);
+	Result.Lanes.Reserve(58);
 	Result.Signals.Reserve(16);
 
 	// South intersection, east/west approaches and all permissive movements.
@@ -150,7 +282,7 @@ FTrafficLayout BuildTrafficLayout()
 	AddMovement(Result, 1013, {-10,38}, {0,38}, {2,40}, {2,50}, 1034);
 	AddStraight(Result, 1014, {10,38}, {105,38}, {3001});
 
-	AddStraight(Result, 1020, {105,42}, {10,42}, {1021,1022,1023}, 101);
+	AddStraight(Result, 1020, {105,42}, {10,42}, {1021,1022,1023}, 103);
 	AddStraight(Result, 1021, {10,42}, {-10,42}, {1024}, 0, 6.944444);
 	AddMovement(Result, 1022, {10,42}, {5,42}, {2,45}, {2,50}, 1034);
 	AddMovement(Result, 1023, {10,42}, {0,42}, {-2,40}, {-2,30}, 1044);
@@ -163,11 +295,11 @@ FTrafficLayout BuildTrafficLayout()
 	AddMovement(Result, 1033, {2,30}, {2,40}, {0,42}, {-10,42}, 1024);
 	AddStraight(Result, 1034, {2,50}, {2,110}, {2031,2032,2033}, 202);
 
-	AddStraight(Result, 2040, {-2,168}, {-2,130}, {2041,2042,2043}, 202);
+	AddStraight(Result, 2040, {-2,168}, {-2,130}, {2041,2042,2043}, 204);
 	AddStraight(Result, 2041, {-2,130}, {-2,110}, {1040}, 0, 6.944444);
 	AddMovement(Result, 2042, {-2,130}, {-2,125}, {-5,122}, {-10,122}, 2024);
 	AddMovement(Result, 2043, {-2,130}, {-2,120}, {0,118}, {10,118}, 2014);
-	AddStraight(Result, 1040, {-2,110}, {-2,50}, {1041,1042,1043}, 102);
+	AddStraight(Result, 1040, {-2,110}, {-2,50}, {1041,1042,1043}, 104);
 	AddStraight(Result, 1041, {-2,50}, {-2,30}, {1044}, 0, 6.944444);
 	AddMovement(Result, 1042, {-2,50}, {-2,45}, {-5,42}, {-10,42}, 1024);
 	AddMovement(Result, 1043, {-2,50}, {-2,40}, {0,38}, {10,38}, 1014);
@@ -180,7 +312,7 @@ FTrafficLayout BuildTrafficLayout()
 	AddMovement(Result, 2013, {-10,118}, {0,118}, {2,120}, {2,130}, 2034);
 	AddStraight(Result, 2014, {10,118}, {100,118}, {3003});
 
-	AddStraight(Result, 2020, {100,122}, {10,122}, {2021,2022,2023}, 201);
+	AddStraight(Result, 2020, {100,122}, {10,122}, {2021,2022,2023}, 203);
 	AddStraight(Result, 2021, {10,122}, {-10,122}, {2024}, 0, 6.944444);
 	AddMovement(Result, 2022, {10,122}, {5,122}, {2,125}, {2,130}, 2034);
 	AddMovement(Result, 2023, {10,122}, {0,122}, {-2,120}, {-2,110}, 1040);
@@ -195,50 +327,56 @@ FTrafficLayout BuildTrafficLayout()
 	// falling back to the old map's rectangular perimeter road.
 	const FVector2D EastA(105,40), EastB(112,68), EastC(110,101), EastD(100,120);
 	const FVector2D WestA(-105,40), WestB(-112,62), WestC(-108,101), WestD(-90,120);
-	AddCollector(Result, 3001, EastA, EastB, EastC, EastD, false, {105,38}, {100,122}, 2020);
-	AddCollector(Result, 3002, WestA, WestB, WestC, WestD, false, {-105,42}, {-90,118}, 2010);
-	AddCollector(Result, 3003, EastA, EastB, EastC, EastD, true, {100,118}, {105,42}, 1020);
-	AddCollector(Result, 3004, WestA, WestB, WestC, WestD, true, {-90,122}, {-105,38}, 1010);
+	AddCollector(Result, 3001, EastA, EastB, EastC, EastD, false, {105,38}, {100,122}, 2020, {1,0}, {-1,0});
+	AddCollector(Result, 3002, WestA, WestB, WestC, WestD, false, {-105,42}, {-90,118}, 2010, {-1,0}, {1,0});
+	AddCollector(Result, 3003, EastA, EastB, EastC, EastD, true, {100,118}, {105,42}, 1020, {1,0}, {-1,0});
+	AddCollector(Result, 3004, WestA, WestB, WestC, WestD, true, {-90,122}, {-105,38}, 1010, {-1,0}, {1,0});
+
+	for (uint32 Approach : {1010u, 1020u, 1030u, 1040u, 2010u, 2020u, 1034u, 2040u})
+	{
+		AddDedicatedApproach(Result, Approach);
+	}
 
 	Result.Signals = {
-		{1, 1, 101, FVector(-8,35,0), 90},
-		{2, 1, 101, FVector(8,45,0), 270},
-		{3, 1, 102, FVector(5,32,0), 0},
-		{4, 1, 102, FVector(-5,48,0), 180},
-		{5, 2, 201, FVector(-8,115,0), 90},
-		{6, 2, 201, FVector(8,125,0), 270},
-		{7, 2, 202, FVector(5,112,0), 0},
-		{8, 2, 202, FVector(-5,128,0), 180},
-		// Two opposing pedestrian heads define each crosswalk segment. The
-		// shared vehicle group is the parallel, non-conflicting WALK authority.
-		{101, 1, 101, FVector(-6,34,0), 90, ETrafficSignalKind::Pedestrian},
-		{102, 1, 101, FVector(6,34,0), 270, ETrafficSignalKind::Pedestrian},
-		{103, 1, 102, FVector(6,35,0), 0, ETrafficSignalKind::Pedestrian},
-		{104, 1, 102, FVector(6,45,0), 180, ETrafficSignalKind::Pedestrian},
-		{105, 2, 201, FVector(-6,114,0), 90, ETrafficSignalKind::Pedestrian},
-		{106, 2, 201, FVector(6,114,0), 270, ETrafficSignalKind::Pedestrian},
-		{107, 2, 202, FVector(6,115,0), 0, ETrafficSignalKind::Pedestrian},
-		{108, 2, 202, FVector(6,125,0), 180, ETrafficSignalKind::Pedestrian},
+		{1, 1, 101, FVector(-18,28.5,0), 90},
+		{2, 1, 103, FVector(18,51.5,0), 270},
+		{3, 1, 102, FVector(11.5,22,0), 0},
+		{4, 1, 104, FVector(-11.5,58,0), 180},
+		{5, 2, 201, FVector(-18,108.5,0), 90},
+		{6, 2, 203, FVector(18,131.5,0), 270},
+		{7, 2, 202, FVector(11.5,102,0), 0},
+		{8, 2, 204, FVector(-11.5,138,0), 180},
+		// All vehicle approaches are red during the exclusive WALK phase.
+		{101, 1, 105, FVector(-11.5,25,0), 90, ETrafficSignalKind::Pedestrian},
+		{102, 1, 105, FVector(11.5,25,0), 270, ETrafficSignalKind::Pedestrian},
+		{103, 1, 106, FVector(15,28.5,0), 0, ETrafficSignalKind::Pedestrian},
+		{104, 1, 106, FVector(15,51.5,0), 180, ETrafficSignalKind::Pedestrian},
+		{105, 2, 205, FVector(-11.5,105,0), 90, ETrafficSignalKind::Pedestrian},
+		{106, 2, 205, FVector(11.5,105,0), 270, ETrafficSignalKind::Pedestrian},
+		{107, 2, 206, FVector(15,108.5,0), 0, ETrafficSignalKind::Pedestrian},
+		{108, 2, 206, FVector(15,131.5,0), 180, ETrafficSignalKind::Pedestrian},
 	};
 
-	const auto MakePlan = [](uint32 Id, uint32 Offset, uint32 EastWest, uint32 NorthSouth)
+	const auto MakePlan = [](uint32 Id, uint32 Offset, uint32 Base)
 	{
 		FSignalPlan Plan;
 		Plan.Id = Id;
 		Plan.OffsetMs = Offset;
-		Plan.Groups = {EastWest, NorthSouth};
-		Plan.Phases = {
-			{2000, {}, {}},
-			{13000, {EastWest}, {}},
-			{3000, {}, {EastWest}},
-			{2000, {}, {}},
-			{11000, {NorthSouth}, {}},
-			{3000, {}, {NorthSouth}},
-			{2000, {}, {}},
-		};
+		Plan.Groups = {Base+1, Base+2, Base+3, Base+4, Base+5, Base+6};
+		Plan.Phases = {{2000, {}, {}}};
+		// Protected approach: left/straight/right of one incoming direction
+		// share green; opposing approaches and every pedestrian remain red.
+		for (uint32 Group : {Base+1, Base+3, Base+2, Base+4})
+		{
+			Plan.Phases.Add({9000, {Group}, {}});
+			Plan.Phases.Add({2000, {}, {Group}});
+			Plan.Phases.Add({1500, {}, {}});
+		}
+		Plan.Phases.Add({18000, {Base+5, Base+6}, {}});
+		Plan.Phases.Add({2000, {}, {}});
 		return Plan;
 	};
-	Result.SignalPlans = {MakePlan(1, 0, 101, 102), MakePlan(2, 9000, 201, 202)};
+	Result.SignalPlans = {MakePlan(1, 0, 100), MakePlan(2, 14000, 200)};
 
 	const FLayout Source = BuildLayout();
 	for (FTrafficLane& Lane : Result.Lanes)
@@ -392,6 +530,7 @@ bool ValidateTrafficLayout(const FTrafficLayout& Layout, FString& OutError)
 	}
 	for (const FTrafficLane& Lane : Layout.Lanes)
 	{
+		if (Lane.LaneChanges.Num() > 2) { return Fail(TEXT("Too many lane-change neighbors.")); }
 		TSet<uint32> Successors;
 		for (uint32 Id : Lane.Successors)
 		{
@@ -403,6 +542,68 @@ bool ValidateTrafficLayout(const FTrafficLayout& Layout, FString& OutError)
 				return Fail(FString::Printf(TEXT("Lane %u has invalid successor %u."), Lane.Id, Id));
 			}
 			Successors.Add(Id);
+		}
+		TSet<uint32> ChangeTargets;
+		for (const FTrafficLaneChange& Change : Lane.LaneChanges)
+		{
+			const FTrafficLane* const* Found = Lanes.Find(Change.TargetLaneId);
+			if (!Found || Change.TargetLaneId == Lane.Id || ChangeTargets.Contains(Change.TargetLaneId))
+			{
+				return Fail(TEXT("Invalid or duplicate lane-change neighbor."));
+			}
+			ChangeTargets.Add(Change.TargetLaneId);
+			const FTrafficLane& Target = **Found;
+			const FTrafficLaneChange* Reciprocal = Target.LaneChanges.FindByPredicate(
+				[&](const auto& Other) { return Other.TargetLaneId == Lane.Id; });
+			const double Span = Change.SourceEndM - Change.SourceBeginM;
+			const double TargetSpan = Change.TargetEndM - Change.TargetBeginM;
+			if (!FMath::IsFinite(Change.SourceBeginM) || !FMath::IsFinite(Change.SourceEndM)
+				|| !FMath::IsFinite(Change.TargetBeginM) || !FMath::IsFinite(Change.TargetEndM)
+				|| !Reciprocal || FMath::Abs(Change.SourceBeginM - Reciprocal->TargetBeginM) > 1.e-4
+				|| FMath::Abs(Change.SourceEndM - Reciprocal->TargetEndM) > 1.e-4
+				|| FMath::Abs(Change.TargetBeginM - Reciprocal->SourceBeginM) > 1.e-4
+				|| FMath::Abs(Change.TargetEndM - Reciprocal->SourceEndM) > 1.e-4
+				|| Change.SourceBeginM < 5.0 || Change.TargetBeginM < 5.0 || Span < 8 || TargetSpan < 8
+				|| Change.SourceEndM > ArcLength(Lane.PointsEnuM)-5.0
+				|| Change.TargetEndM > ArcLength(Target.PointsEnuM)-5.0
+				|| FMath::Abs(Span-TargetSpan) > 0.5 || Lane.SignalGroupId != Target.SignalGroupId)
+			{
+				return Fail(TEXT("Lane-change windows must be reciprocal and clear of junctions."));
+			}
+			const int32 Steps = FMath::CeilToInt(Span);
+			double SideSign = 0.0;
+			GroundSamples += (Steps + 1) * 5;
+			if (GroundSamples > 100000) { return Fail(TEXT("Traffic ground-query budget exceeded.")); }
+			for (int32 Step = 0; Step <= Steps; ++Step)
+			{
+				const double T = static_cast<double>(Step) / Steps;
+				FVector Tangent, OtherTangent;
+				const FVector A = SampleArc(Lane, Change.SourceBeginM + Span*T, &Tangent);
+				const FVector B = SampleArc(Target, Change.TargetBeginM + TargetSpan*T, &OtherTangent);
+				const FVector Across = B-A;
+				const double Side = Tangent.X*Across.Y - Tangent.Y*Across.X;
+				const double Distance = Across.Size2D();
+				const double Expected = (Lane.WidthM + Target.WidthM) * 0.5;
+				if (FVector::DotProduct(Tangent, OtherTangent) < 0.9848
+					|| FMath::Abs(FVector::DotProduct(Across, Tangent)) > 0.5
+					|| FMath::Abs(Across.Z) > 0.1 || Distance < Expected-0.1
+					|| Distance > Expected+0.75 || (SideSign != 0 && SideSign*Side <= 0))
+				{
+					return Fail(TEXT("Lane-change windows must be adjacent, parallel and same-direction."));
+				}
+				SideSign = Side;
+				const FVector Right(Tangent.Y, -Tangent.X, 0.0);
+				const double Width = Distance + FMath::Max(Lane.WidthM, Target.WidthM);
+				for (double Fraction : {-0.5, -0.25, 0.0, 0.25, 0.5})
+				{
+					const FVector Test = (A+B)*0.5 + Right*(Width*Fraction);
+					double Height;
+					if (!GroundTop(Source, Test, true, Height) || FMath::Abs(Height-Test.Z) > 0.08)
+					{
+						return Fail(TEXT("Lane-change corridor leaves authored asphalt."));
+					}
+				}
+			}
 		}
 		if (Lane.SignalGroupId)
 		{
@@ -417,6 +618,7 @@ bool ValidateTrafficLayout(const FTrafficLayout& Layout, FString& OutError)
 	}
 	for (const FTrafficSignal& Signal : Layout.Signals)
 	{
+		if (Signal.Kind == ETrafficSignalKind::Pedestrian) { continue; }
 		const bool bHasStopline = Layout.Lanes.ContainsByPredicate([&](const FTrafficLane& Lane)
 		{
 			return Lane.SignalGroupId == Signal.GroupId
@@ -476,6 +678,22 @@ bool SerializeTrafficLayout(const FTrafficLayout& Layout, const FString& SourceM
 		for (const FVector& Position : Lane.PointsEnuM) { Vector(Position); }
 		Writer->WriteArrayEnd();
 		SortedIds(TEXT("successors"), Lane.Successors);
+		if (!Lane.LaneChanges.IsEmpty())
+		{
+			Lane.LaneChanges.Sort([](const auto& A, const auto& B) { return A.TargetLaneId < B.TargetLaneId; });
+			Writer->WriteArrayStart(TEXT("lane_changes"));
+			for (const FTrafficLaneChange& Change : Lane.LaneChanges)
+			{
+				Writer->WriteObjectStart();
+				Writer->WriteValue(TEXT("target_lane_id"), Change.TargetLaneId);
+				Writer->WriteValue(TEXT("source_begin_m"), Change.SourceBeginM);
+				Writer->WriteValue(TEXT("source_end_m"), Change.SourceEndM);
+				Writer->WriteValue(TEXT("target_begin_m"), Change.TargetBeginM);
+				Writer->WriteValue(TEXT("target_end_m"), Change.TargetEndM);
+				Writer->WriteObjectEnd();
+			}
+			Writer->WriteArrayEnd();
+		}
 		Writer->WriteObjectEnd();
 	}
 	Writer->WriteArrayEnd();

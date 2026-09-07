@@ -27,7 +27,7 @@ $exitCode = Invoke-SimCoreServerLauncher `
     -RequiredPaths $requiredPaths `
     -ServerArguments $serverArguments `
     -LogPrefix 'simcore-signal-city' `
-    -SpawnDescription 'central avenue ENU (0,0), heading north. Two controllers, 4 NPCs, and 8 pedestrians are server-authoritative.' `
+    -SpawnDescription 'central avenue ENU (0,0), heading north. Two controllers, 10 NPCs, and 8 pedestrians are server-authoritative.' `
     -Background:$Background
 if (-not $Background) {
     exit $exitCode

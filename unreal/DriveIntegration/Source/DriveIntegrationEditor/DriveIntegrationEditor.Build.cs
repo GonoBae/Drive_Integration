@@ -12,7 +12,7 @@ public class DriveIntegrationEditor : ModuleRules
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
 			"Core", "CoreUObject", "Engine", "UnrealEd", "AssetRegistry", "InputCore",
-			"MaterialEditor", "MeshDescription", "StaticMeshDescription", "DriveIntegration"
+			"MaterialEditor", "MeshDescription", "StaticMeshDescription", "DriveIntegration", "RenderCore", "RHI"
 		});
 	}
 }

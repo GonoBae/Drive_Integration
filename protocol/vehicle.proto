@@ -23,6 +23,16 @@ enum EntityKind {
     ENTITY_KIND_PEDESTRIAN = 3;
 }
 
+// Stable runtime vehicle shape/dynamics identity. NPCs publish this so the
+// client selects a matching model instead of guessing from entity_id.
+enum RuntimeVehicleClass {
+    RUNTIME_VEHICLE_CLASS_UNSPECIFIED = 0;
+    RUNTIME_VEHICLE_CLASS_SEDAN = 1;
+    RUNTIME_VEHICLE_CLASS_COMPACT = 2;
+    RUNTIME_VEHICLE_CLASS_TRUCK = 3;
+    RUNTIME_VEHICLE_CLASS_MOTORCYCLE = 4;
+}
+
 enum VehicleDamageZone {
     VEHICLE_DAMAGE_ZONE_NONE = 0;
     VEHICLE_DAMAGE_ZONE_FRONT = 1;
@@ -54,6 +64,31 @@ message WheelState {
 }
 
 // 단일 엔티티 상태 (CIGI Entity State Packet 기반)
+enum RuntimeRecoveryPhase {
+    RUNTIME_RECOVERY_DRIVING = 0;
+    RUNTIME_RECOVERY_SETTLING = 1;
+    RUNTIME_RECOVERY_HOLDING = 2;
+    RUNTIME_RECOVERY_RECOVERING = 3;
+    RUNTIME_RECOVERY_DISABLED = 4;
+}
+
+enum TurnIndicator {
+    TURN_INDICATOR_OFF = 0;
+    TURN_INDICATOR_LEFT = 1;
+    TURN_INDICATOR_RIGHT = 2;
+}
+
+// Contact-local cosmetic crush patches; bounded to 16 and retained until reset.
+// Normalized shell coordinates and inward unit direction use body FLU XY.
+message VehicleDentPatch {
+    float forward = 1;
+    float left = 2;
+    float inward_forward = 3;
+    float inward_left = 4;
+    float radius_m = 5;
+    float depth_m = 6;
+}
+
 message EntityState {
     uint32 entity_id = 1;   // 엔티티 고유 ID
     double timestamp = 2;   // Unix timestamp (seconds)
@@ -96,11 +131,22 @@ message EntityState {
     float collision_half_height = 26;
     float collision_radius = 27;
     // Additive authoritative crash state. Damage is cumulative until reset;
-    // event_sequence changes only for a newly accepted damaging impact.
+    // Ego events denote damage; runtime events also include weaker accepted
+    // body impacts, so a pedestrian can lose balance before permanent damage.
     float damage_percent = 28;
     float last_impact_impulse_n_s = 29;
     VehicleDamageZone damage_zone = 30;
     uint32 collision_event_sequence = 31;
+    RuntimeRecoveryPhase runtime_recovery_phase = 32;
+    Vector3d impact_direction_enu = 33; // unit direction of force received by this runtime body; zero before impact
+    bool pedestrian_downed = 34; // body/pelvis is no longer an upright walking capsule
+    bool pedestrian_airborne = 35; // downed can also be airborne; position/velocity are authoritative
+    TurnIndicator turn_indicator = 36;
+    repeated VehicleDentPatch dent_patches = 37;
+    // NPC-only monotonic event sequence for one short horn pulse. Zero means
+    // that no horn event has occurred in the current Play lifecycle.
+    uint32 horn_event_sequence = 38;
+    RuntimeVehicleClass runtime_vehicle_class = 39;
 }
 
 // 여러 엔티티를 한 패킷에 담을 때 사용
@@ -136,6 +182,34 @@ message TrafficSignalState {
     // Additive presentation/control role. Omitted legacy snapshots are treated
     // as vehicle heads by schema-v2 clients.
     TrafficSignalKind signal_kind = 8;
+    // Broken heads are dark in presentation, but retain authoritative RED.
+    bool out_of_service = 9;
+}
+
+enum StructureKind {
+    STRUCTURE_KIND_UNSPECIFIED = 0;
+    STRUCTURE_KIND_BUILDING = 1;
+    STRUCTURE_KIND_SIGNAL_POLE = 2;
+}
+
+// Additive authoritative damage. Only damaged structures are published;
+// a new play/reset returns to the undamaged map-authored state.
+message StructureState {
+    string collider_id = 1;
+    StructureKind kind = 2;
+    uint32 signal_id = 3;
+    float damage_percent = 4;
+    uint32 event_sequence = 5;
+    Vector3d impact_point_enu = 6;
+    Vector3d impact_normal_enu = 7;
+    Vector3d base_position_enu = 8;
+    double heading_rad = 9;
+    float fall_angle_rad = 10;
+    Vector3d fall_direction_enu = 11;
+    bool disabled = 12;
+    float impact_half_width_m = 13; // contact footprint along the facade; zero for legacy snapshots
+    float impact_half_height_m = 14;
+    float impact_severity = 15; // current event, 0..1; not cumulative building damage
 }
 
 message WorldState {
@@ -147,6 +221,7 @@ message WorldState {
     // Optional traffic-signals.v1; shares pose/health sequence and lifecycle.
     repeated TrafficSignalState traffic_signals = 3;
     string traffic_network_checksum = 4;
+    repeated StructureState structures = 5;
 }
 
 message ControlCommand {
@@ -185,6 +260,9 @@ message Health {
 message SimulationReset {
     string play_session_id = 1;
     uint64 client_time_ns = 2;
+    // Additive authoritative Ego selection. UNSPECIFIED preserves legacy
+    // clients and resolves to the configured sedan profile.
+    RuntimeVehicleClass requested_vehicle_class = 3;
 }
 
 message Envelope {

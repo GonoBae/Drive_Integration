@@ -23,7 +23,7 @@ namespace {
 constexpr double kRadians = std::numbers::pi_v<double> / 180.0;
 constexpr double kDt = 1.0 / 60.0;
 constexpr char kExpectedCollisionChecksum[] =
-    "fnv1a64:7446108adad3e25b";
+    "fnv1a64:86c3103f3e2c7a5b";
 
 void require(bool condition, const std::string& message)
 {
@@ -391,9 +391,14 @@ void test_representative_24cm_curb_climb(
     const auto& curb = *found;
     require(curb.semantic == simcore_host::StaticColliderSemantic::Curb,
             "CentralSouth_Curb_R must retain Curb semantics");
-    require(std::abs(curb.shape.center_enu.east_m - 5.15) < 0.01
+    // The dedicated-turn approaches widened this road from 10 m to 20 m;
+    // preserve the same 30 cm curb on the new road edge, not the old lane edge.
+    constexpr double road_half_width_m = 10.0;
+    require(std::abs(curb.shape.center_enu.east_m
+                    - (road_half_width_m + 0.15)) < 0.01
                 && std::abs(curb.shape.center_enu.north_m - 8.50) < 0.01
                 && std::abs(curb.shape.heading_rad) < 0.001
+                && std::abs(curb.shape.half_width_m * 2.0 - 0.30) < 0.01
                 && std::abs(curb.shape.half_height_m * 2.0 - 0.24) < 0.01,
             "CentralSouth_Curb_R must retain its authored 24 cm geometry");
 

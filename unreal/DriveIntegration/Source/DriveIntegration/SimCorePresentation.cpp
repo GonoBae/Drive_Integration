@@ -270,7 +270,8 @@ bool BuildRuntimeEntitySample(
 		State.AngularVelocityBody,
 		PredictionSeconds);
 
-	if (State.EntityKind == SimCoreProtocol::EEntityKind::NpcVehicle)
+	if (State.EntityKind == SimCoreProtocol::EEntityKind::NpcVehicle
+		|| (State.EntityKind == SimCoreProtocol::EEntityKind::Pedestrian && State.bPedestrianDowned))
 	{
 		OutSample.ActorScale = FVector(
 			State.CollisionHalfLengthMeters * 2.0f,

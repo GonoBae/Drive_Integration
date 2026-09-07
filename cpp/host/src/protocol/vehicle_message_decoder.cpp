@@ -106,6 +106,15 @@ std::optional<ParsedClientMessage> parse_client_message_envelope(
         parsed.session_id = envelope.session_id();
         parsed.map_package_checksum = envelope.map_package_checksum();
         parsed.play_session_id = reset.play_session_id();
+        const auto requested_class = static_cast<unsigned>(
+            reset.requested_vehicle_class());
+        if (requested_class
+            > static_cast<unsigned>(RuntimeVehicleClass::Motorcycle)) {
+            set_error(error, "SimulationReset has an invalid requested vehicle class");
+            return std::nullopt;
+        }
+        parsed.requested_vehicle_class =
+            static_cast<RuntimeVehicleClass>(requested_class);
         return ParsedClientMessage{std::move(parsed)};
     }
 

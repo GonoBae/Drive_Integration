@@ -29,11 +29,33 @@ SimCoreTrafficSignals::FDisplayState SimCoreTrafficSignals::EvaluateDisplay(
 	Display.Aspect = Signal.Aspect;
 	Display.Kind = Signal.Kind;
 	Display.bVerified = true;
+	Display.bOutOfService = Signal.bOutOfService;
 	Display.RemainingSeconds = Signal.RemainingSeconds;
-	Display.bRed = Signal.Aspect == SimCoreProtocol::ETrafficSignalAspect::Red;
-	Display.bYellow = Signal.Aspect == SimCoreProtocol::ETrafficSignalAspect::Yellow;
-	Display.bGreen = Signal.Aspect == SimCoreProtocol::ETrafficSignalAspect::Green;
+	Display.bRed = !Display.bOutOfService && Signal.Aspect == SimCoreProtocol::ETrafficSignalAspect::Red;
+	Display.bYellow = !Display.bOutOfService && Signal.Aspect == SimCoreProtocol::ETrafficSignalAspect::Yellow;
+	Display.bGreen = !Display.bOutOfService && Signal.Aspect == SimCoreProtocol::ETrafficSignalAspect::Green;
 	return Display;
+}
+
+FTransform SimCoreTrafficSignals::BuildDamagedPoleTransform(
+	const SimCoreProtocol::FStructureState& Structure, const FVector& PresentationOffsetCm)
+{
+	if (!SimCoreProtocol::IsValidStructureState(Structure)
+		|| Structure.Kind != SimCoreProtocol::EStructureKind::SignalPole || PresentationOffsetCm.ContainsNaN())
+	{
+		return FTransform::Identity;
+	}
+	const double Angle = FMath::Clamp(double(Structure.FallAngleRadians), 0.0, UE_DOUBLE_PI / 2.0);
+	FVector Direction(SimCoreCoordinateFrames::MapEnuPolarVectorToUnrealWorld(Structure.FallDirectionEnu));
+	Direction.Z = 0.0;
+	Direction = Direction.GetSafeNormal();
+	const FVector Up = FVector::UpVector * FMath::Cos(Angle) + Direction * FMath::Sin(Angle);
+	const FQuat Tilt = FQuat::FindBetweenNormals(FVector::UpVector, Up.GetSafeNormal());
+	const FQuat Heading(FRotator(0.0, FMath::RadiansToDegrees(Structure.HeadingRadians), 0.0));
+	// The server uses this same half-width lift to keep the fallen collision hull above ground.
+	const FVector Base = SimCoreCoordinateFrames::MapEnuPositionMetersToUnrealCentimeters(
+		Structure.BasePositionEnu, PresentationOffsetCm) + FVector(0, 0, 25.0 * FMath::Sin(Angle));
+	return FTransform(Tilt * Heading, Base);
 }
 
 FTransform SimCoreTrafficSignals::BuildPoleTransform(
@@ -144,11 +166,34 @@ void ASimCoreTrafficSignalActor::ApplyAuthoritativeSignal(
 	{
 		SignalId = Signal.SignalId;
 		GroupId = Signal.GroupId;
-		SetActorTransform(SimCoreTrafficSignals::BuildPoleTransform(Signal, PresentationOffsetCm));
+		// A stale lamp update must never stand an already fallen pole back up.
+		if (!bHasStructureDamage)
+		{
+			SetActorTransform(SimCoreTrafficSignals::BuildPoleTransform(Signal, PresentationOffsetCm));
+		}
 	}
 	Display = SimCoreTrafficSignals::EvaluateDisplay(
 		Signal, bNetworkReady && bGameWorld && bValidGeometry, bAcceptedSnapshot, SnapshotAgeSeconds);
+	if (Display.bVerified && Display.bOutOfService) bBroken = true;
 	ApplyDisplay();
+}
+
+void ASimCoreTrafficSignalActor::ApplyStructureDamage(
+	const SimCoreProtocol::FStructureState& Structure, const FVector& PresentationOffsetCm)
+{
+	if (!GetWorld() || !GetWorld()->IsGameWorld() || !SimCoreProtocol::IsValidStructureState(Structure)
+		|| Structure.Kind != SimCoreProtocol::EStructureKind::SignalPole
+		|| Structure.SignalId != SignalId || PresentationOffsetCm.ContainsNaN()) return;
+	bHasStructureDamage = true;
+	bBroken = bBroken || Structure.bDisabled;
+	SetActorTransform(SimCoreTrafficSignals::BuildDamagedPoleTransform(Structure, PresentationOffsetCm));
+	ApplyDisplay();
+}
+
+void ASimCoreTrafficSignalActor::ClearStructureDamage()
+{
+	bHasStructureDamage = false;
+	bBroken = false;
 }
 
 void ASimCoreTrafficSignalActor::SetFailSafe()
@@ -164,6 +209,7 @@ UStaticMeshComponent* ASimCoreTrafficSignalActor::GetLamp(int32 Index) const
 
 FString ASimCoreTrafficSignalActor::GetStatusText() const
 {
+	if (Display.bOutOfService) return FString::Printf(TEXT("S%u/G%u BROKEN"), SignalId, GroupId);
 	if (!Display.bVerified)
 	{
 		return Display.IsPedestrian()
@@ -176,11 +222,16 @@ FString ASimCoreTrafficSignalActor::GetStatusText() const
 			Display.bGreen ? TEXT("WALK") : TEXT("DON'T WALK"), Display.RemainingSeconds);
 	}
 	const TCHAR* Aspect = Display.bGreen ? TEXT("GREEN") : Display.bYellow ? TEXT("YELLOW") : TEXT("RED");
-	return FString::Printf(TEXT("S%u/G%u %s %.1fs"), SignalId, GroupId, Aspect, Display.RemainingSeconds);
+	return FString::Printf(TEXT("S%u/G%u %s %.1fs\nL / S / R"), SignalId, GroupId, Aspect, Display.RemainingSeconds);
 }
 
 void ASimCoreTrafficSignalActor::ApplyDisplay()
 {
+	if (bBroken)
+	{
+		Display.bOutOfService = true;
+		Display.bRed = Display.bYellow = Display.bGreen = false;
+	}
 	InitializeMaterials();
 	const FLinearColor Colors[] = {FLinearColor(1.0f, 0.01f, 0.005f),
 		FLinearColor(1.0f, 0.64f, 0.005f), FLinearColor(0.005f, 1.0f, 0.025f)};

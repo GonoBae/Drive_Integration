@@ -54,6 +54,17 @@ RuntimeOptions make_runtime_option_defaults(
 
 void validate_runtime_options(const RuntimeOptions& options)
 {
+    if (options.record_physics_path && options.verify_physics_replay_path) {
+        throw std::invalid_argument("record-physics and verify-physics-replay are mutually exclusive");
+    }
+    if (options.record_ticks && (!options.record_physics_path
+        || *options.record_ticks == 0 || *options.record_ticks > 216'000)) {
+        throw std::invalid_argument("record-ticks requires record-physics and a count in [1,216000]");
+    }
+    if ((options.record_physics_path && options.record_physics_path->empty())
+        || (options.verify_physics_replay_path && options.verify_physics_replay_path->empty())) {
+        throw std::invalid_argument("physics replay paths must not be empty");
+    }
     if (!options.npc_route.empty() && !options.traffic_network_path) {
         throw std::invalid_argument("npc_route requires traffic_network");
     }
@@ -189,6 +200,9 @@ std::string runtime_options_help(const RuntimeOptions& defaults)
         << "Configuration precedence: built-in defaults < --runtime-config cfg < CLI.\n"
         << "A runtime cfg requires its base keys; traffic/NPC keys are optional. Unknown/duplicate keys fail.\n\n"
         << "  --runtime-config PATH           Load strict runtime cfg first\n"
+        << "  --record-physics PATH           Record applied Ego physics input; new file only\n"
+        << "  --record-ticks COUNT            Stop server after [1,216000] ticks (default 3600)\n"
+        << "  --verify-physics-replay PATH    Offline verify same build/cfg/map/spawn, no server\n"
         << "  --vehicle-config PATH           Vehicle cfg (default: "
         << defaults.vehicle_config_path.string() << ")\n"
         << "  --map-package DIRECTORY         MapPackage (default: "
@@ -197,6 +211,7 @@ std::string runtime_options_help(const RuntimeOptions& defaults)
         << "  --npc-route IDS|none            Primary NPC route, comma-separated lane IDs (default off)\n"
         << "  --npc-alternate-route IDS|none  Optional second route, alternated by entity ID\n"
         << "  --npc-loop true|false           Repeat a connected closed route (default false)\n"
+        << "  --npc-autonomous true|false     Select destinations, detour and change authored lanes\n"
         << "  --npc-start-offset M            Start distance on the first route lane\n"
         << "  --npc-max-speed MPS             NPC cruise limit (0,25], default 6 m/s\n"
         << "  --npc-count COUNT               Lane NPCs [1,16], default 1\n"

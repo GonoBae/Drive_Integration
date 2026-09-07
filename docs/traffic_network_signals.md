@@ -2,14 +2,15 @@
 
 ## 범위와 현재 상태
 
-- 기준일: 2026-08-31, 다중 controller 확장 2026-09-02. 이 문서는 구현 계약과 검증 절차를 기록한다. 실행 시험의 통과 여부와 실제 사용자 인수 결과는 작업일지에 별도로 기록한다.
+- 기준일: 2026-08-31, 다중 controller 확장 2026-09-02, NPC 내비게이션 확장 2026-09-03. 이 문서는 구현 계약과 검증 절차를 기록한다. 실행 시험의 통과 여부와 실제 사용자 인수 결과는 작업일지에 별도로 기록한다.
 - `virtual_city_v1`의 현재 범위는 **25개 방향성 lane segment, 신호 head 3개·phase group 2개, 30초 신호 상태기계와 Unreal 표시**다.
-- `signal_city_v2`는 별도 맵·MapPackage와 traffic format version 2를 사용해 42개 lane,
-  8개 runtime head와 두 교차로 controller의 phase plan·offset을 data-driven으로 확장한다.
-  2026-09-02 재생성·exact validation 기준이며, 기존 v1의 생성물·고정 주기·호환 동작을
+- `signal_city_v2`는 별도 맵·MapPackage와 traffic format version 2를 사용해 현재 58개 lane,
+  차량8+보행8 runtime head와 두 교차로 controller의 phase plan·offset을 data-driven으로 확장한다.
+  9/3에는 저장 맵·ground를 백업 후 갱신하고 8개 접근부에 좌/직/우 전용 3차로와 실제
+  인접 변경 구간을 추가했다. 기존 v1의 생성물·고정 주기·호환 동작을
   바꾸지 않는다. 실행 순서는 [signal city 빠른 시작](./signal_city_quickstart.md)을 따른다.
 - `drive_route.csv`는 차량 물리 완주를 확인하는 QA 경로다. 이번 `traffic_network.json`은 별도로 작성한 차선·교차로 연결 데이터이며 두 파일을 같은 기능으로 취급하지 않는다.
-- 후속으로 **NPC 1대의 차선 추종·신호 정지/재출발·전방 장애물 정지**를 추가했다([NPC 계약](./npc_lane_following.md)). NPC 3~4대와 보행자 6~8명·전체 TrafficDirector는 아직 완료가 아니다. 기존 opt-in 고정 demo entity와 구분한다.
+- v1 NPC 1대 기반을 보존하고 Signal City는 NPC10대·보행자8명으로 확장했다. NPC 목적지 선택·우회·차선 변경의 현재 범위는 [NPC 내비게이션](./npc_navigation.md), 최초 단일 NPC 이력은 [NPC 기반](./npc_lane_following.md)을 따른다. 최종 사용자 인수·전체 TrafficDirector 완료를 의미하지 않는다.
 - 플레이어 차량은 계속 사용자가 조작한다. **적색 신호에 Ego 차량을 자동 제동하거나 신호 위반을 강제로 막지 않는다.** 신호가 바뀌는 것과 차량 AI가 신호를 준수하는 것은 별도 구현이다.
 
 ## 책임 분리
@@ -79,7 +80,9 @@ group은 해당 phase에서 적색이다. server simulation clock에 plan offset
   Unreal parser는 finite `remaining_seconds`를 `0..3600`초에서만 허용한다. v1 generator의
   실제 countdown은 기존 30초 주기 안의 값으로 계속 제한되며 v1 주기를 늘린 것이 아니다.
 - controller마다 cycle과 offset을 독립 계산하므로 서로 다른 controller는 동시에 녹색일 수
-  있다. 같은 controller 안에서 서로 다른 group이 동시에 녹색/황색이면 fail-closed다.
+  있다. 같은 controller 안에서 서로 다른 group이 동시에 녹색/황색일 때 차량 group이
+  하나라도 섞이면 fail-closed다. 모든 permissive group이 보행자 전용인 전체 WALK만
+  예외로 허용하며, 그동안 모든 차량 접근 신호는 적색이어야 한다.
 - Protobuf `TrafficSignalState.controller_id`는 additive field 7이다. 기존 v1 snapshot 또는
   해당 field가 없는 legacy wire 값은 controller 1로 해석한다. 이 추가만으로 Hello schema나
   capability 문자열을 변경하지 않는다.

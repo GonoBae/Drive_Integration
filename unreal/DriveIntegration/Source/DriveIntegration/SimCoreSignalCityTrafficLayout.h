@@ -11,6 +11,15 @@ namespace SimCoreSignalCity
 		Pedestrian,
 	};
 
+	struct FTrafficLaneChange
+	{
+		uint32 TargetLaneId = 0;
+		double SourceBeginM = 0.0;
+		double SourceEndM = 0.0;
+		double TargetBeginM = 0.0;
+		double TargetEndM = 0.0;
+	};
+
 	struct FTrafficLane
 	{
 		uint32 Id = 0;
@@ -21,6 +30,8 @@ namespace SimCoreSignalCity
 		bool bTerminal = false;
 		TArray<FVector> PointsEnuM;
 		TArray<uint32> Successors;
+		// Optional v2 extension. Arc-length windows exclude intersection/merge fans.
+		TArray<FTrafficLaneChange> LaneChanges;
 	};
 
 	struct FTrafficSignal
