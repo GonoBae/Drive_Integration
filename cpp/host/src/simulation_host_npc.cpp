@@ -1,6 +1,5 @@
 #include "simulation_host.hpp"
-#include "collision/vehicle_dent.hpp"
-#include "traffic/npc_return_curve.hpp"
+#include "player_vehicle_profile.hpp"
 
 #include <algorithm>
 #include <array>
@@ -21,15 +20,14 @@ constexpr double kPedestrianRadiusM = 0.35;
 constexpr double kPedestrianHalfHeightM = 0.9;
 // Keep waiting/crossing capsules clear of their signal pole and of the
 // opposing pedestrian track: 0.35m body radius + 0.14m pole half-width plus
-// separation margin. The previous 0.45m began in real overlap.
+// separation margin.
 constexpr double kPedestrianLaneOffsetM = 0.60;
 constexpr double kPedestrianMassKg = 80.0;
 constexpr double kPedestrianMaximumReactionSpeedMps = 60.0;
-constexpr double kReactionVelocityDampingPerSecond = 2.5;
 constexpr double kNpcNavigationDecisionPeriodS = 0.25;
 constexpr double kNpcOvertakeDecisionDelayS = 0.75;
-constexpr double kNpcEscapeRequiredForwardRoomM = 12.0;
 constexpr double kNpcEscapeMaximumRetreatM = 6.0;
+constexpr double kNpcPedestrianEscapeMaximumRetreatM = 16.0;
 constexpr double kNpcEscapeRearReserveM = 1.0;
 constexpr double kNpcEscapeMaximumReverseSpeedMps = 1.4;
 constexpr double kNpcEscapeReverseAccelerationMps2 = 1.0;
@@ -59,48 +57,6 @@ constexpr std::array<NpcVehicleProfileDefinition, 4> kNpcVehicleProfiles{{
     {"motorcycle", 1.10, 0.42, 0.68,  240.0,   210.0, 36.0, 1.12, 2.30, 4.00, 0.38},
 }};
 
-template <class Reaction>
-void reset_vehicle_return_path(Reaction& reaction)
-{
-    reaction.vehicle_return_path_initialized = false;
-    reaction.vehicle_return_direction = 0;
-    reaction.vehicle_return_progress = 0.0;
-    reaction.vehicle_return_p0 = {};
-    reaction.vehicle_return_p1 = {};
-    reaction.vehicle_return_p2 = {};
-}
-
-double estimate_return_curve_length(const simcore_host::CollisionVector2& p0,
-    const simcore_host::CollisionVector2& p1,
-    const simcore_host::CollisionVector2& p2, double begin = 0.0)
-{
-    const simcore_host::NpcReturnCurvePlan curve{p0, p1, p2, 1, true};
-    constexpr int samples = 32;
-    auto previous = simcore_host::npc_return_curve_point(curve, begin);
-    double length = 0.0;
-    for (int index = 1; index <= samples; ++index) {
-        const double t = begin + (1.0 - begin) * index / samples;
-        const auto point = simcore_host::npc_return_curve_point(curve, t);
-        length += std::hypot(point.east_m - previous.east_m,
-            point.north_m - previous.north_m);
-        previous = point;
-    }
-    return length;
-}
-
-const char* impact_phase_name(simcore_host::ImpactRecoveryPhase phase)
-{
-    using Phase = simcore_host::ImpactRecoveryPhase;
-    switch (phase) {
-    case Phase::Driving: return "driving";
-    case Phase::Settling: return "settling";
-    case Phase::Holding: return "holding";
-    case Phase::Recovering: return "recovering";
-    case Phase::Disabled: return "disabled";
-    }
-    return "disabled";
-}
-
 simcore_host::NpcHornMotionContext horn_motion_context(
     simcore_host::NpcLaneStopReason reason)
 {
@@ -118,251 +74,6 @@ simcore_host::NpcHornMotionContext horn_motion_context(
         return Context::Inactive;
     }
     return Context::Inactive;
-}
-
-template <class Reaction>
-void update_impact_state(Reaction& reaction,
-    const simcore_host::KinematicCollisionProxy& actual, double dt, bool enabled,
-    bool attitude_settled = true)
-{
-    using Phase = simcore_host::ImpactRecoveryPhase;
-    const auto previous = reaction.recovery.phase();
-    const bool driving = reaction.recovery.allows_driving();
-    const auto velocity = driving ? actual.linear_velocity_enu_mps : reaction.velocity_enu_mps;
-    const double yaw_rate = driving ? actual.heading_rate_rad_s : reaction.heading_rate_rad_s;
-    reaction.recovery.tick(dt, std::hypot(velocity.east_m, velocity.north_m) < 0.05
-        && std::abs(yaw_rate) < 0.02 && attitude_settled, enabled);
-    const auto phase = reaction.recovery.phase();
-    if (previous != Phase::Recovering && phase == Phase::Recovering) {
-        reaction.return_departure_grace_remaining_s = 2.0;
-    }
-    if ((previous == Phase::Driving || previous == Phase::Recovering)
-        && (phase == Phase::Settling || phase == Phase::Holding || phase == Phase::Disabled)) {
-        // Stop the route motor, not physical momentum. Coast from the actual
-        // post-impact velocity while the route anchor remains stationary.
-        reaction.velocity_enu_mps = actual.linear_velocity_enu_mps;
-        reaction.heading_rate_rad_s = actual.heading_rate_rad_s;
-        reaction.return_speed_mps = 0.0;
-        reaction.return_yaw_speed_rad_s = 0.0;
-        reaction.return_departure_grace_remaining_s = 0.0;
-        reset_vehicle_return_path(reaction);
-    }
-    if (phase != reaction.reported_phase) {
-        std::cout << "[Collision] entity=" << actual.proxy_id
-                  << " state=" << impact_phase_name(phase)
-                  << " damage=" << reaction.recovery.damage_percent()
-                  << " hold_s=" << reaction.recovery.hold_remaining_seconds() << "\n";
-        reaction.reported_phase = phase;
-    }
-}
-
-template <class Reaction>
-void publish_impact_state(Reaction& reaction, simcore_host::RuntimeEntityState& entity,
-    const std::vector<simcore_host::CollisionContact>& contacts)
-{
-    const auto event = reaction.recovery.event_sequence();
-    const double impulse = reaction.recovery.last_impact_impulse_n_s();
-    if (event != 0 && (event != reaction.presented_event_sequence
-        || impulse > reaction.presented_impact_impulse_n_s + 1e-6)) {
-        const simcore_host::CollisionContact* strongest = nullptr;
-        for (const auto& contact : contacts) {
-            if (contact.collider_id == entity.collision_proxy.proxy_id
-                && contact.accumulated_normal_impulse_n_s > 0.0
-                && (!strongest || contact.accumulated_normal_impulse_n_s
-                    > strongest->accumulated_normal_impulse_n_s)) strongest = &contact;
-        }
-        if (strongest) {
-            reaction.impact_direction_enu = {-strongest->normal_enu.east_m,
-                -strongest->normal_enu.north_m};
-            if (const auto* body = std::get_if<simcore_host::ObbPrism>(&entity.collision_proxy.shape)) {
-                if (entity.kind == simcore_host::RuntimeEntityKind::NpcVehicle) {
-                    auto dent_contact = *strongest;
-                    dent_contact.accumulated_normal_impulse_n_s = impulse;
-                    simcore_host::record_vehicle_dent(reaction.dent_patches,*body,dent_contact,true);
-                }
-                const double east = strongest->contact_point_enu.east_m - body->center_enu.east_m;
-                const double north = strongest->contact_point_enu.north_m - body->center_enu.north_m;
-                const double forward = east * std::sin(body->heading_rad) + north * std::cos(body->heading_rad);
-                const double right = east * std::cos(body->heading_rad) - north * std::sin(body->heading_rad);
-                reaction.damage_zone = std::abs(forward) / body->half_length_m >= std::abs(right) / body->half_width_m
-                    ? (forward >= 0.0 ? VehicleDamageZone::Front : VehicleDamageZone::Rear)
-                    : (right >= 0.0 ? VehicleDamageZone::Right : VehicleDamageZone::Left);
-            }
-            reaction.presented_event_sequence = event;
-            reaction.presented_impact_impulse_n_s = impulse;
-        }
-    }
-    entity.damage_percent = static_cast<float>(reaction.recovery.damage_percent());
-    entity.last_impact_impulse_n_s = static_cast<float>(impulse);
-    entity.damage_zone = reaction.damage_zone;
-    entity.collision_event_sequence = event;
-    entity.recovery_phase = static_cast<std::uint32_t>(reaction.recovery.phase());
-    entity.impact_direction_enu = reaction.impact_direction_enu;
-    entity.dent_patches = reaction.dent_patches;
-}
-
-template <class Reaction>
-void integrate_impact_offset(Reaction& reaction, double dt,
-    double damping_per_second = kReactionVelocityDampingPerSecond,
-    bool kinematic_vehicle_return = false, double nominal_heading_rad = 0.0)
-{
-    using Phase = simcore_host::ImpactRecoveryPhase;
-    const auto phase = reaction.recovery.phase();
-    if (phase == Phase::Holding) {
-        reaction.velocity_enu_mps = {};
-        reaction.heading_rate_rad_s = 0.0;
-        return;
-    }
-    if (kinematic_vehicle_return && phase == Phase::Recovering
-        && reaction.return_departure_grace_remaining_s > 0.0) {
-        // Do not make the car glide away while its presented driver is still
-        // reversing the exit sequence. This is a stationary boarding pause,
-        // so residual solver velocities are intentionally cleared.
-        reaction.velocity_enu_mps = {};
-        reaction.heading_rate_rad_s = 0.0;
-        reaction.return_speed_mps = 0.0;
-        reaction.return_yaw_speed_rad_s = 0.0;
-        reaction.return_departure_grace_remaining_s = std::max(
-            0.0, reaction.return_departure_grace_remaining_s - dt);
-        return;
-    }
-    if (std::hypot(reaction.velocity_enu_mps.east_m, reaction.velocity_enu_mps.north_m) < 0.05)
-        reaction.velocity_enu_mps = {};
-    if (std::abs(reaction.heading_rate_rad_s) < 0.02) reaction.heading_rate_rad_s = 0.0;
-    const double decay = std::exp(-damping_per_second * dt);
-    const double integrated_time = (1.0 - decay) / damping_per_second;
-    reaction.offset_enu_m.east_m += reaction.velocity_enu_mps.east_m * integrated_time;
-    reaction.offset_enu_m.north_m += reaction.velocity_enu_mps.north_m * integrated_time;
-    reaction.heading_offset_rad = std::remainder(reaction.heading_offset_rad
-        + reaction.heading_rate_rad_s * integrated_time, 2.0 * std::numbers::pi);
-    reaction.velocity_enu_mps.east_m *= decay;
-    reaction.velocity_enu_mps.north_m *= decay;
-    reaction.heading_rate_rad_s *= decay;
-
-    if (phase != Phase::Recovering && phase != Phase::Driving) return;
-    if (kinematic_vehicle_return && phase == Phase::Recovering) {
-        // Follow one fixed cubic whose start/end tangents are the car body and
-        // authored lane headings. Unlike radial offset shrinkage, every return
-        // displacement is along a continuous driven curve, including lateral
-        // and yaw-only collision offsets.
-        const double distance = std::hypot(
-            reaction.offset_enu_m.east_m, reaction.offset_enu_m.north_m);
-        const double heading_error = std::remainder(
-            -reaction.heading_offset_rad, 2.0 * std::numbers::pi);
-        if (distance <= 1.0e-9 && std::abs(heading_error) <= 1.0e-9) {
-            reaction.offset_enu_m = {};
-            reaction.heading_offset_rad = 0.0;
-            reaction.return_speed_mps = 0.0;
-            reaction.return_yaw_speed_rad_s = 0.0;
-            reset_vehicle_return_path(reaction);
-            return;
-        }
-
-        if (!reaction.vehicle_return_path_initialized) {
-            const double actual_heading = nominal_heading_rad + reaction.heading_offset_rad;
-            const auto plan = simcore_host::make_npc_return_curve_plan(
-                reaction.offset_enu_m, actual_heading, nominal_heading_rad);
-            if (!plan.valid) {
-                // A yaw-only or degenerate pose cannot be corrected by one
-                // physically driven cubic. Hold it for a later safe replan.
-                reaction.return_speed_mps = 0.0;
-                reaction.return_yaw_speed_rad_s = 0.0;
-                reset_vehicle_return_path(reaction);
-                return;
-            }
-            reaction.vehicle_return_direction = plan.direction;
-            reaction.vehicle_return_p0 = plan.p0;
-            reaction.vehicle_return_p1 = plan.p1;
-            reaction.vehicle_return_p2 = plan.p2;
-            reaction.vehicle_return_progress = 0.0;
-            reaction.return_speed_mps = 0.0;
-            reaction.return_yaw_speed_rad_s = 0.0;
-            reaction.vehicle_return_path_initialized = true;
-        }
-
-        constexpr double return_acceleration_mps2 = 0.55;
-        constexpr double maximum_return_speed_mps = 0.9;
-        const double remaining = estimate_return_curve_length(
-            reaction.vehicle_return_p0, reaction.vehicle_return_p1,
-            reaction.vehicle_return_p2, reaction.vehicle_return_progress);
-        const double desired_speed = std::min(maximum_return_speed_mps,
-            std::sqrt(std::max(0.0, 2.0 * return_acceleration_mps2 * remaining)));
-        reaction.return_speed_mps += std::clamp(
-            desired_speed - reaction.return_speed_mps,
-            -return_acceleration_mps2 * dt, return_acceleration_mps2 * dt);
-
-        const simcore_host::NpcReturnCurvePlan curve{
-            reaction.vehicle_return_p0, reaction.vehicle_return_p1,
-            reaction.vehicle_return_p2, reaction.vehicle_return_direction, true};
-        const auto tangent = simcore_host::npc_return_curve_tangent(
-            curve, reaction.vehicle_return_progress);
-        const double tangent_length = std::max(1.0e-6,
-            std::hypot(tangent.east_m, tangent.north_m));
-        double candidate_progress = std::min(1.0,
-            reaction.vehicle_return_progress
-                + reaction.return_speed_mps * dt / tangent_length);
-
-        constexpr double maximum_yaw_rate_rad_s =
-            22.0 * std::numbers::pi / 180.0;
-        constexpr double maximum_yaw_acceleration_rad_s2 =
-            360.0 * std::numbers::pi / 180.0;
-        const double old_heading = nominal_heading_rad + reaction.heading_offset_rad;
-        const auto step = simcore_host::choose_bounded_npc_return_step(curve, {
-            reaction.offset_enu_m,
-            reaction.vehicle_return_progress,
-            candidate_progress,
-            old_heading,
-            reaction.return_yaw_speed_rad_s,
-            dt,
-            reaction.return_speed_mps * dt,
-            maximum_yaw_rate_rad_s,
-            maximum_yaw_acceleration_rad_s2});
-        if (!step.accepted) {
-            // All twelve candidates failed a real movement/yaw postcondition.
-            // Do not apply the last invalid candidate: hold and plan again from
-            // this exact pose on the following tick.
-            reaction.return_speed_mps = 0.0;
-            reaction.return_yaw_speed_rad_s = 0.0;
-            reset_vehicle_return_path(reaction);
-            return;
-        }
-        candidate_progress = step.progress;
-        reaction.return_yaw_speed_rad_s = step.yaw_speed_rad_s;
-        reaction.offset_enu_m = step.position;
-        reaction.heading_offset_rad = std::remainder(
-            step.body_heading_rad - nominal_heading_rad,
-            2.0 * std::numbers::pi);
-        reaction.vehicle_return_progress = step.progress;
-        if (candidate_progress >= 1.0 - 1.0e-12) {
-            reaction.offset_enu_m = {};
-            reaction.heading_offset_rad = 0.0;
-            reaction.velocity_enu_mps = {};
-            reaction.heading_rate_rad_s = 0.0;
-            reaction.return_speed_mps = 0.0;
-            reaction.return_yaw_speed_rad_s = 0.0;
-            reset_vehicle_return_path(reaction);
-        }
-        return;
-    }
-    // A bounded, accelerating low-speed recovery replaces exponential snapback.
-    // Driving handles only sub-threshold contact corrections with the same cap.
-    const double distance = std::hypot(reaction.offset_enu_m.east_m, reaction.offset_enu_m.north_m);
-    constexpr double acceleration = 0.25;
-    reaction.return_speed_mps = std::min({0.35,
-        reaction.return_speed_mps + acceleration * dt, std::sqrt(2.0 * acceleration * distance)});
-    const double step = std::min(distance, reaction.return_speed_mps * dt);
-    if (distance > 0.0) {
-        const double scale = (distance - step) / distance;
-        reaction.offset_enu_m.east_m *= scale;
-        reaction.offset_enu_m.north_m *= scale;
-    }
-    constexpr double angular_acceleration = 5.0 * std::numbers::pi / 180.0;
-    const double angle = std::abs(reaction.heading_offset_rad);
-    reaction.return_yaw_speed_rad_s = std::min({8.0 * std::numbers::pi / 180.0,
-        reaction.return_yaw_speed_rad_s + angular_acceleration * dt,
-        std::sqrt(2.0 * angular_acceleration * angle)});
-    reaction.heading_offset_rad -= std::copysign(
-        std::min(angle, reaction.return_yaw_speed_rad_s * dt), reaction.heading_offset_rad);
 }
 
 void apply_pedestrian_body_state(simcore_host::RuntimeEntityState& entity,
@@ -412,22 +123,6 @@ std::vector<simcore_host::PedestrianVehicleSurface> pedestrian_vehicle_surfaces(
             result.push_back({entity.collision_proxy.proxy_id, *shape});
     }
     return result;
-}
-
-template <class Reaction>
-void finish_impact_recovery(Reaction& reaction)
-{
-    if (reaction.recovery.phase() == simcore_host::ImpactRecoveryPhase::Recovering
-        && reaction.offset_enu_m.east_m == 0.0 && reaction.offset_enu_m.north_m == 0.0
-        && reaction.heading_offset_rad == 0.0
-        && reaction.velocity_enu_mps.east_m == 0.0 && reaction.velocity_enu_mps.north_m == 0.0
-        && reaction.heading_rate_rad_s == 0.0) {
-        reaction.recovery.finish_recovery();
-        reaction.return_speed_mps = 0.0;
-        reaction.return_yaw_speed_rad_s = 0.0;
-        reaction.return_departure_grace_remaining_s = 0.0;
-        reset_vehicle_return_path(reaction);
-    }
 }
 
 simcore_host::ObbPrism npc_shape(const simcore_host::NpcLaneSample& sample,
@@ -638,7 +333,7 @@ std::vector<NpcNavigationSnapshot> SimulationHost::npc_navigation() const
         result.push_back({npc.entity_id, npc.follower.state().lane_id,
             npc.destination_lane_id, npc.destinations_selected, npc.reroutes,
             npc.lane_changes_completed, npc.lane_change.has_value(), npc.navigation_route,
-            impact_phase_name(npc.reaction.recovery.phase()), npc.reaction.recovery.damage_percent(),
+            simcore_host::RuntimeCollisionReaction::phase_name(npc.reaction.recovery.phase()), npc.reaction.recovery.damage_percent(),
             npc.reaction.recovery.hold_remaining_seconds(), npc.follower.state().lane_offset_m,
             npc.follower.state().distance_travelled_m, npc.lane_change_wait_reason,
             npc.avoidance_stop_distance_m.has_value(), avoidance_phase,
@@ -682,16 +377,18 @@ std::optional<simcore_host::NpcLaneSample> SimulationHost::sample_lane_npc(
 
 bool SimulationHost::npc_sample_blocked(const LaneNpcRuntime& npc,
     const simcore_host::NpcLaneSample& sample, bool stationary_only,
-    const simcore_host::ObbPrism* collision_shape, bool ignore_ego) const
+    const simcore_host::ObbPrism* collision_shape, bool ignore_ego,
+    std::uint32_t* downed_pedestrian_id) const
 {
+    if (downed_pedestrian_id) *downed_pedestrian_id = 0;
     const auto ego = physics_.get_state();
-    const auto& params = config_.vehicle_parameters;
+    const auto params = simcore_host::make_player_vehicle_parameters(
+        config_.vehicle_parameters, active_vehicle_class_);
     const simcore_host::ObbPrism ego_shape{
         {ego.position_enu.x, ego.position_enu.y},
-        ego.position_enu.z - params.cg_height_m + 0.85,
+        ego.position_enu.z - params.cg_height_m + 0.10 + ego.collision_half_height_m,
         ego.heading * std::numbers::pi / 180.0,
-        params.wheelbase_m * 0.5 + 0.8,
-        std::max(params.front_track_m, params.rear_track_m) * 0.5 + 0.15, 0.75};
+        ego.collision_half_length_m, ego.collision_half_width_m, ego.collision_half_height_m};
     const auto candidate = collision_shape ? *collision_shape : npc_shape(sample,
         npc.body_half_length_m, npc.body_half_width_m, npc.body_half_height_m);
     // A red-light queue is not a closed road. Only static colliders and a
@@ -719,7 +416,11 @@ bool SimulationHost::npc_sample_blocked(const LaneNpcRuntime& npc,
                     || entity.kind == simcore_host::RuntimeEntityKind::Pedestrian)
                 && entity.recovery_phase == 0 && !entity.pedestrian_downed) continue;
         }
-        if (overlaps(candidate, proxy.shape)) return true;
+        if (overlaps(candidate, proxy.shape)) {
+            if (downed_pedestrian_id && entity.kind == simcore_host::RuntimeEntityKind::Pedestrian
+                && entity.pedestrian_downed) *downed_pedestrian_id = entity.entity_id;
+            return true;
+        }
     }
     // Earlier agents in this deterministic tick order reserve their next pose.
     for (const auto& other : lane_npcs_) {
@@ -733,13 +434,23 @@ std::optional<double> SimulationHost::lane_npc_blocked_distance(
     const LaneNpcRuntime& npc, double lookahead_m, bool stationary_only,
     bool route_end_is_blocker) const
 {
+    const auto obstacle = lane_npc_obstacle(npc, lookahead_m, stationary_only, route_end_is_blocker);
+    return obstacle ? std::optional<double>(obstacle->distance_m) : std::nullopt;
+}
+
+std::optional<SimulationHost::NpcRouteObstacle> SimulationHost::lane_npc_obstacle(
+    const LaneNpcRuntime& npc, double lookahead_m, bool stationary_only,
+    bool route_end_is_blocker) const
+{
     for (double distance = 0.0; distance <= lookahead_m + 1e-9; distance += kScanStepM) {
         const auto sample = sample_lane_npc(npc, distance);
         if (!sample) return stationary_only || !route_end_is_blocker ? std::nullopt
-            : std::optional<double>(distance + npc.follower.config().front_extent_m);
-        if (npc_sample_blocked(npc, *sample, stationary_only)) {
-            return std::max(0.0, distance - kScanStepM)
-                + npc.follower.config().front_extent_m;
+            : std::optional<NpcRouteObstacle>(NpcRouteObstacle{
+                distance + npc.follower.config().front_extent_m, 0});
+        std::uint32_t downed_pedestrian_id = 0;
+        if (npc_sample_blocked(npc, *sample, stationary_only, nullptr, false, &downed_pedestrian_id)) {
+            return NpcRouteObstacle{std::max(0.0, distance - kScanStepM)
+                + npc.follower.config().front_extent_m, downed_pedestrian_id};
         }
     }
     return std::nullopt;
@@ -760,12 +471,19 @@ bool SimulationHost::npc_reverse_path_clear(
 }
 
 bool SimulationHost::begin_npc_escape_reverse(
-    LaneNpcRuntime& npc, double obstruction_distance_m)
+    LaneNpcRuntime& npc, double obstruction_distance_m, std::uint32_t downed_pedestrian_id)
 {
     const auto& state = npc.follower.state();
+    const double retreat_limit = downed_pedestrian_id != 0
+        ? kNpcPedestrianEscapeMaximumRetreatM : kNpcEscapeMaximumRetreatM;
     if (!std::isfinite(obstruction_distance_m) || obstruction_distance_m < 0.0
         || state.stopline_committed || npc.lane_change
-        || npc.avoidance_reverse_total_m >= kNpcEscapeMaximumRetreatM) {
+        || npc.avoidance_reverse_total_m >= retreat_limit) {
+        return false;
+    }
+    // Retained forward turning room is preferable to reversing while an
+    // adjacent moving car clears. Reverse only a genuinely close blockage.
+    if (obstruction_distance_m >= npc.follower.config().front_extent_m + 8.0) {
         return false;
     }
     const auto lane = std::find_if(config_.traffic_network->lanes.begin(),
@@ -775,20 +493,30 @@ bool SimulationHost::begin_npc_escape_reverse(
 
     double retreat_available_in_window_m = 0.0;
     for (const auto& change : lane->lane_changes) {
-        if (state.lane_offset_m >= change.source_begin_m
-            && state.lane_offset_m < change.source_end_m) {
+        if (state.lane_offset_m >= change.source_begin_m) {
             retreat_available_in_window_m = std::max(retreat_available_in_window_m,
                 state.lane_offset_m - change.source_begin_m);
         }
     }
-    const double requested = std::clamp(
-        kNpcEscapeRequiredForwardRoomM - obstruction_distance_m,
-        0.0, kNpcEscapeMaximumRetreatM - npc.avoidance_reverse_total_m);
-    if (requested < 0.5 || retreat_available_in_window_m + 1e-6 < requested) {
-        return false;
+    const double maximum = std::min(retreat_available_in_window_m,
+        retreat_limit - npc.avoidance_reverse_total_m);
+    double requested = 0.0;
+    bool rear_blocked = false;
+    for (double retreat = 0.5; retreat <= maximum + 1e-6; retreat += 0.5) {
+        // Only reserve enough rear space for a complete collision-free pass.
+        // Injured pedestrians near a stopline may require returning to the
+        // authored merge window; the same lane and rear clearance still apply.
+        if (!npc_reverse_path_clear(npc, retreat + kNpcEscapeRearReserveM)) {
+            rear_blocked = true;
+            break;
+        }
+        if (try_npc_lane_change(npc, retreat, false)) {
+            requested = retreat;
+            break;
+        }
     }
-    if (!npc_reverse_path_clear(npc, requested + kNpcEscapeRearReserveM)) {
-        npc.lane_change_wait_reason = "reverse_path_occupied";
+    if (requested == 0.0) {
+        if (rear_blocked) npc.lane_change_wait_reason = "reverse_path_occupied";
         return false;
     }
     npc.avoidance_reverse_remaining_m = requested;
@@ -797,19 +525,26 @@ bool SimulationHost::begin_npc_escape_reverse(
     npc.lane_change_wait_reason = "braking_for_reverse";
     std::cout << "[NPC] escape-reverse planned entity=" << npc.entity_id
               << " retreat_m=" << requested
+              << " downed_pedestrian=" << downed_pedestrian_id
               << " obstacle_m=" << obstruction_distance_m << "\n";
     return true;
 }
 
-bool SimulationHost::try_npc_lane_change(LaneNpcRuntime& npc)
+bool SimulationHost::try_npc_lane_change(LaneNpcRuntime& npc, double retreat_m, bool commit)
 {
-    const auto& state = npc.follower.state();
+    auto state = npc.follower.state();
     const auto reject = [&](const char* reason) {
         npc.lane_change_wait_reason = reason;
         return false;
     };
     if (!npc_route_planner_ || npc.lane_change) return reject("navigation_inactive");
     if (state.stopline_committed) return reject("intersection_committed");
+    if (retreat_m > 0.0) {
+        const auto behind = npc.follower.sample_behind(retreat_m);
+        if (!behind) return reject("reverse_outside_current_lane");
+        static_cast<simcore_host::NpcLaneSample&>(state) = *behind;
+        state.speed_mps = 0.0;
+    }
     if (std::hypot(npc.reaction.offset_enu_m.east_m, npc.reaction.offset_enu_m.north_m) > 0.15)
         return reject("recovering_collision_offset");
     const auto& network = *config_.traffic_network;
@@ -830,9 +565,7 @@ bool SimulationHost::try_npc_lane_change(LaneNpcRuntime& npc)
                          s * half_length + c * half_width};
     };
     const auto ego_extents = projected_extents(ego_heading,
-        config_.vehicle_parameters.wheelbase_m * 0.5 + 0.8,
-        std::max(config_.vehicle_parameters.front_track_m,
-                 config_.vehicle_parameters.rear_track_m) * 0.5 + 0.15);
+        ego.collision_half_length_m, ego.collision_half_width_m);
     neighbours.push_back({{ego.position_enu.x, ego.position_enu.y, ego.position_enu.z},
         {std::sin(ego_heading) * ego.linear_velocity_body.x
              - std::cos(ego_heading) * ego.linear_velocity_body.y,
@@ -922,6 +655,7 @@ bool SimulationHost::try_npc_lane_change(LaneNpcRuntime& npc)
                 if (!clear) break;
             }
             if (!clear) { rejected_sweep = true; continue; }
+            if (!commit) return true;
             npc.lane_change = *plan;
             npc.lane_change_fault_reported = false;
             npc.lane_change_route = route->lane_ids;
@@ -955,10 +689,16 @@ void SimulationHost::update_npc_navigation(LaneNpcRuntime& npc, double dt_second
     if (!npc_route_planner_) return;
     npc.navigation_cooldown_s = std::max(0.0, npc.navigation_cooldown_s - dt_seconds);
     if (npc.lane_change) return;
+    const auto persistent_obstacle = [&](const std::optional<NpcRouteObstacle>& first) {
+        // Sliding accident victims remain the same hazard as their residual
+        // velocity crosses the ordinary stationary-vehicle threshold.
+        return first && first->downed_pedestrian_id != 0 ? first
+            : lane_npc_obstacle(npc, 80.0, true, false);
+    };
     if (npc.avoidance_phase == LaneNpcRuntime::AvoidancePhase::Backing) {
         if (npc.navigation_cooldown_s == 0.0) {
             npc.navigation_cooldown_s = kNpcNavigationDecisionPeriodS;
-            if (!lane_npc_blocked_distance(npc, 80.0, true, false)) {
+            if (!persistent_obstacle(lane_npc_obstacle(npc, 80.0, false, false))) {
                 npc.avoidance_phase = LaneNpcRuntime::AvoidancePhase::None;
                 npc.avoidance_reverse_remaining_m = 0.0;
                 npc.avoidance_reverse_speed_mps = 0.0;
@@ -972,7 +712,7 @@ void SimulationHost::update_npc_navigation(LaneNpcRuntime& npc, double dt_second
     if (npc.avoidance_phase == LaneNpcRuntime::AvoidancePhase::WaitingForStop) {
         if (npc.navigation_cooldown_s > 0.0) return;
         npc.navigation_cooldown_s = kNpcNavigationDecisionPeriodS;
-        if (!lane_npc_blocked_distance(npc, 80.0, true, false)) {
+        if (!persistent_obstacle(lane_npc_obstacle(npc, 80.0, false, false))) {
             npc.avoidance_phase = LaneNpcRuntime::AvoidancePhase::None;
             npc.avoidance_reverse_remaining_m = 0.0;
             npc.avoidance_reverse_speed_mps = 0.0;
@@ -1004,11 +744,11 @@ void SimulationHost::update_npc_navigation(LaneNpcRuntime& npc, double dt_second
     // Detect a stopped Ego while there is still room for a complete authored
     // manoeuvre. Forty metres was too late when the blocker sat just beyond an
     // intersection approach or a destination-specific lane split.
-    const auto obstruction = lane_npc_blocked_distance(npc, 80.0, false, false);
-    npc.obstruction_seconds = obstruction
+    const auto observed = lane_npc_obstacle(npc, 80.0, false, false);
+    const auto obstruction = observed ? std::optional<double>(observed->distance_m) : std::nullopt;
+    npc.obstruction_seconds = observed
         ? npc.obstruction_seconds + kNpcNavigationDecisionPeriodS : 0.0;
-    const auto persistent = obstruction ? lane_npc_blocked_distance(npc, 80.0, true)
-                                       : std::nullopt;
+    const auto persistent = observed ? persistent_obstacle(observed) : std::nullopt;
     const bool persistent_obstruction = persistent.has_value();
     npc.avoidance_stop_distance_m.reset();
     const auto& state = npc.follower.state();
@@ -1033,7 +773,8 @@ void SimulationHost::update_npc_navigation(LaneNpcRuntime& npc, double dt_second
             return;
         }
         if (persistent_obstruction && obstruction
-            && begin_npc_escape_reverse(npc, *obstruction)) {
+            && begin_npc_escape_reverse(npc, *obstruction,
+                observed->downed_pedestrian_id)) {
             return;
         }
         if (npc.lane_change_wait_reason != previous_reason) {
@@ -1098,12 +839,12 @@ void SimulationHost::prepare_lane_npc(double dt_seconds, Clock::time_point now)
 
         const auto previous_tumble = npc.tumble;
         npc.tumble.tick(dt_seconds, npc.tumble_dimensions, enabled);
-        update_impact_state(npc.reaction, current->collision_proxy, dt_seconds, enabled,
+        npc.reaction.update(current->collision_proxy, dt_seconds, enabled,
             npc.tumble.settled());
         if (npc.tumble.overturned() || npc.tumble.invalid_input()) {
             npc.reaction.recovery.disable_driving();
         }
-        publish_impact_state(npc.reaction, *current, physics_.get_last_collision_contacts());
+        npc.reaction.publish(*current, physics_.get_last_collision_contacts());
         const bool drive = npc.reaction.recovery.allows_driving();
         if (enabled && drive) update_npc_navigation(npc, dt_seconds);
 
@@ -1148,8 +889,10 @@ void SimulationHost::prepare_lane_npc(double dt_seconds, Clock::time_point now)
             / kScanStepM) * kScanStepM;
         const auto before_change = npc.lane_change
             ? std::optional<simcore_host::NpcLaneFollower>(npc.follower) : std::nullopt;
-        const auto physical_blocked = drive
-            ? lane_npc_blocked_distance(npc, lookahead) : std::nullopt;
+        const auto physical_obstacle = drive
+            ? lane_npc_obstacle(npc, lookahead) : std::nullopt;
+        const auto physical_blocked = physical_obstacle
+            ? std::optional<double>(physical_obstacle->distance_m) : std::nullopt;
         auto blocked = physical_blocked;
         if (drive && !npc.lane_change && npc.avoidance_stop_distance_m) {
             const double reserved_stop = std::max(0.0, *npc.avoidance_stop_distance_m
@@ -1168,6 +911,9 @@ void SimulationHost::prepare_lane_npc(double dt_seconds, Clock::time_point now)
         // forward speed is a conservative closing estimate; event hysteresis
         // prevents one continuously occupied cell from retriggering.
         horn_observation.closing_speed_mps = speed;
+        if (physical_obstacle) {
+            horn_observation.nonresponsive_obstacle_id = physical_obstacle->downed_pedestrian_id;
+        }
         if (physical_blocked) {
             horn_observation.obstacle_clearance_m = std::max(0.0,
                 *physical_blocked - settings.front_extent_m);
@@ -1179,12 +925,17 @@ void SimulationHost::prepare_lane_npc(double dt_seconds, Clock::time_point now)
             // crashed vehicle while a safe adjacent-lane gap opens.
             const double persistent_lookahead = npc.avoidance_stop_distance_m
                 ? std::max(12.0, lookahead) : lookahead;
-            if (const auto persistent = lane_npc_blocked_distance(
-                    npc, persistent_lookahead, true)) {
+            const auto observed = lane_npc_obstacle(npc, persistent_lookahead, false, false);
+            const auto persistent = observed && observed->downed_pedestrian_id != 0 ? observed
+                : lane_npc_obstacle(npc, persistent_lookahead, true, false);
+            if (persistent) {
                 horn_observation.persistent_obstruction = true;
+                if (persistent->downed_pedestrian_id != 0) {
+                    horn_observation.nonresponsive_obstacle_id = persistent->downed_pedestrian_id;
+                }
                 if (!horn_observation.obstacle_clearance_m) {
                     horn_observation.obstacle_clearance_m = std::max(0.0,
-                        *persistent - settings.front_extent_m);
+                        persistent->distance_m - settings.front_extent_m);
                 }
             }
         }
@@ -1289,7 +1040,7 @@ void SimulationHost::prepare_lane_npc(double dt_seconds, Clock::time_point now)
                 npc.nominal_pending->turn_indicator = change < -0.15 ? 1 : change > 0.15 ? 2 : 0;
             }
         }
-        publish_impact_state(npc.reaction, *npc.nominal_pending, physics_.get_last_collision_contacts());
+        npc.reaction.publish(*npc.nominal_pending, physics_.get_last_collision_contacts());
         const auto& nominal_after = std::get<simcore_host::ObbPrism>(
             npc.nominal_pending->collision_proxy.shape);
         const simcore_host::CollisionVector2 nominal_before{
@@ -1302,8 +1053,8 @@ void SimulationHost::prepare_lane_npc(double dt_seconds, Clock::time_point now)
             nominal_after.heading_rad,
             before.heading_rad - old_heading_offset) / dt_seconds;
 
-        integrate_impact_offset(npc.reaction, dt_seconds,
-            kReactionVelocityDampingPerSecond, true, nominal_after.heading_rad);
+        npc.reaction.integrate_offset(dt_seconds,
+            simcore_host::RuntimeCollisionReaction::kDefaultVelocityDampingPerSecond, true, nominal_after.heading_rad);
         clamp_vector_magnitude(
             npc.reaction.velocity_enu_mps, npc.maximum_reaction_speed_mps);
 
@@ -1380,14 +1131,14 @@ void SimulationHost::prepare_lane_npc(double dt_seconds, Clock::time_point now)
                 npc.reaction.heading_rate_rad_s = 0.0;
                 npc.reaction.return_speed_mps = 0.0;
                 npc.reaction.return_yaw_speed_rad_s = 0.0;
-                reset_vehicle_return_path(npc.reaction);
+                npc.reaction.reset_return_path();
                 npc.tumble = previous_tumble;
                 npc.tumble.stop_motion();
                 apply_tumble_pose();
             }
         }
-        finish_impact_recovery(npc.reaction);
-        publish_impact_state(npc.reaction, *npc.pending, physics_.get_last_collision_contacts());
+        npc.reaction.finish_recovery();
+        npc.reaction.publish(*npc.pending, physics_.get_last_collision_contacts());
         auto& motion = current->collision_proxy;
         motion.linear_velocity_enu_mps = {
             (after.center_enu.east_m - before.center_enu.east_m) / dt_seconds,
@@ -1416,13 +1167,13 @@ void SimulationHost::finish_runtime_impact_contacts(
                 [&](const auto& value) { return value.entity_id == entity.entity_id; }); npc != lane_npcs_.end()) {
             // Consume this tick's solved impulses before its WorldState, rather
             // than waiting for movement to stop or for the next prepare pass.
-            update_impact_state(npc->reaction, entity.collision_proxy, 0.0, true, npc->tumble.settled());
-            publish_impact_state(npc->reaction, entity, contacts);
+            npc->reaction.update(entity.collision_proxy, 0.0, true, npc->tumble.settled());
+            npc->reaction.publish(entity, contacts);
             if (!npc->reaction.recovery.allows_driving()) entity.turn_indicator = 0;
         } else if (auto pedestrian = std::find_if(pedestrians_.begin(), pedestrians_.end(),
                 [&](const auto& value) { return value.entity_id == entity.entity_id; }); pedestrian != pedestrians_.end()) {
-            update_impact_state(pedestrian->reaction, entity.collision_proxy, 0.0, true, pedestrian->body.settled());
-            publish_impact_state(pedestrian->reaction, entity, contacts);
+            pedestrian->reaction.update(entity.collision_proxy, 0.0, true, pedestrian->body.settled());
+            pedestrian->reaction.publish(entity, contacts);
             const auto center = shape_center(entity.collision_proxy.shape);
             const double center_up = std::visit([](const auto& shape) { return shape.center_up_m; }, entity.collision_proxy.shape);
             const auto ground = supported_point(*config_.ground_query, {center.east_m, center.north_m,
@@ -1436,7 +1187,10 @@ void SimulationHost::finish_runtime_impact_contacts(
                 });
                 double closest = std::numeric_limits<double>::infinity();
                 if (strongest != contacts.end()) {
-                    for (const auto& vehicle : pedestrian_vehicle_surfaces(physics_.get_state(), runtime_entities_, config_.vehicle_parameters.cg_height_m)) {
+                    const auto parameters = simcore_host::make_player_vehicle_parameters(
+                        config_.vehicle_parameters, active_vehicle_class_);
+                    for (const auto& vehicle : pedestrian_vehicle_surfaces(
+                            physics_.get_state(), runtime_entities_, parameters.cg_height_m)) {
                         const double east = strongest->contact_point_enu.east_m - vehicle.shape.center_enu.east_m;
                         const double north = strongest->contact_point_enu.north_m - vehicle.shape.center_enu.north_m;
                         const double forward = east * std::sin(vehicle.shape.heading_rad) + north * std::cos(vehicle.shape.heading_rad);
@@ -1532,10 +1286,10 @@ void SimulationHost::prepare_pedestrians(double dt_seconds, Clock::time_point no
             pedestrian.reaction.nominal_velocity_enu_mps = {};
             continue;
         }
-        update_impact_state(pedestrian.reaction, current->collision_proxy, dt_seconds, enabled,
+        pedestrian.reaction.update(current->collision_proxy, dt_seconds, enabled,
             pedestrian.body.settled()
                 || pedestrian.reaction.recovery.phase() == simcore_host::ImpactRecoveryPhase::Recovering);
-        publish_impact_state(pedestrian.reaction, *current, physics_.get_last_collision_contacts());
+        pedestrian.reaction.publish(*current, physics_.get_last_collision_contacts());
 
         if (!pedestrian.body.downed()) {
             // Mild contacts retain the capsule, but their impulse episode still
@@ -1561,15 +1315,18 @@ void SimulationHost::prepare_pedestrians(double dt_seconds, Clock::time_point no
             pedestrian.reaction.nominal_heading_rate_rad_s = 0.0;
             // Airborne momentum is not ground friction; applying the common
             // road damping here repeatedly dragged a struck person into the car.
-            integrate_impact_offset(pedestrian.reaction, dt_seconds,
-                pedestrian.body.airborne() ? 0.12 : kReactionVelocityDampingPerSecond);
+            pedestrian.reaction.integrate_offset(dt_seconds,
+                pedestrian.body.airborne() ? 0.12 : simcore_host::RuntimeCollisionReaction::kDefaultVelocityDampingPerSecond);
             const simcore_host::CollisionVector2 target{anchor->east_m + pedestrian.reaction.offset_enu_m.east_m,
                 anchor->north_m + pedestrian.reaction.offset_enu_m.north_m};
             const auto ground = supported_point(*config_.ground_query,
                 {target.east_m, target.north_m, anchor->up_m});
             const bool recovering = pedestrian.reaction.recovery.phase() == simcore_host::ImpactRecoveryPhase::Recovering;
             if (ground) {
-                const auto vehicle_surfaces = pedestrian_vehicle_surfaces(physics_.get_state(), runtime_entities_, config_.vehicle_parameters.cg_height_m);
+                const auto parameters = simcore_host::make_player_vehicle_parameters(
+                    config_.vehicle_parameters, active_vehicle_class_);
+                const auto vehicle_surfaces = pedestrian_vehicle_surfaces(
+                    physics_.get_state(), runtime_entities_, parameters.cg_height_m);
                 pedestrian.body.tick(dt_seconds, ground->up_m, recovering, true, target, vehicle_surfaces);
             }
             pedestrian.pending = *pedestrian.nominal_pending;
@@ -1604,8 +1361,8 @@ void SimulationHost::prepare_pedestrians(double dt_seconds, Clock::time_point no
             current->collision_proxy.linear_velocity_enu_mps = velocity;
             pedestrian.pending->collision_proxy.linear_velocity_enu_mps = velocity;
             pedestrian.nominal_pending->collision_proxy.linear_velocity_enu_mps = {};
-            if (!pedestrian.body.downed()) finish_impact_recovery(pedestrian.reaction);
-            publish_impact_state(pedestrian.reaction, *pedestrian.pending, physics_.get_last_collision_contacts());
+            if (!pedestrian.body.downed()) pedestrian.reaction.finish_recovery();
+            pedestrian.reaction.publish(*pedestrian.pending, physics_.get_last_collision_contacts());
             continue;
         }
 
@@ -1653,7 +1410,7 @@ void SimulationHost::prepare_pedestrians(double dt_seconds, Clock::time_point no
         pedestrian.nominal_pending = pedestrian_entity(pedestrian.entity_id, *ground,
             std::atan2((pedestrian.end.east_m - pedestrian.start.east_m) * pedestrian.direction,
                 (pedestrian.end.north_m - pedestrian.start.north_m) * pedestrian.direction));
-        publish_impact_state(pedestrian.reaction, *pedestrian.nominal_pending,
+        pedestrian.reaction.publish(*pedestrian.nominal_pending,
             physics_.get_last_collision_contacts());
         const auto& nominal_after = std::get<simcore_host::VerticalCapsule>(
             pedestrian.nominal_pending->collision_proxy.shape);
@@ -1664,7 +1421,7 @@ void SimulationHost::prepare_pedestrians(double dt_seconds, Clock::time_point no
             (nominal_after.center_enu.east_m - nominal_before.east_m) / dt_seconds,
             (nominal_after.center_enu.north_m - nominal_before.north_m) / dt_seconds};
 
-        integrate_impact_offset(pedestrian.reaction, dt_seconds);
+        pedestrian.reaction.integrate_offset(dt_seconds);
         clamp_vector_magnitude(
             pedestrian.reaction.velocity_enu_mps,
             kPedestrianMaximumReactionSpeedMps);
@@ -1704,13 +1461,13 @@ void SimulationHost::prepare_pedestrians(double dt_seconds, Clock::time_point no
         if (!pedestrian.reaction.recovery.allows_driving()
             || std::hypot(old_offset.east_m, old_offset.north_m) > 0.001) {
             const auto ego = physics_.get_state();
-            const auto& params = config_.vehicle_parameters;
+            const auto params = simcore_host::make_player_vehicle_parameters(
+                config_.vehicle_parameters, active_vehicle_class_);
             const simcore_host::ObbPrism ego_shape{
                 {ego.position_enu.x, ego.position_enu.y},
-                ego.position_enu.z - params.cg_height_m + 0.85,
+                ego.position_enu.z - params.cg_height_m + 0.10 + ego.collision_half_height_m,
                 ego.heading * std::numbers::pi / 180.0,
-                params.wheelbase_m * 0.5 + 0.8,
-                std::max(params.front_track_m, params.rear_track_m) * 0.5 + 0.15, 0.75};
+                ego.collision_half_length_m, ego.collision_half_width_m, ego.collision_half_height_m};
             const auto blocked = [&](const simcore_host::VerticalCapsule& candidate) {
                 const auto overlaps_proxy = [&](const simcore_host::KinematicProxyShape& shape) {
                     return std::visit([&](const auto& obstacle) {
@@ -1777,8 +1534,8 @@ void SimulationHost::prepare_pedestrians(double dt_seconds, Clock::time_point no
         }
         const auto& accepted_after = std::get<simcore_host::VerticalCapsule>(
             pedestrian.pending->collision_proxy.shape);
-        finish_impact_recovery(pedestrian.reaction);
-        publish_impact_state(pedestrian.reaction, *pedestrian.pending,
+        pedestrian.reaction.finish_recovery();
+        pedestrian.reaction.publish(*pedestrian.pending,
             physics_.get_last_collision_contacts());
         const simcore_host::CollisionVector2 velocity{
             (accepted_after.center_enu.east_m - before.center_enu.east_m) / dt_seconds,

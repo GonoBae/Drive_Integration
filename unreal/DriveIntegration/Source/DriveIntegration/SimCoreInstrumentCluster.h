@@ -8,6 +8,14 @@
 
 namespace SimCoreInstrumentCluster
 {
+	struct FLayout
+	{
+		FVector2D Position = FVector2D::ZeroVector;
+		FVector2D Size = FVector2D::ZeroVector;
+		float Scale = 1.0f;
+	};
+	DRIVEINTEGRATION_API FLayout BuildLayout(float ViewWidth, float ViewHeight);
+
 	/** Pure presentation model. Invalid or stale telemetry is never retained. */
 	struct FDisplayState
 	{

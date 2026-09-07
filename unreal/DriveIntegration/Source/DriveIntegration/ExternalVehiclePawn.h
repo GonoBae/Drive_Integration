@@ -38,6 +38,7 @@ public:
 		return DisplayedVehicleClass;
 	}
 	int32 GetVisibleWheelCount() const;
+	SimCoreOrbitCamera::EMode GetCameraMode() const { return CameraMode; }
 	void SelectPlayerVehicleClass(SimCoreProtocol::ERuntimeVehicleClass VehicleClass);
 
 protected:
@@ -58,8 +59,8 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Vehicle")
 	TObjectPtr<UCameraComponent> Camera;
 
-	// World-level horizon with a persistent vehicle-relative orbit. Chassis
-	// pitch/roll never roll the view; C restores the rear chase view.
+	// Follow mode holds the horizon level. Driver/fixed modes are chassis-relative;
+	// V cycles modes and C always restores the rear follow view.
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Vehicle")
 	TObjectPtr<USpringArmComponent> CameraBoom;
 
@@ -91,7 +92,7 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Vehicle|Effects")
 	TObjectPtr<USimCoreExhaustComponent> ExhaustEffect;
 
-	// F5 records authoritative snapshots; F6 replays the last track as a
+	// R records authoritative snapshots; F6 replays the last track as a
 	// collision-free sedan ghost without taking control from the live vehicle.
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Vehicle|Replay")
 	TObjectPtr<USimCoreDriveReplayComponent> DriveReplay;
@@ -150,6 +151,8 @@ protected:
 
 private:
 	friend class FSimCorePlayerVehiclePresentationTest;
+	friend class FSimCoreCameraModesPawnTest;
+	friend class FSimCoreFleetCabinTest;
 	UPROPERTY(VisibleAnywhere)
 	TObjectPtr<class USimCoreDeformableBody> DeformableBody;
 	UPROPERTY(VisibleAnywhere)
@@ -170,6 +173,7 @@ private:
 	void SetCameraGamepadPitch(float Value);
 	void ZoomCamera(float Value);
 	void ResetCameraView();
+	void CycleCameraView();
 	void ToggleVehicleDebug();
 	void UpdateOrbitCamera(float DeltaSeconds);
 	void UpdateSteeringInput(float DeltaSeconds);
@@ -192,6 +196,8 @@ private:
 	void PushControl();
 
 	SimCoreOrbitCamera::FState OrbitCameraState;
+	SimCoreOrbitCamera::FDriverLook DriverCameraLook;
+	SimCoreOrbitCamera::EMode CameraMode = SimCoreOrbitCamera::EMode::Follow;
 	float CameraGamepadYaw = 0.0f;
 	float CameraGamepadPitch = 0.0f;
 

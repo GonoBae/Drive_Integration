@@ -1,4 +1,5 @@
 #include "physics/vehicle_physics.hpp"
+#include "physics/motorcycle_balance.hpp"
 
 #include "coordinates/body_frame_adapter.hpp"
 #include "physics/chassis_ground_contact.hpp"
@@ -460,145 +461,6 @@ float effective_surface_friction_multiplier(
 
 } // namespace
 
-bool valid_vehicle_parameters(const VehicleParameters& parameters)
-{
-    const std::array<float, 57> finite_values{
-        parameters.mass_kg,
-        parameters.wheelbase_m,
-        parameters.max_steering_angle_rad,
-        parameters.steering_rate_rad_s,
-        parameters.steering_return_rate_rad_s,
-        parameters.max_drive_force_n,
-        parameters.max_reverse_force_n,
-        parameters.max_drive_power_w,
-        parameters.drive_force_rise_rate_n_per_s,
-        parameters.drive_force_fall_rate_n_per_s,
-        parameters.max_service_brake_n,
-        parameters.max_handbrake_force_n,
-        parameters.rolling_resistance_coeff,
-        parameters.drivetrain_drag_n_per_mps,
-        parameters.drag_coefficient,
-        parameters.frontal_area_m2,
-        parameters.air_density_kg_m3,
-        parameters.tire_radius_m,
-        parameters.final_drive_ratio,
-        parameters.drive_gear_ratio,
-        parameters.reverse_gear_ratio,
-        parameters.max_forward_speed_mps,
-        parameters.max_reverse_speed_mps,
-        parameters.idle_rpm,
-        parameters.max_rpm,
-        parameters.fuel_rate_percent_s,
-        parameters.front_track_m,
-        parameters.rear_track_m,
-        parameters.cg_height_m,
-        parameters.front_static_load_fraction,
-        parameters.front_drive_torque_fraction,
-        parameters.front_service_brake_fraction,
-        parameters.yaw_inertia_kg_m2,
-        parameters.pitch_inertia_kg_m2,
-        parameters.roll_inertia_kg_m2,
-        parameters.attitude_spring_n_m_rad,
-        parameters.attitude_damping_n_m_s_rad,
-        parameters.front_tire_corner_stiffness_n_rad,
-        parameters.rear_tire_corner_stiffness_n_rad,
-        parameters.tire_longitudinal_stiffness_n,
-        parameters.tire_friction,
-        parameters.surface_default_friction_scale,
-        parameters.surface_asphalt_friction_scale,
-        parameters.surface_low_friction_scale,
-        parameters.surface_rough_friction_scale,
-        parameters.lateral_grip_priority,
-        parameters.traction_control_slip_target,
-        parameters.traction_control_full_cut_slip,
-        parameters.wheel_inertia_kg_m2,
-        parameters.wheel_free_spin_damping_n_m_s,
-        parameters.low_speed_slip_reference_mps,
-        parameters.collision_body_overhang_m,
-        parameters.collision_body_side_padding_m,
-        parameters.collision_body_half_height_m,
-        parameters.chassis_shell_center_up_offset_m,
-        parameters.chassis_shell_half_height_m,
-        parameters.suspension.rest_length_m,
-    };
-    if (!std::all_of(finite_values.begin(), finite_values.end(),
-                     [](float value) { return std::isfinite(value); })) {
-        return false;
-    }
-
-    return parameters.mass_kg > 0.f
-        && parameters.wheelbase_m > 0.f
-        && parameters.max_steering_angle_rad > 0.f
-        && parameters.max_steering_angle_rad < std::numbers::pi_v<float> * 0.5f
-        && parameters.steering_rate_rad_s > 0.f
-        && parameters.steering_return_rate_rad_s > 0.f
-        && parameters.max_drive_force_n >= 0.f
-        && parameters.max_reverse_force_n >= 0.f
-        && parameters.max_drive_power_w > 0.f
-        && parameters.drive_force_rise_rate_n_per_s > 0.f
-        && parameters.drive_force_fall_rate_n_per_s > 0.f
-        && parameters.max_service_brake_n >= 0.f
-        && parameters.max_handbrake_force_n >= 0.f
-        && parameters.rolling_resistance_coeff >= 0.f
-        && parameters.drivetrain_drag_n_per_mps >= 0.f
-        && parameters.drag_coefficient >= 0.f
-        && parameters.frontal_area_m2 > 0.f
-        && parameters.air_density_kg_m3 > 0.f
-        && parameters.tire_radius_m > 0.f
-        && parameters.final_drive_ratio > 0.f
-        && parameters.drive_gear_ratio > 0.f
-        && parameters.reverse_gear_ratio > 0.f
-        && parameters.max_forward_speed_mps > 0.f
-        && parameters.max_reverse_speed_mps > 0.f
-        && parameters.idle_rpm > 0.f
-        && parameters.max_rpm >= parameters.idle_rpm
-        && parameters.fuel_rate_percent_s >= 0.f
-        && parameters.front_track_m > 0.f
-        && parameters.rear_track_m > 0.f
-        && parameters.cg_height_m > 0.f
-        && parameters.front_static_load_fraction > 0.f
-        && parameters.front_static_load_fraction < 1.f
-        && parameters.front_drive_torque_fraction >= 0.f
-        && parameters.front_drive_torque_fraction <= 1.f
-        && parameters.front_service_brake_fraction >= 0.f
-        && parameters.front_service_brake_fraction <= 1.f
-        && parameters.yaw_inertia_kg_m2 > 0.f
-        && parameters.pitch_inertia_kg_m2 > 0.f
-        && parameters.roll_inertia_kg_m2 > 0.f
-        // v4 retains these two serialized fields for compatibility, but the
-        // four-corner model does not permit a synthetic body-to-ground spring.
-        && parameters.attitude_spring_n_m_rad == 0.f
-        && parameters.attitude_damping_n_m_s_rad == 0.f
-        && parameters.front_tire_corner_stiffness_n_rad > 0.f
-        && parameters.rear_tire_corner_stiffness_n_rad > 0.f
-        && parameters.tire_longitudinal_stiffness_n > 0.f
-        && parameters.tire_friction > 0.f
-        && parameters.surface_default_friction_scale > 0.f
-        && parameters.surface_default_friction_scale <= 4.f
-        && parameters.surface_asphalt_friction_scale > 0.f
-        && parameters.surface_asphalt_friction_scale <= 4.f
-        && parameters.surface_low_friction_scale > 0.f
-        && parameters.surface_low_friction_scale <= 4.f
-        && parameters.surface_rough_friction_scale > 0.f
-        && parameters.surface_rough_friction_scale <= 4.f
-        && parameters.lateral_grip_priority > 0.f
-        && parameters.lateral_grip_priority <= 1.f
-        && parameters.traction_control_slip_target >= 0.f
-        && parameters.traction_control_full_cut_slip
-            > parameters.traction_control_slip_target
-        && parameters.traction_control_full_cut_slip <= 1.f
-        && parameters.wheel_inertia_kg_m2 > 0.f
-        && parameters.wheel_free_spin_damping_n_m_s >= 0.f
-        && parameters.low_speed_slip_reference_mps > 0.f
-        && parameters.collision_body_overhang_m > 0.f
-        && parameters.collision_body_side_padding_m > 0.f
-        && parameters.collision_body_half_height_m > 0.f
-        && parameters.chassis_shell_half_height_m > 0.f
-        && std::abs(parameters.chassis_shell_center_up_offset_m)
-            < parameters.collision_body_half_height_m * 2.f
-        && simcore_host::valid_suspension_parameters(parameters.suspension);
-}
-
 VehiclePhysics::VehiclePhysics(double lat, double lon, double alt, float heading,
                                VehicleParameters parameters,
                                std::shared_ptr<const simcore_host::GroundQuery> ground_query,
@@ -653,6 +515,7 @@ void VehiclePhysics::reset()
     support_pitch_rad_ = 0.f;
     support_roll_rad_ = 0.f;
     support_attitude_valid_ = false;
+    motorcycle_rider_attached_ = true;
     applied_drive_force_n_ = 0.f;
     wheel_angular_speed_rad_s_.fill(0.f);
     suspension_compression_m_.fill(0.f);
@@ -792,7 +655,8 @@ void VehiclePhysics::refresh_runtime_tire_supports(
         const double angle = shape.heading_rad-heading_rad_;
         const double half_span = shape.half_length_m*std::abs(std::sin(angle))
             + shape.half_width_m*std::abs(std::cos(angle));
-        const double half_track = std::min(parameters_.front_track_m,parameters_.rear_track_m)*.5;
+        const double half_track = parameters_.single_track ? 0.0
+            : std::min(parameters_.front_track_m,parameters_.rear_track_m)*.5;
         const bool reaches_tires = std::abs(std::abs(lateral)-half_track) <= half_span+.12;
         // If both tire tracks straddle an object taller than the actual belly
         // clearance, preserve its collision. A low rounded label alone is not
@@ -851,6 +715,7 @@ VehicleState VehiclePhysics::update(
     const float step_start_support_pitch_rad = support_pitch_rad_;
     const float step_start_support_roll_rad = support_roll_rad_;
     const bool step_start_support_attitude_valid = support_attitude_valid_;
+    const bool step_start_rider_attached = motorcycle_rider_attached_;
     const auto step_start_suspension_compression = suspension_compression_m_;
     const auto step_start_suspension_force = suspension_base_force_n_;
     const auto step_start_suspension_contact = suspension_had_contact_;
@@ -976,10 +841,11 @@ VehicleState VehiclePhysics::update(
     const std::array<float, 4> wheel_x{
         cg_to_front_axle_m, cg_to_front_axle_m,
         -cg_to_rear_axle_m, -cg_to_rear_axle_m};
-    const std::array<float, 4> wheel_y{-parameters_.front_track_m * 0.5f,
-                                       parameters_.front_track_m * 0.5f,
-                                      -parameters_.rear_track_m * 0.5f,
-                                       parameters_.rear_track_m * 0.5f};
+    const float contact_width_scale = parameters_.single_track ? 0.f : 0.5f;
+    const std::array<float, 4> wheel_y{-parameters_.front_track_m * contact_width_scale,
+                                       parameters_.front_track_m * contact_width_scale,
+                                      -parameters_.rear_track_m * contact_width_scale,
+                                       parameters_.rear_track_m * contact_width_scale};
 
     // The body is supported at four suspension mounts, not directly by an
     // averaged terrain normal. Unequal spring/damper reactions create the
@@ -1779,6 +1645,11 @@ VehicleState VehiclePhysics::update(
             const double impulse =
                 strongest_contact->accumulated_normal_impulse_n_s;
             state_.last_impact_impulse_n_s = static_cast<float>(impulse);
+            if (parameters_.single_track &&
+                ((impulse >= parameters_.mass_kg * 4.0 && std::abs(previous_speed) >= 2.5f)
+                    || (impulse >= 250.0 && (std::abs(roll_rad_) >= 1.134464f
+                        || std::abs(pitch_rad_) >= 1.134464f))))
+                motorcycle_rider_attached_ = false;
             for (const auto& contact : collision_result.contacts) {
                 simcore_host::record_vehicle_dent(state_.dent_patches,
                     collision_result.body.shape, contact);
@@ -1926,9 +1797,18 @@ VehicleState VehiclePhysics::update(
     // tire-patch forces at CG height.  The legacy attitude K/C fields remain
     // serialized as zero for v4 compatibility; the fitted support plane is
     // reset/diagnostic data, not a hidden force or a motion boundary.
-    const float roll_moment = suspension_roll_moment_n_m
+    float roll_moment = suspension_roll_moment_n_m
         + tire_contact_roll_moment_n_m
         + rolling_contact_roll_moment_n_m;
+    if (parameters_.single_track) {
+        const bool supported = (state_.wheels[0].in_contact || state_.wheels[1].in_contact)
+            && (state_.wheels[2].in_contact || state_.wheels[3].in_contact);
+        roll_moment += simcore_host::motorcycle_balance_torque(
+            simcore_host::motorcycle_equilibrium_roll(body_longitudinal_speed_mps_,
+                canonical_navigation_yaw_rate_after_collision),
+            roll_rad_, roll_rate_rad_s_, roll_moment, parameters_.roll_inertia_kg_m2,
+            parameters_.mass_kg, parameters_.cg_height_m, supported, motorcycle_rider_attached_);
+    }
     const float pitch_moment = suspension_pitch_moment_n_m
         + tire_contact_pitch_moment_n_m
         + rolling_contact_pitch_moment_n_m;
@@ -2011,6 +1891,7 @@ VehicleState VehiclePhysics::update(
         support_pitch_rad_ = step_start_support_pitch_rad;
         support_roll_rad_ = step_start_support_roll_rad;
         support_attitude_valid_ = step_start_support_attitude_valid;
+        motorcycle_rider_attached_ = step_start_rider_attached;
         body_longitudinal_speed_mps_ = 0.f;
         solver_lateral_speed_mps_ = 0.f;
         solver_yaw_rate_rad_s_ = 0.f;
@@ -2187,9 +2068,10 @@ bool VehiclePhysics::update_wheel_contacts(
     const std::array<double, 4> wheel_x{
         cg_to_front_axle_m, cg_to_front_axle_m,
         -cg_to_rear_axle_m, -cg_to_rear_axle_m};
+    const double contact_width_scale = parameters_.single_track ? 0.0 : 0.5;
     const std::array<double, 4> wheel_y{
-        -parameters_.front_track_m * 0.5, parameters_.front_track_m * 0.5,
-        -parameters_.rear_track_m * 0.5, parameters_.rear_track_m * 0.5};
+        -parameters_.front_track_m * contact_width_scale, parameters_.front_track_m * contact_width_scale,
+        -parameters_.rear_track_m * contact_width_scale, parameters_.rear_track_m * contact_width_scale};
 
     const double heading_sine = std::sin(heading_rad_);
     const double heading_cosine = std::cos(heading_rad_);

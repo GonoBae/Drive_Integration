@@ -65,6 +65,7 @@ target_include_directories(simcore_collision PUBLIC
 add_library(simcore_physics
     src/physics/chassis_ground_contact.cpp
     src/physics/vehicle_config.cpp
+    src/physics/vehicle_parameters.cpp
     src/physics/vehicle_physics.cpp
     src/terrain/heightfield_ground_query.cpp
     src/terrain/map_package_ground_query.cpp
@@ -135,6 +136,7 @@ endif()
 add_library(simcore_host_core
     src/player_vehicle_profile.cpp
     src/replay/physics_replay.cpp
+    src/runtime_collision_reaction.cpp
     src/simulation_host.cpp
     src/simulation_host_npc.cpp
     src/simulation_host_session.cpp
@@ -186,6 +188,9 @@ endif()
 include(CTest)
 
 if(BUILD_TESTING)
+    add_executable(runtime_collision_reaction_tests tests/runtime_collision_reaction_test.cpp)
+    target_link_libraries(runtime_collision_reaction_tests PRIVATE simcore_host_core)
+    add_test(NAME runtime_collision_reaction_tests COMMAND runtime_collision_reaction_tests)
     add_executable(physics_replay_tests tests/physics_replay_test.cpp)
     target_link_libraries(physics_replay_tests PRIVATE simcore_host_core simcore_runtime_options)
     add_test(NAME physics_replay_tests COMMAND physics_replay_tests)
@@ -212,6 +217,15 @@ if(BUILD_TESTING)
     set_tests_properties(npc_mixed_fleet_tests PROPERTIES TIMEOUT 15)
     add_test(NAME npc_close_escape_tests COMMAND npc_navigation_host_tests --close-escape)
     set_tests_properties(npc_close_escape_tests PROPERTIES TIMEOUT 30)
+    add_test(NAME npc_limited_close_escape_tests COMMAND npc_navigation_host_tests --limited-close-escape)
+    set_tests_properties(npc_limited_close_escape_tests PROPERTIES TIMEOUT 30)
+    add_test(NAME npc_downed_stopline_escape_tests COMMAND npc_navigation_host_tests --downed-stopline)
+    set_tests_properties(npc_downed_stopline_escape_tests PROPERTIES TIMEOUT 60)
+    add_test(NAME npc_downed_rear_blocked_tests COMMAND npc_navigation_host_tests --downed-rear-blocked)
+    set_tests_properties(npc_downed_rear_blocked_tests PROPERTIES TIMEOUT 30)
+    add_executable(motorcycle_physics_tests tests/motorcycle_physics_test.cpp)
+    target_link_libraries(motorcycle_physics_tests PRIVATE simcore_host_core)
+    add_test(NAME motorcycle_physics_tests COMMAND motorcycle_physics_tests)
     add_executable(npc_lane_follower_tests tests/npc_lane_follower_test.cpp)
     target_link_libraries(npc_lane_follower_tests PRIVATE simcore_traffic)
     add_test(NAME npc_lane_follower_tests COMMAND npc_lane_follower_tests)

@@ -148,7 +148,10 @@ void USimCoreClientComponent::DrawRuntimeEntityDebug() const
 		const auto& State = Pair.Value;
 		const AActor* Actor = RuntimeEntityActors.FindRef(Pair.Key).Get();
 		if (!Actor || Actor->IsHidden()) continue;
-		const FVector Centre = Actor->GetActorLocation();
+		// Use the accepted collision pose, without presentation extrapolation.
+		// Tumbled extents are already projected by the server; do not tilt twice.
+		const FVector Centre = SimCoreCoordinateFrames::MapEnuPositionMetersToUnrealCentimeters(
+			State.PositionEnu, RuntimeEntityPresentationOffsetCm);
 		const bool bPedestrian = State.EntityKind == SimCoreProtocol::EEntityKind::Pedestrian;
 		if (bPedestrian && !State.bPedestrianDowned)
 		{
@@ -160,8 +163,8 @@ void USimCoreClientComponent::DrawRuntimeEntityDebug() const
 		{
 			// Downed extents are the server's already pitch/roll-projected vertical
 			// OBB. Applying visual pitch a second time would draw a standing ghost.
-			const FQuat CollisionRotation = bPedestrian
-				? FRotator(0.0, State.HeadingDegrees, 0.0).Quaternion() : Actor->GetActorQuat();
+			const FQuat CollisionRotation = SimCoreCoordinateFrames::BuildUnrealActorRotation(
+				State.HeadingDegrees, 0.0f, 0.0f, 0.0f, FVector3d::ZeroVector, 0.0f).Quaternion();
 			DrawDebugBox(World, Centre,
 				FVector(State.CollisionHalfLengthMeters, State.CollisionHalfWidthMeters,
 					State.CollisionHalfHeightMeters) * 100.0,

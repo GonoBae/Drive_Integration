@@ -15,6 +15,18 @@ namespace SimCoreSignalCity
 	inline constexpr TCHAR MapId[] = TEXT("signal_city_v2");
 
 	DRIVEINTEGRATION_API SimCoreVirtualCity::FLayout BuildLayout();
+	/** Shared south-to-north centerline for road, paint, curbs and traffic. */
+	DRIVEINTEGRATION_API TArray<FVector> BuildCollectorCenterline(bool bEast);
+	DRIVEINTEGRATION_API TArray<FVector> OffsetCollectorCenterline(
+		const TArray<FVector>& Centerline, double OffsetM);
+	/** Last saved generation before road and traffic adopted a common curve. */
+	DRIVEINTEGRATION_API SimCoreVirtualCity::FLayout BuildAlignedCollectorMarkingsV3Layout();
+	/** First shared-curve generation, before outer-joint asphalt overlap correction. */
+	DRIVEINTEGRATION_API SimCoreVirtualCity::FLayout BuildUnsealedCollectorCurvesV4Layout();
+	/** Shared curves before the minimum-radius sidewalk correction. */
+	DRIVEINTEGRATION_API SimCoreVirtualCity::FLayout BuildSealedCollectorCurvesV5Layout();
+	/** Shared road geometry before the visible three-to-one lane merges. */
+	DRIVEINTEGRATION_API SimCoreVirtualCity::FLayout BuildUnmergedCollectorLanesV6Layout();
 	/** Exact prior generated geometry, only for guarded in-place traffic-lane migration. */
 	DRIVEINTEGRATION_API SimCoreVirtualCity::FLayout BuildLegacySingleLaneLayout();
 	/** Exact first three-lane generation, before sidewalk-safe crossing placement. */

@@ -4,6 +4,9 @@
 #include "Engine/Engine.h"
 #include "Engine/StaticMesh.h"
 #include "UObject/ConstructorHelpers.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Paths.h"
+#include "SimCoreClientSettings.h"
 #include "SimCoreMapPackage.h"
 #include "WebSocketsModule.h"
 
@@ -87,7 +90,7 @@ void USimCoreClientComponent::Connect()
 	{
 		return;
 	}
-	if (!PrepareMapPackageIdentity())
+	if (!PrepareRuntimeSettings() || !PrepareMapPackageIdentity())
 	{
 		bAutoReconnectEnabled = false;
 		SetConnectionState(ESimCoreConnectionState::Incompatible);
@@ -147,6 +150,13 @@ bool USimCoreClientComponent::GetLatestState(
 
 void USimCoreClientComponent::StartConnectionAttempt()
 {
+	// Vehicle selection and reconnect must not bypass an invalid external config.
+	if (!PrepareRuntimeSettings())
+	{
+		bAutoReconnectEnabled = false;
+		SetConnectionState(ESimCoreConnectionState::Incompatible);
+		return;
+	}
 	// A server-side MapPackage hot reload closes the old checksum lifecycle.
 	// Re-read the editor's manifest before every reconnect so the next Reset and
 	// control frames use the newly committed collision identity automatically.
@@ -253,6 +263,27 @@ bool USimCoreClientComponent::PrepareMapPackageIdentity()
 	return true;
 }
 
+bool USimCoreClientComponent::PrepareRuntimeSettings()
+{
+	if (bRuntimeSettingsLoaded) return true;
+	SimCoreClientSettings::FSettings Defaults;
+	Defaults.ServerUrl = ServerUrl;
+	Defaults.MapPackageDirectory = MapPackageDirectory;
+	SimCoreClientSettings::FSettings Settings;
+	if (!SimCoreClientSettings::Load(Defaults, FCommandLine::Get(), FPaths::ProjectDir(),
+		Settings, RuntimeSettingsError))
+	{
+		UE_LOG(LogSimCoreClient, Error, TEXT("Client configuration rejected: %s"), *RuntimeSettingsError);
+		return false;
+	}
+	ServerUrl = Settings.ServerUrl;
+	MapPackageDirectory = Settings.MapPackageDirectory;
+	bRuntimeSettingsLoaded = true;
+	UE_LOG(LogSimCoreClient, Log, TEXT("Client settings: endpoint=%s config=%s"),
+		*ServerUrl, Settings.LoadedConfigPath.IsEmpty() ? TEXT("serialized defaults / CLI") : *Settings.LoadedConfigPath);
+	return true;
+}
+
 void USimCoreClientComponent::TickConnection()
 {
 	if (bAutoReconnectEnabled
@@ -307,8 +338,13 @@ void USimCoreClientComponent::TickTelemetry(float DeltaTime)
 
 void USimCoreClientComponent::TickDebugHud(float DeltaTime)
 {
-	if (!bShowDebugHud || GEngine == nullptr)
+	if (GEngine == nullptr)
 	{
+		return;
+	}
+	if (!bShowDebugHud)
+	{
+		GEngine->RemoveOnScreenDebugMessage(DebugHudMessageKey());
 		return;
 	}
 	DebugHudAccumulator += DeltaTime;
@@ -370,6 +406,11 @@ double USimCoreClientComponent::GetHealthSnapshotAgeSeconds() const
 FString USimCoreClientComponent::BuildDebugStatusText(
 	const SimCoreClientDiagnostics::FHealthDisplay* DisplayOverride) const
 {
+	if (!RuntimeSettingsError.IsEmpty())
+	{
+		return FString::Printf(TEXT("SimCore Incompatible | configuration error: %s\nFix SimCoreClient.ini or launch arguments, then restart Play."),
+			*RuntimeSettingsError);
+	}
 	const TCHAR* StateText = TEXT("Disconnected");
 	switch (ConnectionState)
 	{

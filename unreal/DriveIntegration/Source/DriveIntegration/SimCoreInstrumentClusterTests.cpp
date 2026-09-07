@@ -83,4 +83,36 @@ bool FSimCoreInstrumentClusterGameModeTest::RunTest(const FString& Parameters)
 		GameMode != nullptr && GameMode->HUDClass == ASimCoreInstrumentClusterHud::StaticClass());
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FSimCoreInstrumentClusterViewportTest,
+	"DriveIntegration.Presentation.InstrumentCluster.CompactViewportLayout",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FSimCoreInstrumentClusterViewportTest::RunTest(const FString& Parameters)
+{
+	bool bOk = true;
+	for (const FVector2D View : {FVector2D(640, 360), FVector2D(1280, 720),
+		FVector2D(1920, 1080), FVector2D(3840, 2160), FVector2D(640, 480), FVector2D(2560, 1080)})
+	{
+		const auto Layout = SimCoreInstrumentCluster::BuildLayout(View.X, View.Y);
+		const FString Resolution = FString::Printf(TEXT("%.0fx%.0f"), View.X, View.Y);
+		bOk &= TestTrue(Resolution + TEXT(" cluster stays completely inside viewport"),
+			Layout.Position.X >= 0 && Layout.Position.Y >= 0
+			&& Layout.Size.X > 0 && Layout.Size.Y > 0
+			&& Layout.Position.X + Layout.Size.X < View.X
+			&& Layout.Position.Y + Layout.Size.Y < View.Y);
+		bOk &= TestTrue(Resolution + TEXT(" cluster covers no more than six percent of screen"),
+			Layout.Size.X * Layout.Size.Y / (View.X * View.Y) <= 0.06);
+		bOk &= TestTrue(Resolution + TEXT(" cluster leaves the central driving view clear"),
+			Layout.Position.X >= View.X * 0.65 && Layout.Position.Y >= View.Y * 0.70);
+		bOk &= TestTrue(Resolution + TEXT(" cluster proportions and scale remain bounded"),
+			FMath::IsNearlyEqual(Layout.Size.X / Layout.Size.Y, 350.0 / 136.0, 1.e-5)
+			&& Layout.Scale > 0 && Layout.Scale <= 1.35f);
+	}
+	const USimCoreClientComponent* Client = GetDefault<USimCoreClientComponent>();
+	bOk &= TestTrue(TEXT("detailed network diagnostics do not cover the viewport by default"),
+		Client && !Client->bShowDebugHud);
+	return bOk;
+}
+
 #endif

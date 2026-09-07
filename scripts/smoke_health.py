@@ -8,16 +8,16 @@ and terminates only the child process it created. No map files are modified.
 import argparse
 import asyncio
 from datetime import datetime
-import os
 from pathlib import Path
 import socket
-import subprocess
 import sys
 import time
 import uuid
 
 import websockets
 from websockets.exceptions import ConnectionClosed
+
+from smoke_host import child_host, connect_child
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python" / "relay_server" / "generated"))
@@ -112,17 +112,7 @@ class Controller:
 
 
 async def exercise(url, process, expected_source):
-    deadline = time.monotonic() + 10
-    while True:
-        require(process.poll() is None, "isolated host exited during startup; inspect its logs")
-        try:
-            connection = await websockets.connect(url, open_timeout=1, max_queue=256)
-            break
-        except (OSError, TimeoutError):
-            if time.monotonic() >= deadline:
-                raise
-            await asyncio.sleep(0.1)
-
+    connection = await connect_child(url, process, close_timeout=10)
     play_id = "health-play-" + uuid.uuid4().hex
     try:
         controller = Controller(connection, play_id, expected_source)
@@ -201,21 +191,11 @@ def main():
                "--ws-port", str(port), "--command-timeout-ms", "250",
                "--hard-command-timeout-ms", "1000", "--source-id", expected_source]
     with (log_dir / (stem + ".stdout.log")).open("wb") as stdout, \
-            (log_dir / (stem + ".stderr.log")).open("wb") as stderr:
-        process = subprocess.Popen(command, cwd=ROOT, stdout=stdout, stderr=stderr,
-                                   creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+            (log_dir / (stem + ".stderr.log")).open("wb") as stderr, \
+            child_host(command, cwd=ROOT, stdout=stdout, stderr=stderr) as process:
         print(f"Isolated server PID={process.pid} port={port}; logs={log_dir / stem}")
-        try:
-            asyncio.run(exercise(f"ws://127.0.0.1:{port}", process, expected_source))
-            print("PASS Health WebSocket smoke (isolated child only)")
-        finally:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
+        asyncio.run(exercise(f"ws://127.0.0.1:{port}", process, expected_source))
+        print("PASS Health WebSocket smoke (isolated child only)")
 
 
 if __name__ == "__main__":

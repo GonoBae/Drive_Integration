@@ -3,10 +3,16 @@
 2026-09-03 계획의 자동 검증 진입점이다. **자동 통과와 Core RC 인수 완료는 다르다.**
 실제 운전 감각, 화면/충돌 일치, 목표 PC의 패키지 성능과 30분 수동 주행은 별도 gate다.
 
-9월 7일 정리 기준, 최신 개별 검증은 9월 5일 CTest 34/34와 재생 통합 후 관련 4/4,
-UE Automation 84/84(79개 경고 없음, 5개 예상 경고)다. 같은 최신 스냅샷으로 아래 단일
-통합 절차 전체를 통과한 기록은 아직 없다. 9월 3일의 `automatic_pass`를 최신 전체 코드의
-검증 결과로 재사용하지 않는다. 이번 문서 정리에서는 빌드·시험을 다시 실행하지 않았다.
+9월 7일 리팩터링 후 아래 단일 통합 절차의 16개 단계를 모두 실행해 `automatic_pass`를
+확인했다. CTest 35/35, UE Automation 94/94(89개 경고 없음, 5개 예상 경고), Python 검사
+도구 57/57과 서버 통신·물리 재생·저장 맵 검사를 통과했다. 최신 보고서는
+`runtime_logs/core-check-20260907-125530-2bbd3321/report.json`이다.
+상세 결과와 경계는 [9/7 작업일지](./worklogs/2026-09-07.md)에 구분한다.
+
+같은 날 플레이 피드백 8건을 반영한 후속 결과는 CTest 37/37, UE Automation 97/97,
+Python 도구 57/57 통과다. 위 단일 보고서는 리팩터링 시점의 기록이며 후속 결과를 대신하지 않는다.
+후속 원시 로그는 `runtime_logs/followup-eight-ready-20260907/`와
+`runtime_logs/20260907-followup-cpp-v6-final-tests.log`에 구분해 보관한다.
 
 ## 한 번에 자동 검증
 
@@ -26,7 +32,7 @@ PowerShell이 필요하다. C++의 프로젝트 로컬 vcpkg와 UE 5.6 설치는
 포함 범위:
 
 1. C++ Release configure/build와 전체 CTest. 빈 시험 또는 건너뛴 시험은 통과가 아니다.
-2. 생성된 Python Proto 정합성, Python 검증 도구 unit test, 세 server launcher profile.
+2. 생성된 Python Proto 정합성, Python 검증 도구 unit test, 세 server launcher profile와 Windows 패키지 계획/실행기 검사.
 3. 격리된 임시 loopback port의 Signal City 실제 WebSocket 시험과 물리 replay 시험.
 4. UE Editor/Game Development build와 `DriveIntegration` 전체 Automation.
 5. Virtual City/Signal City의 map·traffic `ValidateOnly`. 맵 생성·Bake·덮어쓰기는 하지 않는다.
@@ -42,7 +48,7 @@ PowerShell이 필요하다. C++의 프로젝트 로컬 vcpkg와 UE 5.6 설치는
 
 ## 입력 기반 물리 재생
 
-기존 `F5` snapshot CSV/`F6` visual ghost는 그대로 유지한다. 서버의 물리 재생은 별도
+기존 `R` snapshot CSV/`F6` visual ghost는 그대로 유지한다. 서버의 물리 재생은 별도
 기능이며 화면 좌표를 복사하지 않고, 기록된 입력을 같은 `VehiclePhysics`에 다시 적용한다.
 
 ```powershell

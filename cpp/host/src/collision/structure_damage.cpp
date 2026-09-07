@@ -529,11 +529,13 @@ void StructureDamageRuntime::apply_signal_faults(std::vector<TrafficSignalSnapsh
     for (auto& signal : signals) {
         for (const auto& target : targets_) {
             if (target.state.kind != StructureKind::SignalPole || !target.state.disabled) { continue; }
-            if (signal.controller_id == target.controller_id) {
+            // A broken physical head does not damage the intersection timer.
+            // Other heads keep their evaluated phase; only this lens is dark.
+            if (signal.id == target.state.signal_id) {
                 signal.aspect = SignalAspect::Red;
                 signal.remaining_seconds = 0.0;
+                signal.out_of_service = true;
             }
-            if (signal.id == target.state.signal_id) { signal.out_of_service = true; }
         }
     }
 }

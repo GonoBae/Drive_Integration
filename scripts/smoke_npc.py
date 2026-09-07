@@ -10,13 +10,13 @@ from contextlib import suppress
 from datetime import datetime
 import json
 import math
-import os
 import socket
-import subprocess
 import time
 import uuid
 
 import websockets
+
+from smoke_host import child_host, connect_child
 
 from smoke_traffic import (ROOT, pb, require, network_expectations, TrafficController,
                            reset_to_all_red, wait_state, heartbeat)
@@ -42,16 +42,7 @@ def distance_to_segment(x, y, a, b):
 
 
 async def exercise(url, process, source, expected, lanes, trace):
-    deadline = time.monotonic() + 10
-    while True:
-        require(process.poll() is None, "child host exited")
-        try:
-            connection = await websockets.connect(url, open_timeout=1, close_timeout=1, max_queue=256)
-            break
-        except (OSError, TimeoutError):
-            if time.monotonic() > deadline:
-                raise
-            await asyncio.sleep(.1)
+    connection = await connect_child(url, process)
     controller = TrafficController(connection, "npc-play-" + uuid.uuid4().hex, source, expected)
     try:
         await controller.hello()
@@ -154,21 +145,11 @@ def main():
         "--npc-loop", "true", "--npc-start-offset", "96", "--npc-max-speed", "6", "--no-demo-entities"]
     with (directory / (stem + ".stdout.log")).open("wb") as stdout, \
          (directory / (stem + ".stderr.log")).open("wb") as stderr, \
-         (directory / (stem + ".jsonl")).open("w", encoding="utf-8") as trace:
-        process = subprocess.Popen(command, cwd=ROOT, stdout=stdout, stderr=stderr,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+         (directory / (stem + ".jsonl")).open("w", encoding="utf-8") as trace, \
+         child_host(command, cwd=ROOT, stdout=stdout, stderr=stderr) as process:
         print(f"Isolated NPC server PID={process.pid}, port={port}; evidence={directory / stem}", flush=True)
-        try:
-            asyncio.run(exercise(f"ws://127.0.0.1:{port}", process, source, expected, lanes, trace))
-            print("PASS NPC WebSocket smoke (isolated child only)", flush=True)
-        finally:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
+        asyncio.run(exercise(f"ws://127.0.0.1:{port}", process, source, expected, lanes, trace))
+        print("PASS NPC WebSocket smoke (isolated child only)", flush=True)
 
 
 if __name__ == "__main__":

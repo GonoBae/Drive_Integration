@@ -496,13 +496,15 @@ std::string serialize_world_state_envelope(
             }
             const auto group_key = std::pair{signal.controller_id, signal.group_id};
             const auto existing_group = group_states.find(group_key);
-            if (existing_group != group_states.end()
+            if (!signal.out_of_service && existing_group != group_states.end()
                 && (existing_group->second.first != aspect
                     || std::abs(existing_group->second.second
                                 - signal.remaining_seconds) > .001)) {
                 throw std::invalid_argument("signal heads in one group must agree");
             }
-            group_states[group_key] = {aspect, signal.remaining_seconds};
+            if (!signal.out_of_service) {
+                group_states[group_key] = {aspect, signal.remaining_seconds};
+            }
             auto* target = world_state->add_traffic_signals();
             target->set_signal_id(signal.id);
             target->set_group_id(signal.group_id);
@@ -545,13 +547,8 @@ std::string serialize_world_state_envelope(
     }
     for (const auto& signal : traffic_signals) {
         if (!signal.out_of_service) continue;
-        if (!pole_signal_ids.contains(signal.id)
-            || std::any_of(traffic_signals.begin(), traffic_signals.end(),
-                [&](const auto& other) {
-                    return other.controller_id == signal.controller_id
-                        && (other.aspect != SignalAspect::Red || other.remaining_seconds != 0.0);
-                })) {
-            throw std::invalid_argument("broken head requires damaged pole and all-red controller");
+        if (!pole_signal_ids.contains(signal.id)) {
+            throw std::invalid_argument("broken head requires its authoritative damaged pole");
         }
     }
 

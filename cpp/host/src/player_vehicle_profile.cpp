@@ -112,6 +112,7 @@ VehicleParameters make_player_vehicle_parameters(
         scale_suspension(result, sedan);
         break;
     case RuntimeVehicleClass::Motorcycle:
+        result.single_track = true;
         result.mass_kg = 240.f;
         result.wheelbase_m = 1.81f;
         result.max_steering_angle_rad = 0.5585054f; // 32 degrees
@@ -132,7 +133,7 @@ VehicleParameters make_player_vehicle_parameters(
         result.front_track_m = 0.60f;
         result.rear_track_m = 0.60f;
         result.cg_height_m = 0.42f;
-        result.front_static_load_fraction = 0.52f;
+        result.front_static_load_fraction = 0.82f / 1.81f;
         result.front_drive_torque_fraction = 0.f;
         result.yaw_inertia_kg_m2 = 210.f;
         result.pitch_inertia_kg_m2 = 180.f;
@@ -149,6 +150,8 @@ VehicleParameters make_player_vehicle_parameters(
         result.chassis_shell_center_up_offset_m = 0.20f;
         result.chassis_shell_half_height_m = 0.36f;
         scale_suspension(result, sedan);
+        result.suspension.rest_length_m = result.cg_height_m - result.tire_radius_m + 0.12f;
+        result.suspension.max_compression_m = 0.16f;
         break;
     case RuntimeVehicleClass::Unspecified:
         break;

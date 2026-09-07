@@ -449,12 +449,19 @@ bool NpcLaneFollower::green(std::uint32_t group_id,
     bool found_group = false;
     for (const auto& expected : signal_identities_) {
         if (expected.group_id != group_id) { continue; }
-        found_group = true;
         std::size_t matches = 0;
         for (const auto& signal : signals) {
             if (signal.id != expected.id) { continue; }
             ++matches;
-            if (signal.group_id != group_id || signal.aspect != SignalAspect::Green
+            if (signal.group_id != group_id) { return false; }
+            if (signal.out_of_service) {
+                if (signal.aspect != SignalAspect::Red || signal.remaining_seconds != 0.0) {
+                    return false;
+                }
+                continue;
+            }
+            found_group = true;
+            if (signal.aspect != SignalAspect::Green
                 || !std::isfinite(signal.remaining_seconds)
                 || signal.remaining_seconds <= elapsed_seconds + epsilon) { return false; }
         }

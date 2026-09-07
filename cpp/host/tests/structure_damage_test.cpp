@@ -329,19 +329,37 @@ std::vector<TrafficSignalSnapshot> green_signals()
     return states;
 }
 
-void outage_is_controller_scoped_and_reset_clears_it()
+void outage_is_head_scoped_and_reset_clears_it()
 {
     auto runtime = runtime_fixture();
     hit(runtime, "signal-pole-1", 3000.0);
     auto signals = green_signals();
     runtime.apply_signal_faults(signals);
-    require(signals[0].aspect == SignalAspect::Red && signals[1].aspect == SignalAspect::Red
-        && signals[0].remaining_seconds == 0.0 && signals[1].remaining_seconds == 0.0,
-        "one broken pole must place its whole controller, including pedestrian heads, in all-red");
+    require(signals[0].aspect == SignalAspect::Red && signals[0].remaining_seconds == 0.0
+        && signals[1].aspect == SignalAspect::Green && near(signals[1].remaining_seconds, 12.0),
+        "one broken pole must not freeze functioning heads on the same controller");
     require(signals[0].out_of_service && !signals[1].out_of_service && !signals[2].out_of_service,
         "only the physically broken head is out of service");
     require(signals[2].aspect == SignalAspect::Green && near(signals[2].remaining_seconds, 12.0),
         "independent intersections must retain their normal signal plan");
+    auto traffic = traffic_fixture();
+    traffic.format_version = 2;
+    TrafficSignalPlan plan;
+    plan.id = 1;
+    plan.groups = {1, 2};
+    plan.phases = {{1000, {}, {}}, {3000, {1}, {}}, {1000, {}, {1}},
+                   {1000, {}, {}}, {3000, {2}, {}}, {1000, {}, {2}}};
+    plan.cycle_ms = 10000;
+    traffic.signal_plans = {plan};
+    for (std::uint64_t seconds = 0; seconds < 300; ++seconds) {
+        signals = traffic.signals_at(seconds * 1000000000ULL);
+        const auto expected = signals[1];
+        runtime.apply_signal_faults(signals);
+        require(signals[0].out_of_service && signals[0].remaining_seconds == 0.0
+            && signals[1].aspect == expected.aspect
+            && signals[1].remaining_seconds == expected.remaining_seconds,
+            "five minutes after pole destruction must preserve every healthy phase/countdown");
+    }
     runtime.reset();
     signals = green_signals();
     runtime.apply_signal_faults(signals);
@@ -536,7 +554,7 @@ int main()
         split_impulse_can_collapse_at_all_rates();
         repeated_distinct_impacts_accumulate();
         collapse_direction_ground_support_and_no_ghost();
-        outage_is_controller_scoped_and_reset_clears_it();
+        outage_is_head_scoped_and_reset_clears_it();
         pause_discards_pending_and_freezes_existing_pose();
         invalid_inputs_do_not_poison_authoritative_snapshots();
         rebuild_validation_is_transactional();

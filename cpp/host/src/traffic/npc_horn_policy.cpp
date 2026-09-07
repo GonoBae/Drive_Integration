@@ -97,6 +97,17 @@ const NpcHornState& NpcHornPolicy::step(
 
     const bool horn_permitted = observation.motion_context
         != NpcHornMotionContext::TrafficControlStop;
+    if (horn_permitted && observation.obstacle_clearance_m
+        && observation.nonresponsive_obstacle_id != 0
+        && observation.nonresponsive_obstacle_id != nonresponsive_obstacle_id_) {
+        nonresponsive_obstacle_id_ = observation.nonresponsive_obstacle_id;
+        nonresponsive_obstacle_warned_ = false;
+        imminent_latched_ = false;
+    }
+    const bool nonresponsive_already_warned =
+        observation.nonresponsive_obstacle_id != 0
+        && observation.nonresponsive_obstacle_id == nonresponsive_obstacle_id_
+        && nonresponsive_obstacle_warned_;
     const bool obstruction = horn_permitted
         && observation.motion_context == NpcHornMotionContext::ObstructionStop
         && observation.persistent_obstruction
@@ -126,14 +137,22 @@ const NpcHornState& NpcHornPolicy::step(
 
     if (imminent && !imminent_latched_) {
         imminent_latched_ = true;
-        if (state_.cooldown_remaining_s <= kTimerEpsilonS) {
+        if (!nonresponsive_already_warned
+            && state_.cooldown_remaining_s <= kTimerEpsilonS) {
             trigger(NpcHornReason::ImminentCollision);
+            if (observation.nonresponsive_obstacle_id != 0) {
+                nonresponsive_obstacle_warned_ = true;
+            }
         }
     } else if (obstruction
+        && !nonresponsive_already_warned
         && state_.obstruction_seconds + kTimerEpsilonS
             >= config_.obstruction_delay_s
         && state_.cooldown_remaining_s <= kTimerEpsilonS) {
         trigger(NpcHornReason::PersistentObstruction);
+        if (observation.nonresponsive_obstacle_id != 0) {
+            nonresponsive_obstacle_warned_ = true;
+        }
         // Continue measuring the same obstruction, but require the full delay
         // again if a caller configures a cooldown shorter than that delay.
         state_.obstruction_seconds = 0.0;
@@ -145,6 +164,8 @@ void NpcHornPolicy::reset() noexcept
 {
     state_ = {};
     imminent_latched_ = false;
+    nonresponsive_obstacle_id_ = 0;
+    nonresponsive_obstacle_warned_ = false;
 }
 
 void NpcHornPolicy::trigger(NpcHornReason reason) noexcept

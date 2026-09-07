@@ -13,31 +13,29 @@
 | map-local GameMode | `SignalCityGameMode` |
 | MapPackage | `map_packages/signal_city_v2` |
 | traffic schema | `traffic_network.json` format version 2 |
-| map checksum | `fnv1a64:86c3103f3e2c7a5b` |
-| traffic checksum | `fnv1a64:b19c15afba6936d7` |
+| map checksum | `map_packages/signal_city_v2/manifest.cfg`의 `collision_checksum` |
+| traffic checksum | 서버 시작 로그의 traffic checksum, 최신 값은 [9/7 작업일지](./worklogs/2026-09-07.md) |
 | host config | `cpp/host/config/signal_city_server.cfg` |
 | launcher | `scripts/run_signal_city_server.ps1` |
 
 ## 현재 생성물과 검증 기준
 
-2026-09-03에는 기존 자동 생성 맵을 백업하고 8개 접근도로에 좌회전·직진·우회전 전용
-3차로를 반영했다. 저장 맵과 ground를 함께 갱신한 결과이며, 아래 identity는 실제
-commandlet Bake/export와 package preflight로 확인했다. 전체 인수 결과는 작업일지에서 관리한다.
+8개 접근도로에 좌회전·직진·우회전 전용 3차로가 있다. 9월 7일에는 곡선 연결도로의
+아스팔트·표시·보도·NPC 경로를 같은 중심곡선으로 맞췄다. 현재 생성물의 checksum과
+검증 결과·백업 위치는 [9/7 작업일지](./worklogs/2026-09-07.md)에서 관리한다.
 
 | 항목 | 값 |
 |---|---:|
-| collision checksum | `fnv1a64:86c3103f3e2c7a5b` |
-| traffic network checksum | `fnv1a64:b19c15afba6936d7` |
-| scene box / Ground component / static collider | 613 / 124 / 49 |
-| heightfield | `401 × 481`, 50cm spacing |
-| QA route checkpoint | 394 |
+| static collider | 453(연석 446·건물 벽 7) |
+| heightfield spacing | 50cm |
+| QA route checkpoint | 453 |
 | traffic lane / runtime head / controller | 58 / 16(차량 8·보행 8) / 2 |
 | server-authoritative NPC / pedestrian | 10 / 8 |
 | 접근도로 | 왕복 20m, 방향별 3개 차로(각 3.2m) |
 
-이 수치는 현재 생성 bytes와 저장 map의 검증 기록이다. 재Bake 뒤에는 manifest와 두
-commandlet의 성공 로그를 다시 확인한 뒤 문서의 생성 기록도 함께 갱신한다. traffic JSON의
-`source_map_checksum`은 위 collision checksum과 일치하고, traffic network checksum은 JSON
+재Bake 뒤에는 manifest와 두 commandlet의 성공 로그를 다시 확인한 뒤 작업일지의 생성
+기록도 함께 갱신한다. traffic JSON의 `source_map_checksum`은 manifest의 collision checksum과
+일치하고, traffic network checksum은 JSON
 전체 바이트의 별도 identity다.
 9/2 당시 publisher build의 Health와 traffic v2 WebSocket smoke는 통과했다. 서버는 아래
 공통 launcher가 시작한 프로세스의 port 9000 소유권과 고유 stdout/stderr 로그를 확인한다.
@@ -83,7 +81,7 @@ checksum gate가 조작을 거부하는 것이 정상이다.
    `H` 클락션, 마우스 orbit, 휠 zoom, `C` 카메라 복귀를 사용한다. `1/2/3/4`는 각각
    세단/경차/트럭/오토바이를 선택한다. 다른 차종을 선택하면 현재 입력을 비우고 새
    PlaySession으로 연결해 출발점에서 다시 시작한다. `F3`는 차량 collision/contact 디버그
-   오버레이, `F5`는 권한 snapshot CSV 기록, `F6`는 마지막 CSV의 collision-free 시각 ghost
+   오버레이, `R`은 권한 snapshot CSV 기록, `F6`는 마지막 CSV의 collision-free 시각 ghost
    재생이다.
 6. 새 Play에서는 차량·simulation clock·신호가 reset된다. 같은 PlaySession의 일시적
    socket reconnect는 simulation time을 되감지 않는다.
@@ -189,11 +187,10 @@ cmake --build 'B:\Portfolio\Drive_Integration\cpp\host\build' `
 `unreal/DriveIntegration/Saved/Backups/SignalCityTraffic-20260903-183949-6E097719`다.
 갱신 후에는 아래 `-UpdateExisting` traffic export를 이어서 실행해야 한다.
 
-collector 전환부 표시 v3에서는 테이퍼 진행방향과 반대인 직선 도로 frame을 그대로 써서
-좌·우 부호가 뒤집히던 v2 오류를 고쳤다. commandlet은 저장 맵이 정확한 v2 생성 상태일
-때만 전용 v2 layout과 비교한 뒤 백업하고, 충돌이 없는 소유 도색 geometry만 v3로
-교체한다. 수동으로 옮긴 표시나 사용자 actor가 있으면 덮어쓰지 않고 중단한다. 실행 뒤에는
-네 collector 커브의 중앙선과 양쪽 가장자리선이 서로 교차하지 않는지 PIE에서도 확인한다.
+collector 전환부는 저장된 생성 버전에 맞는 원본과 비교한 뒤 백업·갱신한다. 수동으로
+옮긴 표시나 충돌하는 사용자 actor가 있으면 덮어쓰지 않고 중단한다. 최신 합류 표시에서는
+내부 구분선 두 개가 기존 가장자리 선으로 차례로 모인다. 실행 뒤에는 네 collector 접속부의
+중앙선·구분선·가장자리 선이 끊기거나 서로 교차하지 않는지 PIE에서도 확인한다.
 
 Ground Bake 뒤에는 `source_map_checksum`을 새 collision identity에 맞춰 traffic sidecar를
 갱신해야 한다. `traffic_network.json`이 처음 생성되는 경우에만 option 없이 export하고,
@@ -259,7 +256,7 @@ port 9000 서버를 계속 띄우지 않는다.
 
 SensorRig는 `Config/sensors.json`의 `base_link` FLU mount를 읽어 front camera 10Hz와
 roof LiDAR 20Hz의 권한 `SimulationTimeNs` metadata cadence만 만든다. 실제 image/point cloud
-payload 캡처는 아직 없다. `F5` 기록은
+payload 캡처는 아직 없다. `R` 기록은
 `Saved/DriveReplays/last_drive.csv`에 권한 snapshot을 저장하고 `F6`는 시각 ghost로
 재생한다. command/event를 C++ 물리에 다시 적용하는 결정적 re-simulation은 아니므로
 REC-002/AT-07 완료 증거로 사용하지 않는다.
@@ -277,7 +274,7 @@ REC-002/AT-07 완료 증거로 사용하지 않는다.
    횡단하며 지정 횡단보도를 벗어나지 않는지 확인한다.
 4. Ego로 바깥 loop와 중앙 avenue를 주행해 연석·보도·건물 충돌, 카메라, HUD와 차량
    presentation을 확인한다.
-5. End PIE→Play reset, 일시 reconnect와 stale/all-red, `F3` overlay와 `F5/F6` 실제 표시,
+5. End PIE→Play reset, 일시 reconnect와 stale/all-red, `F3` overlay와 `R/F6` 실제 표시,
    1920×1080 60fps, 30분 안정성을 각각 확인한다.
 6. 운행 가능한 NPC에 중간 정도 충돌을 내고 차체색 문 열림 → 양발을 차례로 문턱 밖
    지면에 디딤 → 하차 → 문 닫힘 → 한 손 항의 순서를 확인한다. 경사·연석에서도 발이
@@ -289,9 +286,14 @@ REC-002/AT-07 완료 증거로 사용하지 않는다.
    방향으로 전진 또는 후진하며 경로에 합류하는지 확인한다.
 9. 긴 다차로 접근로에서 Ego로 앞길을 막고 뒤 NPC가 안전한 인접 차로로 변경해 실제로
    지나가는지 확인한다. 단일 차로와 교차로 충돌 영역에서는 중앙선을 넘지 않는 것이 정상이다.
+   쓰러진 보행자가 있을 때도 확인한다. 옆 차로와 후방을 비운 경우 실제로 우회해야 하며,
+   옆 차로나 후방까지 막은 경우에는 사람을 밀어붙이지 않고 대기해야 한다.
+   같은 사고 보행자에게 경적을 반복하는지도 함께 확인한다.
 10. 모든 직선·곡선·collector 전환 도로 구간에 중앙선과 양쪽 가장자리 표시가 이어지는지
     확인한다. 다차로 접근로에는 점선 차로 구분이 있어야 하며 교차로 중심 충돌 영역에는
     연속 중앙선이 없는 것이 정상이다.
+    특히 3차로에서 1차로로 줄어드는 곳은 내부 구분선이 갑자기 끝나지 않고 합류 구간을
+    따라 모여야 한다. 곡선에서 반대편 선을 가로지르거나 노면 밖으로 나가면 안 된다.
 11. `1/2/3/4`로 세단·경차·트럭·오토바이를 차례로 선택한다. 선택할 때마다 출발점으로
     초기화되고, 화면 차체뿐 아니라 가속·제동·조향과 충돌 크기도 해당 차종에 맞게 바뀌는지
     확인한다.
@@ -304,6 +306,8 @@ NPC 깜빡이는 서버가 차선 변경·회전 의도에 맞춰 켜며 운행 
 9/4 후속 조작: `H`는 플레이어 차량의 위치 기반 클락션이다. NPC는 10m 안의 고정 장애물
 앞에서 1.5초 이상 정체되거나 충돌 예상시간이 0.8초 이하일 때만 울리며, 신호 대기와
 일반 차량 행렬에서는 울리지 않는다. 같은 위험에는 5초 쿨다운과 재발 방지 latch를 쓴다.
+쓰러진 보행자는 별도로 구분해 동일 대상에 경고 한 번만 허용한다. 이후에는 안전한
+우회·후진을 검토하고, 통과할 공간이 없으면 반복 경적 없이 대기한다.
 차량 창문은 실제 개구부와 투명 유리를 사용하며 Ego/NPC 운전자가 보인다. 큰 충격이나
 손상에서는 운전자 머리와 상체가 핸들 쪽으로 숙여지는 경량 부상 자세를 표시한다.
 방향지시등은 렌즈 발광과 국부 조명을 함께 사용한다. 작은 접촉만으로 운전자가 숙여지지
@@ -312,14 +316,14 @@ NPC 깜빡이는 서버가 차선 변경·회전 의도에 맞춰 켜며 운행 
 앞·뒤 좌석, 바닥, 센터 콘솔, 양쪽 도어 트림과 계기판 블록아웃이 포함된다.
 `F3`에서 Ego뿐 아니라 NPC·보행자의 서버 충돌체와 몸통 중심을 확인할 수 있다.
 누운 사람은 낮은 OBB여야 하며 서 있는 캡슐이 남으면 안 된다. 앞선 도로 생성과 traffic
-export는 검증된 상태이므로 별도 Ground Bake 없이 Play한다. collector 표시 v3 반영은 위
-`-SyncTrafficLanes`가 저장된 v2 geometry를 정확히 확인한 경우에만 수행한다.
+export는 검증된 상태이므로 별도 Ground Bake 없이 Play한다. 저장 맵 갱신이 필요한 경우에만
+위 `-SyncTrafficLanes`의 보호 검증·백업을 거친다.
 
 플레이어 차종은 Unreal 화면만 바꾸는 옵션이 아니다. `SimulationReset`에서 요청한 차종을
 서버가 검증하고 물리 profile을 교체한 뒤, 권한 `WorldState`의 Ego 차종을 Unreal이 받아
 차체·바퀴·램프 배치를 바꾼다. 같은 PlaySession의 재연결은 기존 자세와 차종을 보존하며,
-차종 변경은 새 PlaySession을 사용한다. 오토바이는 현재 네 접점 차량 물리 profile에 두 개의
-바퀴를 보이게 한 축약 표현이며, 실제 이륜차의 기울기·균형 동역학은 포함하지 않는다.
+차종 변경은 새 PlaySession을 사용한다. 오토바이는 앞·뒤 중심선 접점과 회전 안쪽으로의
+균형 제어를 쓰는 축약 모델이다. 조향축·자이로까지 계산하는 완전한 이륜 동역학은 아니다.
 
 운전석 문은 별도 authored static mesh와 실제 차체 개구부를 사용하지만 Chaos 관절 문은
 아니라 표시용 힌지 회전이다. 하차·항의는 양발 IK를 포함한 절차적 포즈다. 보행 충돌은
@@ -333,7 +337,7 @@ export는 검증된 상태이므로 별도 Ground Bake 없이 Play한다. collec
 - NPC 10대는 저작된 그래프 안에서 목적지·우회·차선 변경을 결정하는 제한된 규칙 AI다.
   보행자 8명은 지정 crosswalk를 유지한다. 실제 센서 인식·traffic demand·군중 회피,
   Ego 자율주행과 NPC 전체 타이어/서스펜션 동역학은 범위 밖이다.
-- SensorRig는 metadata-only이고 실제 image/point cloud를 만들지 않는다. F5/F6는 상태
+- SensorRig는 metadata-only이고 실제 image/point cloud를 만들지 않는다. R/F6는 상태
   snapshot/시각 ghost이므로 command/event 기반 결정적 물리 재시뮬레이션을 제공하지 않는다.
 - 도로는 외곽 벽으로 둘러싸인 직사각형이 아니다. 저작 도로 밖을 무한 지면으로 간주하지
   않으며 MapPackage support가 없는 곳은 물리가 fail-closed할 수 있다.

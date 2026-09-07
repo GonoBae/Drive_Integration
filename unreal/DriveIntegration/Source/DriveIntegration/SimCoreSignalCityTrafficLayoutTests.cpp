@@ -330,6 +330,16 @@ bool FSimCoreSignalCityCollectorTangentsTest::RunTest(const FString& Parameters)
 	{
 		const auto* Lane = FindLane(Traffic, Id);
 		if (!TestNotNull(TEXT("collector exists"), Lane)) return false;
+		TArray<FVector> Shared = OffsetCollectorCenterline(
+			BuildCollectorCenterline(Id == 3001 || Id == 3003), Id >= 3003 ? -2.0 : 2.0);
+		if (Id >= 3003) { Algo::Reverse(Shared); }
+		bOk &= TestEqual(TEXT("NPC route has every shared asphalt curve sample"),
+			Lane->PointsEnuM.Num(), Shared.Num());
+		for (int32 Index = 0; Index < FMath::Min(Lane->PointsEnuM.Num(), Shared.Num()); ++Index)
+		{
+			bOk &= TestTrue(TEXT("NPC route follows the road's offset curve, without a separate shortcut"),
+				Lane->PointsEnuM[Index].Equals(Shared[Index], 1.e-7));
+		}
 		const FVector Incoming(Id == 3001 || Id == 3003 ? 1.0 : -1.0, 0, 0);
 		const FVector Outgoing = -Incoming;
 		const FVector First = Lane->PointsEnuM[1] - Lane->PointsEnuM[0];

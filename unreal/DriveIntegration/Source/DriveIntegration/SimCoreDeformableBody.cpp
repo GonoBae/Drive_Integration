@@ -100,7 +100,7 @@ bool USimCoreDeformableBody::ApplyDamage(UStaticMeshComponent* Source,
 			UKismetProceduralMeshLibrary::GetSectionFromStaticMesh(Mesh, 0, Index,
 				Rest.Positions, Rest.Indices, Rest.Normals, Rest.UVs, Rest.Tangents);
 			CreateMeshSection(Index, Rest.Positions, Rest.Indices, Rest.Normals, Rest.UVs, {}, Rest.Tangents, false);
-			// Geometry now contains the dent. A separate MID prevents applying WPO a second time.
+			// A separate MID prevents applying WPO on top of the vertex deformation.
 			if (UMaterialInterface* Original = Source->GetMaterial(Sections[Index].MaterialIndex))
 			{
 				UMaterialInterface* Parent = Original;

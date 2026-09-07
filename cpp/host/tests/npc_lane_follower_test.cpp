@@ -309,6 +309,29 @@ void test_signals_fail_closed_for_aspects_missing_conflicting_and_expired_heads(
                         "nonfinite green validity must fail closed");
 }
 
+void test_broken_head_uses_functioning_redundant_head_only()
+{
+    auto signals = signal_snapshots(SignalAspect::Green);
+    signals[0].out_of_service = true;
+    signals[0].aspect = SignalAspect::Red;
+    signals[0].remaining_seconds = 0.0;
+    FlatGroundQuery ground;
+    NpcLaneFollower follower;
+    follower.rebuild(signal_network(), ground, {10, 20, 30});
+    for (int index = 0; index < 900; ++index) follower.step(step_seconds, signals);
+    require(follower.state().position_enu.east_m > 30.0,
+        "a damaged lens must not override a functioning green head in the same group");
+    signals[1].out_of_service = true;
+    signals[1].aspect = SignalAspect::Red;
+    signals[1].remaining_seconds = 0.0;
+    require_signal_stop(signals, "a group with every lens broken has no valid crossing permission");
+    signals[1].out_of_service = false;
+    signals[1].remaining_seconds = 4.0;
+    require_signal_stop(signals, "a functioning red head must still stop the damaged group");
+    signals[0].aspect = SignalAspect::Green;
+    require_signal_stop(signals, "an invalid permissive broken head must fail closed");
+}
+
 void test_green_resume_and_front_crossing_commitment_survives_yellow()
 {
     const FlatGroundQuery ground;
@@ -812,6 +835,7 @@ int main()
         test_polyline_and_sloped_three_dimensional_arc_length();
         test_lower_successor_limit_is_anticipated_without_hard_clamp();
         test_signals_fail_closed_for_aspects_missing_conflicting_and_expired_heads();
+        test_broken_head_uses_functioning_redundant_head_only();
         test_green_resume_and_front_crossing_commitment_survives_yellow();
         test_v2_maximum_controller_and_group_drive_the_real_follower_path();
         test_large_steps_red_and_green_expiration_do_not_tunnel();

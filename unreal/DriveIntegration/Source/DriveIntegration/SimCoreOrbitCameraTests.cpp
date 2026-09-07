@@ -4,9 +4,11 @@
 
 #include "ExternalVehiclePawn.h"
 #include "SimCoreClientComponent.h"
+#include "SimCoreDriverPresentation.h"
 
 #include "Camera/CameraComponent.h"
 #include "Components/InputComponent.h"
+#include "Components/PoseableMeshComponent.h"
 #include "Engine/World.h"
 #include "GameFramework/InputSettings.h"
 #include "GameFramework/SpringArmComponent.h"
@@ -125,6 +127,12 @@ bool FSimCoreOrbitInputBindingsTest::RunTest(const FString& Parameters)
 		[](const FInputActionKeyMapping& Mapping) { return Mapping.Key == EKeys::C; }));
 	bSuccess &= TestTrue(TEXT("right stick click resets camera"), ResetMappings.ContainsByPredicate(
 		[](const FInputActionKeyMapping& Mapping) { return Mapping.Key == EKeys::Gamepad_RightThumbstick; }));
+	TArray<FInputActionKeyMapping> CycleMappings;
+	Settings->GetActionMappingByName(TEXT("CameraCycle"), CycleMappings);
+	bSuccess &= TestTrue(TEXT("V cycles camera modes"), CycleMappings.ContainsByPredicate(
+		[](const FInputActionKeyMapping& Mapping) { return Mapping.Key == EKeys::V; }));
+	bSuccess &= TestTrue(TEXT("left stick click cycles camera modes"), CycleMappings.ContainsByPredicate(
+		[](const FInputActionKeyMapping& Mapping) { return Mapping.Key == EKeys::Gamepad_LeftThumbstick; }));
 	bSuccess &= TestFalse(TEXT("mouse smoothing does not introduce presentation lag"), Settings->bEnableMouseSmoothing);
 	bSuccess &= TestFalse(TEXT("orbit sensitivity is not unexpectedly scaled by FOV"), Settings->bEnableFOVScaling);
 
@@ -218,6 +226,156 @@ bool FSimCoreOrbitInputBindingsTest::RunTest(const FString& Parameters)
 	bSuccess &= TestTrue(TEXT("C restores rear view relative to current vehicle heading"),
 		Boom->GetTargetRotation().Equals(FRotator(-15.0, 30.0, 0.0), 0.001));
 	bSuccess &= TestEqual(TEXT("C also restores normal chase distance"), Boom->TargetArmLength, 600.0f);
+	World->DestroyWorld(false);
+	return bSuccess;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FSimCoreCameraModeMathTest,
+	"DriveIntegration.Camera.DriverLimitsMountsAndModeCycle",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FSimCoreCameraModeMathTest::RunTest(const FString& Parameters)
+{
+	using namespace SimCoreOrbitCamera;
+	using SimCoreProtocol::ERuntimeVehicleClass;
+	bool bSuccess = true;
+	bSuccess &= TestTrue(TEXT("follow cycles to driver"), NextMode(EMode::Follow) == EMode::Driver);
+	bSuccess &= TestTrue(TEXT("driver cycles to fixed rear"), NextMode(EMode::Driver) == EMode::FixedRear);
+	bSuccess &= TestTrue(TEXT("fixed rear cycles to follow"), NextMode(EMode::FixedRear) == EMode::Follow);
+	for (int32 FramesPerSecond : {30, 60, 120, 240})
+	{
+		FDriverLook Mouse;
+		FDriverLook Gamepad;
+		for (int32 Frame = 0; Frame < FramesPerSecond; ++Frame)
+		{
+			AddDriverMouseDelta(Mouse, 225.0f / FramesPerSecond, -100.0f / FramesPerSecond, 0.2f);
+			AddDriverGamepadRate(Gamepad, 0.5f, -0.25f, 90.0f, 1.0f / FramesPerSecond);
+		}
+		bSuccess &= TestTrue(TEXT("driver mouse delta remains frame independent"),
+			FMath::IsNearlyEqual(Mouse.YawDegrees, 45.0f, 0.001f)
+				&& FMath::IsNearlyEqual(Mouse.PitchDegrees, -20.0f, 0.001f));
+		bSuccess &= TestTrue(TEXT("driver right stick remains frame independent"),
+			FMath::IsNearlyEqual(Gamepad.YawDegrees, 45.0f, 0.001f)
+				&& FMath::IsNearlyEqual(Gamepad.PitchDegrees, -22.5f, 0.001f));
+	}
+	FDriverLook Look;
+	AddDriverMouseDelta(Look, 10000.0f, -10000.0f, 0.2f);
+	bSuccess &= TestEqual(TEXT("driver cannot turn through the rear of the headrest"), Look.YawDegrees, 75.0f);
+	bSuccess &= TestEqual(TEXT("driver cannot look through the floor"), Look.PitchDegrees, -40.0f);
+	AddDriverMouseDelta(Look, -10000.0f, 10000.0f, 0.2f);
+	bSuccess &= TestEqual(TEXT("left look is bounded"), Look.YawDegrees, -75.0f);
+	bSuccess &= TestEqual(TEXT("up look is bounded"), Look.PitchDegrees, 30.0f);
+	const FQuat BodyRotation = FRotator(19.0, 72.0, -12.0).Quaternion();
+	Look = {};
+	bSuccess &= TestTrue(TEXT("driver follows actual chassis pitch, yaw and roll"),
+		BuildBodyRelativeRotation(Look, BodyRotation).Quaternion().Equals(BodyRotation, 0.0001));
+	Look.YawDegrees = std::numeric_limits<float>::quiet_NaN();
+	bSuccess &= TestFalse(TEXT("invalid look cannot poison camera rotation"),
+		BuildBodyRelativeRotation(Look, BodyRotation).ContainsNaN());
+	const FVehicleMounts Sedan = GetVehicleMounts(ERuntimeVehicleClass::Sedan);
+	const FVehicleMounts Compact = GetVehicleMounts(ERuntimeVehicleClass::Compact);
+	const FVehicleMounts Truck = GetVehicleMounts(ERuntimeVehicleClass::Truck);
+	const FVehicleMounts Motorcycle = GetVehicleMounts(ERuntimeVehicleClass::Motorcycle);
+	bSuccess &= TestTrue(TEXT("sedan view is at the driver side inside the greenhouse"),
+		Sedan.DriverLocationCm.Y < 0.0 && Sedan.DriverLocationCm.Z > 54.0 && Sedan.DriverLocationCm.Z < 95.0);
+	bSuccess &= TestTrue(TEXT("compact mount follows its actual mesh scale and offset"),
+		Compact.DriverLocationCm.Equals(Sedan.DriverLocationCm * FVector(0.79, 0.90, 0.92)
+			+ FVector(-4.0, 0.0, -1.5)));
+	bSuccess &= TestTrue(TEXT("truck view is inside the hollow cab at its driver seat"),
+		!Truck.bDriverUsesCabFrontFallback && Truck.DriverLocationCm.Equals(FVector(95.0, -34.0, 145.0)));
+	bSuccess &= TestTrue(TEXT("truck rear view clears the tall cargo body"),
+		Truck.FixedTargetHeightCm > 164.0 && Truck.FixedDistanceCm > Sedan.FixedDistanceCm);
+	bSuccess &= TestTrue(TEXT("motorcycle rider view sits above the handlebar and on centerline"),
+		Motorcycle.DriverLocationCm.Z > 70.0 && Motorcycle.DriverLocationCm.Y == 0.0);
+	return bSuccess;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FSimCoreCameraModesPawnTest,
+	"DriveIntegration.Camera.ModeSwitchClassMountsAndOwnerVisibility",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FSimCoreCameraModesPawnTest::RunTest(const FString& Parameters)
+{
+	using namespace SimCoreOrbitCamera;
+	using SimCoreProtocol::ERuntimeVehicleClass;
+	const UWorld::InitializationValues Values = UWorld::InitializationValues()
+		.AllowAudioPlayback(false).RequiresHitProxies(false).CreatePhysicsScene(false)
+		.CreateNavigation(false).CreateAISystem(false).ShouldSimulatePhysics(false)
+		.SetTransactional(false).CreateFXSystem(false);
+	UWorld* World = UWorld::CreateWorld(EWorldType::Game, false,
+		MakeUniqueObjectName(GetTransientPackage(), UWorld::StaticClass(), TEXT("SimCoreCameraModesQa")),
+		GetTransientPackage(), true, ERHIFeatureLevel::Num, &Values);
+	if (!TestNotNull(TEXT("isolated camera modes QA world"), World)) return false;
+	AExternalVehiclePawn* Pawn = World->SpawnActor<AExternalVehiclePawn>();
+	if (!TestNotNull(TEXT("camera modes QA pawn"), Pawn))
+	{
+		World->DestroyWorld(false);
+		return false;
+	}
+	bool bSuccess = true;
+	UInputComponent* Input = NewObject<UInputComponent>(Pawn);
+	Pawn->SetupPlayerInputComponent(Input);
+	bool bCycleExecuted = false;
+	for (int32 Index = 0; Index < Input->GetNumActionBindings(); ++Index)
+	{
+		FInputActionBinding& Binding = Input->GetActionBinding(Index);
+		if (Binding.GetActionName() == TEXT("CameraCycle") && Binding.KeyEvent == IE_Pressed)
+		{
+			Binding.ActionDelegate.Execute(EKeys::V);
+			bCycleExecuted = true;
+			break;
+		}
+	}
+	bSuccess &= TestTrue(TEXT("V action enters driver mode without BeginPlay or server"),
+		bCycleExecuted && Pawn->GetCameraMode() == EMode::Driver);
+	Pawn->SetActorLocationAndRotation(FVector(100, 200, 300), FRotator(18, 37, -11));
+	const FTransform AuthoritativeTransform = Pawn->GetActorTransform();
+	for (const ERuntimeVehicleClass VehicleClass : {ERuntimeVehicleClass::Sedan,
+		ERuntimeVehicleClass::Compact, ERuntimeVehicleClass::Truck, ERuntimeVehicleClass::Motorcycle})
+	{
+		bSuccess &= TestTrue(TEXT("camera QA class assets configure"), Pawn->ConfigureVehicleClass(VehicleClass));
+		Pawn->UpdateOrbitCamera(0.0f);
+		const FVehicleMounts Mounts = GetVehicleMounts(VehicleClass);
+		bSuccess &= TestTrue(TEXT("driver mount updates with accepted vehicle class"),
+			Pawn->CameraBoom->TargetOffset.Equals(Pawn->GetActorQuat().RotateVector(Mounts.DriverLocationCm), 0.001));
+		bSuccess &= TestEqual(TEXT("driver mount has no chase arm"), Pawn->CameraBoom->TargetArmLength, 0.0f);
+		bSuccess &= TestFalse(TEXT("driver mount cannot be pulled through its own cabin"), Pawn->CameraBoom->bDoCollisionTest);
+		bSuccess &= TestTrue(TEXT("driver follows chassis rotation instead of a world-level horizon"),
+			Pawn->CameraBoom->GetTargetRotation().Quaternion().Equals(Pawn->GetActorQuat(), 0.001));
+	}
+	Pawn->ConfigureVehicleClass(ERuntimeVehicleClass::Sedan);
+	Pawn->UpdateOrbitCamera(0.0f);
+	UPoseableMeshComponent* DriverMesh = Pawn->DriverPresentation->GetDriverMesh();
+	if (TestNotNull(TEXT("sedan has seated driver mesh"), DriverMesh))
+	{
+		bSuccess &= TestTrue(TEXT("seated body cannot occlude its owner's driver camera"), DriverMesh->bOwnerNoSee);
+	}
+	else bSuccess = false;
+	bSuccess &= TestTrue(TEXT("driver view keeps cabin enabled"), Pawn->DriverPresentation->IsVisible());
+	Pawn->CycleCameraView();
+	const FRotator FixedRotation = Pawn->CameraBoom->GetTargetRotation();
+	const float FixedDistance = Pawn->CameraBoom->TargetArmLength;
+	Pawn->OrbitCameraYaw(500.0f);
+	Pawn->OrbitCameraPitch(500.0f);
+	Pawn->ZoomCamera(10.0f);
+	Pawn->SetCameraGamepadYaw(1.0f);
+	Pawn->UpdateOrbitCamera(1.0f);
+	bSuccess &= TestTrue(TEXT("fixed view ignores look and zoom inputs"),
+		Pawn->CameraBoom->GetTargetRotation().Equals(FixedRotation, 0.001)
+			&& Pawn->CameraBoom->TargetArmLength == FixedDistance);
+	bSuccess &= TestTrue(TEXT("fixed external view restores obstacle probing"), Pawn->CameraBoom->bDoCollisionTest);
+	if (DriverMesh) bSuccess &= TestFalse(TEXT("external view restores the driver"), DriverMesh->bOwnerNoSee);
+	Pawn->SetCameraGamepadYaw(0.0f);
+	Pawn->ResetCameraView();
+	bSuccess &= TestTrue(TEXT("C restores follow mode from any mode"), Pawn->GetCameraMode() == EMode::Follow);
+	bSuccess &= TestTrue(TEXT("C restores rear follow with a level horizon"),
+		Pawn->CameraBoom->GetTargetRotation().Equals(FRotator(-15.0, 37.0, 0.0), 0.001));
+	bSuccess &= TestEqual(TEXT("C restores normal orbit distance"), Pawn->CameraBoom->TargetArmLength, 600.0f);
+	bSuccess &= TestTrue(TEXT("camera modes do not move the authoritative pawn"),
+		Pawn->GetActorTransform().Equals(AuthoritativeTransform, 0.001));
+	bSuccess &= TestFalse(TEXT("camera modes do not connect to a server"), Pawn->SimCoreClient->IsConnected());
 	World->DestroyWorld(false);
 	return bSuccess;
 }

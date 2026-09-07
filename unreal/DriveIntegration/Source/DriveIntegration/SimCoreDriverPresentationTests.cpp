@@ -3,9 +3,11 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Components/PoseableMeshComponent.h"
+#include "Components/BoxComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
+#include "ExternalVehiclePawn.h"
 #include "Materials/MaterialInterface.h"
 #include "Misc/AutomationTest.h"
 #include "SimCoreDamagePresentation.h"
@@ -19,10 +21,10 @@ namespace
 struct FDriverTestWorld
 {
 	UWorld* World = nullptr;
-	FDriverTestWorld()
+	FDriverTestWorld(const bool bCreatePhysicsScene = false)
 	{
 		const UWorld::InitializationValues Values = UWorld::InitializationValues()
-			.AllowAudioPlayback(false).RequiresHitProxies(false).CreatePhysicsScene(false)
+			.AllowAudioPlayback(false).RequiresHitProxies(false).CreatePhysicsScene(bCreatePhysicsScene)
 			.CreateNavigation(false).CreateAISystem(false).ShouldSimulatePhysics(false)
 			.SetTransactional(false).CreateFXSystem(false);
 		World = UWorld::CreateWorld(EWorldType::Game, false,
@@ -273,6 +275,216 @@ bool FSimCoreDriverActorTest::RunTest(const FString& Parameters)
 		&& Driver->GetCurrentProtestAlpha() < 0.1f
 		&& Driver->GetCurrentDoorOpenAlpha() < 0.01f
 		&& Driver->GetCurrentDriverExitAlpha() < 0.01f);
+	return Ok;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSimCoreFleetCabinTest,
+	"DriveIntegration.Presentation.Driver.FleetCabinVisibilityAndDoorDamage",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FSimCoreFleetCabinTest::RunTest(const FString& Parameters)
+{
+	using SimCoreProtocol::ERuntimeVehicleClass;
+	FDriverTestWorld TestWorld;
+	if (!TestNotNull(TEXT("world exists"), TestWorld.World)) return false;
+	auto* Npc = TestWorld.World->SpawnActor<ASimCoreNpcPresentationActor>();
+	auto* Player = TestWorld.World->SpawnActor<AExternalVehiclePawn>();
+	if (!TestNotNull(TEXT("NPC"), Npc) || !TestNotNull(TEXT("player"), Player)) return false;
+	USimCoreDriverPresentation* Driver = Npc->GetDriverPresentation();
+	SimCoreDamagePresentation::FZoneWeights Dent;
+	Dent.Left = 0.6f;
+	Dent.bContactLocal = true;
+	Dent.Dents.Add({FVector2D(0.0, 1.0), FVector2D(0.0, -1.0), 0.8f, 0.2f});
+	bool Ok = true;
+	for (const auto Class : {ERuntimeVehicleClass::Sedan, ERuntimeVehicleClass::Compact,
+		ERuntimeVehicleClass::Truck, ERuntimeVehicleClass::Motorcycle, ERuntimeVehicleClass::Sedan})
+	{
+		auto State = NpcState();
+		State.RuntimeVehicleClass = Class;
+		Ok &= TestTrue(TEXT("class snapshot applies"),
+			Npc->ApplySnapshot(State, 0.0f, 0.0f, true, 0.05f, FVector::ZeroVector));
+		Ok &= TestTrue(TEXT("every NPC class has a visible driver/rider"),
+			Driver->HasDriverAssets() && Driver->GetDriverMesh()->IsVisible()
+			&& !Driver->GetDriverMesh()->bOwnerNoSee);
+		Ok &= TestTrue(TEXT("player class selection enables its matching cabin and driver"),
+			Player->ConfigureVehicleClass(Class) && Player->DriverPresentation->HasDriverAssets()
+			&& Player->DriverPresentation->GetDriverMesh()->IsVisible());
+		Ok &= TestTrue(TEXT("player and NPC share the same seat placement"),
+			Player->DriverPresentation->GetRelativeTransform().Equals(Driver->GetRelativeTransform(), 0.001f));
+		const bool bRider = Class == ERuntimeVehicleClass::Motorcycle;
+		if (bRider)
+		{
+			const auto BoneInBike = [Driver](const FName Bone)
+			{
+				auto* Mesh = Driver->GetDriverMesh();
+				return Mesh->GetRelativeTransform().TransformPosition(
+					Mesh->GetBoneTransformByName(Bone, EBoneSpaces::ComponentSpace).GetLocation());
+			};
+			const double LeftError = FVector::Distance(BoneInBike(TEXT("hand_l")), FVector(75.0, -40.0, 70.0));
+			const double RightError = FVector::Distance(BoneInBike(TEXT("hand_r")), FVector(75.0, 40.0, 70.0));
+			Ok &= TestTrue(*FString::Printf(TEXT("rider reaches existing handlebar grips (%.1f/%.1f cm)"),
+				LeftError, RightError), LeftError < 15.0 && RightError < 15.0);
+		}
+		if (Class == ERuntimeVehicleClass::Truck)
+		{
+			auto* Mesh = Driver->GetDriverMesh();
+			const FVector Head = Driver->GetRelativeTransform().TransformPosition(
+				Mesh->GetRelativeTransform().TransformPosition(Mesh->GetBoneTransformByName(
+					TEXT("head"), EBoneSpaces::ComponentSpace).GetLocation()));
+			Ok &= TestTrue(TEXT("truck driver's head is inside the open cab, below its roof"),
+				Head.X > 32.0 && Head.X < 171.0 && Head.Z > 98.0 && Head.Z < 158.0);
+		}
+		Ok &= TestEqual(TEXT("only cars show the cabin steering wheel"),
+			Driver->GetSteeringWheel()->IsVisible(), !bRider);
+		TArray<USceneComponent*> Parts;
+		Driver->GetChildrenComponents(true, Parts);
+		int32 VisibleSeats = 0;
+		for (const USceneComponent* Part : Parts)
+		{
+			if (Part->GetName().Contains(TEXT("Seat")) && Part->IsVisible()) ++VisibleSeats;
+			if (bRider && Part->GetName().Contains(TEXT("Door")))
+			{
+				Ok &= TestFalse(TEXT("bike has no visible sedan door part"), Part->IsVisible());
+			}
+		}
+		Ok &= TestTrue(TEXT("car seats restored; bike uses its existing saddle"),
+			bRider ? VisibleSeats == 0 : VisibleSeats >= 4);
+		for (const auto& Damage : {Dent, SimCoreDamagePresentation::FZoneWeights{}})
+		{
+			Driver->ApplyDoorDamage(Damage);
+			if (Class != ERuntimeVehicleClass::Sedan)
+			{
+				Ok &= TestFalse(TEXT("fleet damage/reset cannot create a sedan door"),
+					Driver->GetDriverDoorPanel()->IsVisible()
+					|| Driver->GetDriverDoorDeformableBody()->IsVisible());
+			}
+		}
+	}
+	Ok &= TestTrue(TEXT("player switches to motorcycle"),
+		Player->ConfigureVehicleClass(ERuntimeVehicleClass::Motorcycle));
+	for (const auto& Damage : {Dent, SimCoreDamagePresentation::FZoneWeights{}})
+	{
+		Player->DriverPresentation->ApplyDoorDamage(Damage);
+		Ok &= TestFalse(TEXT("player bike door stays hidden after damage and reset"),
+			Player->DriverPresentation->GetDriverDoorPanel()->IsVisible()
+			|| Player->DriverPresentation->GetDriverDoorDeformableBody()->IsVisible());
+	}
+	Ok &= TestTrue(TEXT("switching player back restores a closed sedan door"),
+		Player->ConfigureVehicleClass(ERuntimeVehicleClass::Sedan)
+			&& Player->DriverPresentation->GetDriverDoorPanel()->IsVisible()
+			&& !Player->DriverPresentation->GetDriverDoorDeformableBody()->IsVisible());
+	return Ok;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSimCoreMotorcycleRiderEjectionTest,
+	"DriveIntegration.Presentation.Driver.MotorcycleEjectionAndReset",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FSimCoreMotorcycleRiderEjectionTest::RunTest(const FString& Parameters)
+{
+	using namespace SimCoreProtocol;
+	FDriverTestWorld TestWorld(true);
+	if (!TestNotNull(TEXT("world exists"), TestWorld.World)) return false;
+	auto* Floor = TestWorld.World->SpawnActor<AActor>();
+	auto* Ground = NewObject<UBoxComponent>(Floor);
+	Floor->SetRootComponent(Ground);
+	Ground->SetBoxExtent(FVector(5000, 5000, 25));
+	Ground->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	Ground->SetCollisionObjectType(ECC_WorldStatic);
+	Ground->SetCollisionResponseToAllChannels(ECR_Block);
+	Floor->AddInstanceComponent(Ground);
+	Ground->RegisterComponent();
+	Floor->SetActorLocation(FVector(0, 0, -25));
+	auto* Npc = TestWorld.World->SpawnActor<ASimCoreNpcPresentationActor>();
+	if (!TestNotNull(TEXT("rider owner"), Npc)) return false;
+	Npc->SetActorLocation(FVector(0, 0, 100));
+	auto* Driver = Npc->GetDriverPresentation();
+	Driver->ConfigureVehicleClass(ERuntimeVehicleClass::Motorcycle);
+	Driver->SetDriverViewActive(true);
+	auto State = NpcState();
+	State.RuntimeVehicleClass = ERuntimeVehicleClass::Motorcycle;
+	State.SpeedMps = 12.0f;
+	State.LinearVelocityEnu = FVector3d(0, 12, 0);
+	State.SimulationTimeNs = 1000000000;
+	Driver->ApplyAuthoritativeState(State);
+	State.CollisionEventSequence = 1;
+	State.LastImpactImpulseNs = 120.0f;
+	bool Ok = TestFalse(TEXT("a gentle contact keeps the rider seated"),
+		SimCoreDriverPresentation::ShouldEjectRider(State, 12.0f));
+	State.LastImpactImpulseNs = 1500.0f;
+	State.SpeedMps = 0.0f;
+	State.LinearVelocityEnu = FVector3d::ZeroVector;
+	State.SimulationTimeNs += 50000000;
+	Driver->ApplyAuthoritativeState(State);
+	Ok &= TestTrue(TEXT("hard collision separates the rider with pre-impact momentum"),
+		Driver->IsRiderEjected() && Driver->GetRiderVelocityCmPerSecond().X > 1000.0
+		&& !Driver->GetDriverMesh()->bOwnerNoSee);
+	const FVector LaunchPelvis = Driver->GetDriverMesh()->GetBoneLocation(TEXT("pelvis"));
+	const double LaunchVerticalVelocity = Driver->GetRiderVelocityCmPerSecond().Z;
+	auto* Bridge = TestWorld.World->SpawnActor<AActor>();
+	auto* BridgeDeck = NewObject<UBoxComponent>(Bridge);
+	Bridge->SetRootComponent(BridgeDeck);
+	BridgeDeck->SetBoxExtent(FVector(5000, 5000, 10));
+	BridgeDeck->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	BridgeDeck->SetCollisionObjectType(ECC_WorldStatic);
+	BridgeDeck->SetCollisionResponseToAllChannels(ECR_Block);
+	Bridge->AddInstanceComponent(BridgeDeck);
+	BridgeDeck->RegisterComponent();
+	Bridge->SetActorLocation(FVector(0, 0, LaunchPelvis.Z + 140.0));
+	Npc->SetActorLocation(FVector(-1000, 0, 100));
+	State.SimulationTimeNs += 100000000;
+	Driver->ApplyAuthoritativeState(State);
+	const FVector AirbornePelvis = Driver->GetDriverMesh()->GetBoneLocation(TEXT("pelvis"));
+	Ok &= TestTrue(TEXT("rider continues in world space instead of following the bike"),
+		AirbornePelvis.X > LaunchPelvis.X + 100.0);
+	Ok &= TestTrue(TEXT("airborne velocity loses approximately 9.81 m/s each second"),
+		FMath::IsNearlyEqual(Driver->GetRiderVelocityCmPerSecond().Z,
+			LaunchVerticalVelocity - 98.1, 0.5));
+	Ok &= TestTrue(TEXT("overhead bridge cannot snap the airborne rider onto its deck"),
+		!Driver->IsRiderGrounded() && AirbornePelvis.Z < LaunchPelvis.Z + 20.0);
+	Driver->AdvancePresentation(1.0f);
+	Driver->ApplyAuthoritativeState(State);
+	Ok &= TestTrue(TEXT("paused simulation clock freezes the detached rider"),
+		Driver->GetDriverMesh()->GetBoneLocation(TEXT("pelvis")).Equals(AirbornePelvis, 0.01));
+	State.ServerHealth.bPresent = true;
+	State.ServerHealth.Status = EServerHealthStatus::SafeStop;
+	State.SimulationTimeNs += 2000000000;
+	Driver->ApplyAuthoritativeState(State);
+	Ok &= TestTrue(TEXT("SafeStop freezes the rider even while the host clock advances"),
+		Driver->GetDriverMesh()->GetBoneLocation(TEXT("pelvis")).Equals(AirbornePelvis, 0.01));
+	State.ServerHealth.Status = EServerHealthStatus::Active;
+	for (int32 Step = 0; Step < 100; ++Step)
+	{
+		State.SimulationTimeNs += 50000000;
+		Driver->ApplyAuthoritativeState(State);
+	}
+	Ok &= TestTrue(TEXT("rider lands and ground friction stops sliding"),
+		Driver->IsRiderGrounded() && Driver->GetRiderVelocityCmPerSecond().Size() < 1.0);
+	double LowestBone = TNumericLimits<double>::Max();
+	for (const FName Bone : {FName(TEXT("head")), FName(TEXT("hand_l")), FName(TEXT("hand_r")),
+		FName(TEXT("foot_l")), FName(TEXT("foot_r")), FName(TEXT("pelvis"))})
+		LowestBone = FMath::Min(LowestBone, Driver->GetDriverMesh()->GetBoneLocation(Bone).Z);
+	Ok &= TestTrue(TEXT("settled limbs remain on the ground, not buried or floating"),
+		LowestBone >= 9.0 && LowestBone <= 25.0);
+	State.PlaySessionId = TEXT("rider-new-play");
+	State.SimulationTimeNs = 0;
+	State.CollisionEventSequence = 0;
+	Driver->ApplyAuthoritativeState(State);
+	Ok &= TestTrue(TEXT("new Play restores a seated rider on the motorcycle"),
+		!Driver->IsRiderEjected() && !Driver->IsRiderGrounded()
+		&& !Driver->GetDriverMesh()->IsUsingAbsoluteLocation()
+		&& Driver->GetDriverMesh()->bOwnerNoSee);
+	State.CollisionEventSequence = 1;
+	State.LastImpactImpulseNs = 300.0f;
+	Driver->ApplyAuthoritativeState(State);
+	Ok &= TestFalse(TEXT("a low-speed side contact initially stays seated"), Driver->IsRiderEjected());
+	State.RollDegrees = 80.0f;
+	State.SimulationTimeNs += 50000000;
+	Driver->ApplyAuthoritativeState(State);
+	Ok &= TestTrue(TEXT("later rollover ejects even without a second collision event"), Driver->IsRiderEjected());
+	Driver->ConfigureVehicleClass(ERuntimeVehicleClass::Sedan);
+	Ok &= TestTrue(TEXT("changing vehicle class clears a detached motorcycle rider"),
+		!Driver->IsRiderEjected() && !Driver->GetDriverMesh()->IsUsingAbsoluteLocation());
 	return Ok;
 }
 

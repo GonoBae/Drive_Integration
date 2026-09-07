@@ -63,6 +63,10 @@ const FName SafeCrossingsTag(TEXT("SimCore.SignalCity.SidewalkCrossings.v1"));
 const FName CompleteLaneMarkingsTag(TEXT("SimCore.SignalCity.CompleteLaneMarkings.v1"));
 const FName NaturalLaneMarkingsV2Tag(TEXT("SimCore.SignalCity.NaturalLaneMarkings.v2"));
 const FName AlignedCollectorMarkingsTag(TEXT("SimCore.SignalCity.AlignedCollectorMarkings.v3"));
+const FName SharedCollectorCurvesTag(TEXT("SimCore.SignalCity.SharedCollectorCurves.v4"));
+const FName SealedCollectorJointsTag(TEXT("SimCore.SignalCity.SealedCollectorJoints.v5"));
+const FName MinimumCollectorRadiusTag(TEXT("SimCore.SignalCity.MinimumCollectorRadius.v6"));
+const FName CollectorLaneMergesTag(TEXT("SimCore.SignalCity.CollectorLaneMerges.v7"));
 
 FVector ToWorldCm(const FVector& EnuM)
 {
@@ -224,6 +228,10 @@ bool BuildScene(UWorld* World, const SimCoreVirtualCity::FLayout& Layout)
 		Ground->Tags.Add(CompleteLaneMarkingsTag);
 		Ground->Tags.Add(NaturalLaneMarkingsV2Tag);
 		Ground->Tags.Add(AlignedCollectorMarkingsTag);
+		Ground->Tags.Add(SharedCollectorCurvesTag);
+		Ground->Tags.Add(SealedCollectorJointsTag);
+		Ground->Tags.Add(MinimumCollectorRadiusTag);
+		Ground->Tags.Add(CollectorLaneMergesTag);
 	}
 	USceneComponent* Root = NewObject<USceneComponent>(Ground, TEXT("GroundRoot"), RF_Transactional);
 	Ground->SetRootComponent(Root);
@@ -598,16 +606,19 @@ bool SyncSignalCityTrafficLanes(UWorld* World, const SimCoreVirtualCity::FLayout
 	for (TActorIterator<AActor> It(World); It; ++It) Actors.Add(It->GetFName(), *It);
 	AActor* Ground = Actors.FindRef(GroundName);
 	if (!Ground || !Ground->Tags.Contains(GeneratedTag)) return false;
-	if (Ground->Tags.Contains(AlignedCollectorMarkingsTag)) return ValidateScene(World, Layout);
-	const auto Legacy = Ground->Tags.Contains(NaturalLaneMarkingsV2Tag)
-		? SimCoreSignalCity::BuildNaturalLaneMarkingsV2Layout()
-		: (Ground->Tags.Contains(CompleteLaneMarkingsTag)
-		? SimCoreSignalCity::BuildRaisedLaneMarkingsLayout()
-		: (Ground->Tags.Contains(SafeCrossingsTag)
-			? SimCoreSignalCity::BuildIncompleteLaneMarkingsLayout()
-			: (Ground->Tags.Contains(ThreeLaneTag)
-				? SimCoreSignalCity::BuildInitialThreeLaneLayout()
-				: SimCoreSignalCity::BuildLegacySingleLaneLayout())));
+	if (Ground->Tags.Contains(CollectorLaneMergesTag)) return ValidateScene(World, Layout);
+	const auto Legacy = [&Ground]()
+	{
+		if (Ground->Tags.Contains(MinimumCollectorRadiusTag)) return SimCoreSignalCity::BuildUnmergedCollectorLanesV6Layout();
+		if (Ground->Tags.Contains(SealedCollectorJointsTag)) return SimCoreSignalCity::BuildSealedCollectorCurvesV5Layout();
+		if (Ground->Tags.Contains(SharedCollectorCurvesTag)) return SimCoreSignalCity::BuildUnsealedCollectorCurvesV4Layout();
+		if (Ground->Tags.Contains(AlignedCollectorMarkingsTag)) return SimCoreSignalCity::BuildAlignedCollectorMarkingsV3Layout();
+		if (Ground->Tags.Contains(NaturalLaneMarkingsV2Tag)) return SimCoreSignalCity::BuildNaturalLaneMarkingsV2Layout();
+		if (Ground->Tags.Contains(CompleteLaneMarkingsTag)) return SimCoreSignalCity::BuildRaisedLaneMarkingsLayout();
+		if (Ground->Tags.Contains(SafeCrossingsTag)) return SimCoreSignalCity::BuildIncompleteLaneMarkingsLayout();
+		if (Ground->Tags.Contains(ThreeLaneTag)) return SimCoreSignalCity::BuildInitialThreeLaneLayout();
+		return SimCoreSignalCity::BuildLegacySingleLaneLayout();
+	}();
 	// This migration accepts only the exact last generated layout. User-edited
 	// roads, colliders or name collisions are refused before backup/mutation.
 	if (!ValidateScene(World, Legacy)) return false;
@@ -616,13 +627,27 @@ bool SyncSignalCityTrafficLanes(UWorld* World, const SimCoreVirtualCity::FLayout
 	TMap<FName, UStaticMeshComponent*> GroundByName;
 	for (UStaticMeshComponent* Component : GroundComponents) GroundByName.Add(Component->GetFName(), Component);
 	TSet<FName> DesiredActorNames;
+	TSet<FName> DesiredGroundNames;
+	TSet<FName> DesiredMarkerNames;
 	for (const auto& Box : Layout.Boxes)
 	{
 		if (!Box.bGround) DesiredActorNames.Add(Box.Id);
+		else DesiredGroundNames.Add(Box.Id);
+		if (Box.bStaticCollider) DesiredMarkerNames.Add(FName(*(TEXT("Collider_") + Box.Id.ToString())));
 	}
 	TArray<AActor*> RetiredGeneratedActors;
 	for (const auto& Box : Legacy.Boxes)
 	{
+		if (Box.bStaticCollider)
+		{
+			const FName MarkerName(*(TEXT("Collider_") + Box.Id.ToString()));
+			if (!DesiredMarkerNames.Contains(MarkerName))
+			{
+				AActor* Marker = Actors.FindRef(MarkerName);
+				if (!Marker || !Marker->Tags.Contains(GeneratedTag)) return false;
+				RetiredGeneratedActors.Add(Marker);
+			}
+		}
 		if (Box.bGround || DesiredActorNames.Contains(Box.Id)) continue;
 		AActor* Stale = Actors.FindRef(Box.Id);
 		if (!Stale || !Stale->Tags.Contains(GeneratedTag))
@@ -637,8 +662,7 @@ bool SyncSignalCityTrafficLanes(UWorld* World, const SimCoreVirtualCity::FLayout
 	for (const auto& Box : Layout.Boxes)
 	{
 		AActor* Existing = Actors.FindRef(Box.Id);
-		if ((!Box.bGround && Existing && !Existing->Tags.Contains(GeneratedTag))
-			|| (Box.bGround && !GroundByName.Contains(Box.Id)))
+		if (Existing && !Existing->Tags.Contains(GeneratedTag))
 		{
 			UE_LOG(LogBuildVirtualCity, Error, TEXT("Traffic-lane sync refused unowned/missing geometry: %s"), *Box.Id.ToString());
 			return false;
@@ -646,7 +670,7 @@ bool SyncSignalCityTrafficLanes(UWorld* World, const SimCoreVirtualCity::FLayout
 		if (Box.bStaticCollider)
 		{
 			AActor* Marker = Actors.FindRef(FName(*(TEXT("Collider_") + Box.Id.ToString())));
-			if (!Marker || !Marker->Tags.Contains(GeneratedTag)) return false;
+			if (Marker && !Marker->Tags.Contains(GeneratedTag)) return false;
 		}
 	}
 	const FString Backup = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("Backups"))
@@ -670,6 +694,16 @@ bool SyncSignalCityTrafficLanes(UWorld* World, const SimCoreVirtualCity::FLayout
 		if (Box.bGround)
 		{
 			UStaticMeshComponent* Component = GroundByName.FindRef(Box.Id);
+			if (!Component)
+			{
+				Component = NewObject<UStaticMeshComponent>(Ground, Box.Id, RF_Transactional);
+				Ground->AddInstanceComponent(Component);
+				Component->SetupAttachment(Ground->GetRootComponent());
+				UMaterial* Material = CreatePaletteMaterial(Box.Palette);
+				if (!Material) return false;
+				ConfigureMesh(Component, Cube, Material, Box);
+				Component->RegisterComponent();
+			}
 			Component->Modify();
 			Component->SetWorldTransform(BoxTransform(Box));
 		}
@@ -691,10 +725,26 @@ bool SyncSignalCityTrafficLanes(UWorld* World, const SimCoreVirtualCity::FLayout
 		if (Box.bStaticCollider)
 		{
 			auto* Marker = Cast<ASimCoreStaticCollider>(Actors.FindRef(FName(*(TEXT("Collider_") + Box.Id.ToString()))));
-			if (!Marker) return false;
+			if (!Marker)
+			{
+				Marker = SpawnNamed<ASimCoreStaticCollider>(World, FName(*(TEXT("Collider_") + Box.Id.ToString())));
+				if (!Marker) return false;
+				Marker->ColliderId = Box.Id.ToString();
+				Marker->Semantic = Box.Palette == SimCoreVirtualCity::EPalette::Curb
+					? ESimCoreStaticColliderSemantic::Curb : ESimCoreStaticColliderSemantic::Wall;
+				Marker->SetFolderPath(TEXT("SignalCity/SimCoreMarkers"));
+			}
 			Marker->Modify();
 			Marker->CollisionBounds->SetBoxExtent(Box.SizeM * 50.0);
 			Marker->SetActorLocationAndRotation(ToWorldCm(Box.CenterEnuM), FRotator(0, Box.HeadingDegrees, 0));
+		}
+	}
+	for (UStaticMeshComponent* Component : GroundComponents)
+	{
+		if (!DesiredGroundNames.Contains(Component->GetFName()))
+		{
+			Ground->RemoveInstanceComponent(Component);
+			Component->DestroyComponent();
 		}
 	}
 	for (AActor* Actor : RetiredGeneratedActors)
@@ -712,10 +762,14 @@ bool SyncSignalCityTrafficLanes(UWorld* World, const SimCoreVirtualCity::FLayout
 	Ground->Tags.AddUnique(CompleteLaneMarkingsTag);
 	Ground->Tags.AddUnique(NaturalLaneMarkingsV2Tag);
 	Ground->Tags.AddUnique(AlignedCollectorMarkingsTag);
+	Ground->Tags.AddUnique(SharedCollectorCurvesTag);
+	Ground->Tags.AddUnique(SealedCollectorJointsTag);
+	Ground->Tags.AddUnique(MinimumCollectorRadiusTag);
+	Ground->Tags.AddUnique(CollectorLaneMergesTag);
 	Ground->MarkPackageDirty();
 	World->UpdateWorldComponents(true, false);
 	UE_LOG(LogBuildVirtualCity, Display,
-		TEXT("Synced aligned collector paint, natural road paint, 10m collectors and visual-only distant backdrop; retired %d obsolete generated marking actors."),
+		TEXT("Synced shared collector geometry and continuous staged lane merges; retired %d obsolete generated actors."),
 		RetiredGeneratedActors.Num());
 	return ValidateScene(World, Layout);
 }

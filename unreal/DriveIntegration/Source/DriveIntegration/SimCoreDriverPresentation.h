@@ -21,6 +21,8 @@ namespace SimCoreDamagePresentation
 
 namespace SimCoreDriverPresentation
 {
+	// Matches a 4 m/s collision velocity change for the 240 kg motorcycle profile.
+	inline constexpr float RiderEjectionImpulseNs = 960.0f;
 	/** Bounded presentation target derived only from accepted authoritative damage. */
 	struct FTarget
 	{
@@ -46,12 +48,15 @@ namespace SimCoreDriverPresentation
 	DRIVEINTEGRATION_API float AdvanceTowards(
 		float Current, float Target, float DeltaSeconds, float ResponsePerSecond);
 	DRIVEINTEGRATION_API FExitSequencePose EvaluateExitSequence(float SequenceAlpha);
+	DRIVEINTEGRATION_API bool ShouldEjectRider(
+		const SimCoreProtocol::FVehicleState& State, float PreviousSpeedMps);
 }
 
 /**
  * Shared Ego/NPC interior presentation. Manny is posed in the driver seat with
  * both hands on an authored steering wheel. Collision authority remains on the
- * host; this component only blends the visible driver toward the wheel.
+ * host. A detached motorcycle rider has a local, simulation-clock-driven
+ * presentation trajectory; it does not create a second authoritative entity.
  */
 UCLASS(ClassGroup=(SimCore), meta=(BlueprintSpawnableComponent))
 class DRIVEINTEGRATION_API USimCoreDriverPresentation : public USceneComponent
@@ -65,6 +70,10 @@ public:
 	/** Mirrors the body's existing bounded dent weights onto the separated door MIDs. */
 	void ApplyDoorDamage(const SimCoreDamagePresentation::FZoneWeights& Weights);
 	void SetPresentationEnabled(bool bEnabled);
+	/** NPC cabin/rider layout; a merged fleet door must never gain a second sedan door. */
+	void ConfigureVehicleClass(SimCoreProtocol::ERuntimeVehicleClass VehicleClass);
+	/** Only the owner's seated body is hidden in driver view; interior/NPCs remain visible. */
+	void SetDriverViewActive(bool bActive);
 	/** Advances only the bounded visual blend; exposed for deterministic QA. */
 	void AdvancePresentation(float DeltaSeconds);
 
@@ -83,6 +92,9 @@ public:
 	int32 GetDriverDoorDamageMaterialCount() const { return DriverDoorDamageMaterials.Num(); }
 	USimCoreDeformableBody* GetDriverDoorDeformableBody() const { return DriverDoorDeformableBody; }
 	bool HasDriverAssets() const;
+	bool IsRiderEjected() const { return bRiderEjected; }
+	bool IsRiderGrounded() const { return bRiderGrounded; }
+	FVector GetRiderVelocityCmPerSecond() const { return RiderVelocityCmPerSecond; }
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="SimCore|Driver",
 		meta=(ClampMin="0.1", ClampMax="20.0"))
@@ -96,9 +108,16 @@ protected:
 private:
 	void EnsureVisualComponents();
 	void ApplyPose();
+	void UpdateDriverOwnerVisibility();
+	void UpdatePartVisibility();
 	void ConfigureInteriorMesh(UStaticMeshComponent* Mesh,
 		bool bApplyInteriorMaterial = true) const;
 	void BuildSteeringWheel();
+	void UpdateRiderState(const SimCoreProtocol::FVehicleState& State);
+	void EjectRider(const SimCoreProtocol::FVehicleState& State);
+	void AdvanceEjectedRider(float DeltaSeconds);
+	void ApplyEjectedRiderPose();
+	void ResetRider();
 
 	UPROPERTY()
 	TObjectPtr<USkeletalMesh> DriverSkeletalMesh;
@@ -147,4 +166,20 @@ private:
 	float CurrentGestureAlpha = 0.0f;
 	float ProtestAnimationTime = 0.0f;
 	bool bPresentationEnabled = true;
+	bool bDriverViewActive = false;
+	bool bRiderStateInitialized = false;
+	bool bRiderEjected = false;
+	bool bRiderGrounded = false;
+	uint32 RiderCollisionSequence = 0;
+	uint64 RiderSimulationTimeNs = 0;
+	FString RiderPlaySessionId;
+	FString RiderMapChecksum;
+	FVector PreviousVehicleVelocityCmPerSecond = FVector::ZeroVector;
+	FVector RiderPelvisWorldCm = FVector::ZeroVector;
+	FVector RiderVelocityCmPerSecond = FVector::ZeroVector;
+	FQuat RiderInitialRotation = FQuat::Identity;
+	FVector RiderScale = FVector::OneVector;
+	float RiderFlightSeconds = 0.0f;
+	SimCoreProtocol::ERuntimeVehicleClass PresentationVehicleClass =
+		SimCoreProtocol::ERuntimeVehicleClass::Sedan;
 };

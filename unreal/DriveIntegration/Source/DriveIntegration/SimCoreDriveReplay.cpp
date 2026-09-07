@@ -65,7 +65,7 @@ void USimCoreDriveReplayComponent::ToggleRecording()
 	StopReplay();
 	Track.Reset();
 	Mode = EMode::Recording;
-	Notify(TEXT("Drive recording started (F5 to stop)"), FColor::Red);
+	Notify(TEXT("Drive recording started (R to stop)"), FColor::Red);
 }
 
 void USimCoreDriveReplayComponent::ToggleReplay()

@@ -25,6 +25,7 @@
 #include "SimCoreVehicleControlResolver.h"
 #include "SimCoreVehicleAudio.h"
 #include "SimCoreVehicleHorn.h"
+#include "SimCoreVehicleVisualProfile.h"
 #include "UObject/ConstructorHelpers.h"
 
 AExternalVehiclePawn::AExternalVehiclePawn()
@@ -270,6 +271,7 @@ void AExternalVehiclePawn::SetupPlayerInputComponent(UInputComponent* Input)
 	Input->BindAxis(TEXT("CameraGamepadPitch"), this, &AExternalVehiclePawn::SetCameraGamepadPitch);
 	Input->BindAxis(TEXT("CameraZoom"), this, &AExternalVehiclePawn::ZoomCamera);
 	Input->BindAction(TEXT("CameraReset"), IE_Pressed, this, &AExternalVehiclePawn::ResetCameraView);
+	Input->BindAction(TEXT("CameraCycle"), IE_Pressed, this, &AExternalVehiclePawn::CycleCameraView);
 	Input->BindAction(TEXT("VehicleDebug"), IE_Pressed, this, &AExternalVehiclePawn::ToggleVehicleDebug);
 	Input->BindAction(TEXT("LeftIndicator"), IE_Pressed, this, &AExternalVehiclePawn::ToggleLeftIndicator);
 	Input->BindAction(TEXT("RightIndicator"), IE_Pressed, this, &AExternalVehiclePawn::ToggleRightIndicator);
@@ -387,51 +389,8 @@ bool AExternalVehiclePawn::ConfigureVehicleClass(
 		return true;
 	}
 
-	TArray<FVector, TInlineAllocator<4>> Locations;
-	TArray<FVector, TInlineAllocator<4>> Scales;
-	TArray<FVector, TInlineAllocator<4>> Lamps;
-	const TConstArrayView<FVector> SedanWheels = SimCoreSedanVisualContract::WheelOriginsCm();
-	if (VehicleClass == SimCoreProtocol::ERuntimeVehicleClass::Sedan)
-	{
-		Locations.Append(SedanWheels.GetData(), SedanWheels.Num());
-		for (int32 Index = 0; Index < 4; ++Index)
-		{
-			Scales.Add(FVector::OneVector);
-			Lamps.Add(SimCoreSedanVisualContract::TurnSignalLensPointCm(
-				Index < 2, Index % 2 == 0, 0.5, 0.5));
-		}
-	}
-	else if (VehicleClass == SimCoreProtocol::ERuntimeVehicleClass::Compact)
-	{
-		for (int32 Index = 0; Index < 4; ++Index)
-		{
-			const FVector Origin = SedanWheels[Index];
-			Locations.Add(FVector(Origin.X * 0.79, Origin.Y * 0.90,
-				Origin.Z * 0.92 - 1.5));
-			Scales.Add(FVector(0.86, 0.82, 0.86));
-			const FVector Lamp = SimCoreSedanVisualContract::TurnSignalLensPointCm(
-				Index < 2, Index % 2 == 0, 0.5, 0.5);
-			Lamps.Add(FVector(Lamp.X * 0.79 - 4.0, Lamp.Y * 0.90,
-				Lamp.Z * 0.92 - 1.5));
-		}
-	}
-	else if (VehicleClass == SimCoreProtocol::ERuntimeVehicleClass::Truck)
-	{
-		Locations = {FVector(190, -102, -28), FVector(190, 102, -28),
-			FVector(-195, -102, -28), FVector(-195, 102, -28)};
-		for (int32 Index = 0; Index < 4; ++Index) Scales.Add(FVector(1.22, 1.08, 1.22));
-		Lamps = {FVector(240, -96, 58), FVector(240, 96, 58),
-			FVector(-294, -96, 64), FVector(-294, 96, 64)};
-	}
-	else
-	{
-		Locations = {FVector(99, 0, -8), FVector::ZeroVector,
-			FVector(-82, 0, -8), FVector::ZeroVector};
-		Scales = {FVector(1.05, 0.42, 1.05), FVector::OneVector,
-			FVector(1.05, 0.42, 1.05), FVector::OneVector};
-		Lamps = {FVector(93, -29, 61), FVector(93, 29, 61),
-			FVector(-94, -27, 47), FVector(-94, 27, 47)};
-	}
+	SimCoreVehicleVisualProfile::FProfile Profile;
+	if (!SimCoreVehicleVisualProfile::Resolve(VehicleClass, Profile)) return false;
 
 	DeformableBody->ResetDeformation();
 	VehicleMesh->EmptyOverrideMaterials();
@@ -440,33 +399,23 @@ bool AExternalVehiclePawn::ConfigureVehicleClass(
 	VehicleMesh->SetVisibility(true);
 	for (int32 Index = 0; Index < 4; ++Index)
 	{
-		WheelPivots[Index]->SetRelativeLocation(Locations[Index]);
+		WheelPivots[Index]->SetRelativeLocation(Profile.WheelOriginsCm[Index]);
 		WheelPivots[Index]->SetRelativeRotation(FRotator::ZeroRotator);
 		WheelMeshes[Index]->SetStaticMesh(SharedWheelMesh);
-		WheelMeshes[Index]->SetRelativeScale3D(Scales[Index]);
+		WheelMeshes[Index]->SetRelativeScale3D(Profile.WheelScales[Index]);
 		WheelMeshes[Index]->SetRelativeRotation(FRotator::ZeroRotator);
-		WheelMeshes[Index]->SetVisibility(
-			VehicleClass != SimCoreProtocol::ERuntimeVehicleClass::Motorcycle
-				|| Index == 0 || Index == 2);
+		WheelMeshes[Index]->SetVisibility(Profile.IsWheelVisible(Index));
 		SuspensionMountLocationsCm[Index] = FVector(
-			Locations[Index].X, Locations[Index].Y, 0.0);
+			Profile.WheelOriginsCm[Index].X, Profile.WheelOriginsCm[Index].Y, 0.0);
 	}
 	VisualTireRadiusMeters = static_cast<float>(
-		SharedWheelMesh->GetBoundingBox().GetExtent().Z * Scales[0].Z * 0.01);
-	TurnSignals->SetLampPositions(Lamps);
-	DriverPresentation->SetRelativeTransform(FTransform::Identity);
-	DriverPresentation->SetPresentationEnabled(
-		VehicleClass == SimCoreProtocol::ERuntimeVehicleClass::Sedan);
+		SharedWheelMesh->GetBoundingBox().GetExtent().Z * Profile.WheelScales[0].Z * 0.01);
+	TurnSignals->SetLampPositions(MakeArrayView(Profile.LampLocationsCm));
+	DriverPresentation->ConfigureVehicleClass(VehicleClass);
 	VehicleHorn->SetRelativeLocation(FVector(
 		BodyMesh->GetBoundingBox().Max.X - 18.0, 0.0,
 		FMath::Clamp(BodyMesh->GetBoundingBox().GetCenter().Z, 18.0, 80.0)));
-	ExhaustEffect->SetRelativeLocation(VehicleClass == SimCoreProtocol::ERuntimeVehicleClass::Truck
-		? FVector(-290.0, 86.0, -15.0)
-		: VehicleClass == SimCoreProtocol::ERuntimeVehicleClass::Motorcycle
-			? FVector(-102.0, 18.0, 18.0)
-			: VehicleClass == SimCoreProtocol::ERuntimeVehicleClass::Compact
-				? FVector(-170.0, 48.0, -22.0)
-				: FVector(-221.0, 55.0, -25.0));
+	ExhaustEffect->SetRelativeLocation(Profile.ExhaustLocationCm);
 	DamagePresentationAccumulator = {};
 	LastPresentedCollisionEventSequence = 0;
 	InitializeDamagePresentation();
@@ -476,12 +425,26 @@ bool AExternalVehiclePawn::ConfigureVehicleClass(
 
 void AExternalVehiclePawn::OrbitCameraYaw(float Value)
 {
-	SimCoreOrbitCamera::AddMouseDelta(OrbitCameraState, Value, 0.0f, CameraMouseDegreesPerInputUnit);
+	if (CameraMode == SimCoreOrbitCamera::EMode::Follow)
+	{
+		SimCoreOrbitCamera::AddMouseDelta(OrbitCameraState, Value, 0.0f, CameraMouseDegreesPerInputUnit);
+	}
+	else if (CameraMode == SimCoreOrbitCamera::EMode::Driver)
+	{
+		SimCoreOrbitCamera::AddDriverMouseDelta(DriverCameraLook, Value, 0.0f, CameraMouseDegreesPerInputUnit);
+	}
 }
 
 void AExternalVehiclePawn::OrbitCameraPitch(float Value)
 {
-	SimCoreOrbitCamera::AddMouseDelta(OrbitCameraState, 0.0f, Value, CameraMouseDegreesPerInputUnit);
+	if (CameraMode == SimCoreOrbitCamera::EMode::Follow)
+	{
+		SimCoreOrbitCamera::AddMouseDelta(OrbitCameraState, 0.0f, Value, CameraMouseDegreesPerInputUnit);
+	}
+	else if (CameraMode == SimCoreOrbitCamera::EMode::Driver)
+	{
+		SimCoreOrbitCamera::AddDriverMouseDelta(DriverCameraLook, 0.0f, Value, CameraMouseDegreesPerInputUnit);
+	}
 }
 
 void AExternalVehiclePawn::SetCameraGamepadYaw(float Value)
@@ -496,17 +459,42 @@ void AExternalVehiclePawn::SetCameraGamepadPitch(float Value)
 
 void AExternalVehiclePawn::ZoomCamera(float Value)
 {
-	SimCoreOrbitCamera::AddZoom(OrbitCameraState, Value, CameraZoomStepCm);
+	if (CameraMode == SimCoreOrbitCamera::EMode::Follow)
+	{
+		SimCoreOrbitCamera::AddZoom(OrbitCameraState, Value, CameraZoomStepCm);
+	}
 }
 
 void AExternalVehiclePawn::ResetCameraView()
 {
 	SimCoreOrbitCamera::ResetView(OrbitCameraState);
+	DriverCameraLook = {};
+	CameraMode = SimCoreOrbitCamera::EMode::Follow;
+	UpdateOrbitCamera(0.0f);
+}
+
+void AExternalVehiclePawn::CycleCameraView()
+{
+	CameraMode = SimCoreOrbitCamera::NextMode(CameraMode);
+	UpdateOrbitCamera(0.0f);
+	if (GEngine)
+	{
+		const bool bCabFront = SimCoreOrbitCamera::GetVehicleMounts(
+			DisplayedVehicleClass).bDriverUsesCabFrontFallback;
+		const TCHAR* Label = CameraMode == SimCoreOrbitCamera::EMode::Follow
+			? TEXT("CAMERA: FOLLOW (mouse / right stick, wheel zoom)")
+			: CameraMode == SimCoreOrbitCamera::EMode::FixedRear
+				? TEXT("CAMERA: FIXED REAR")
+				: bCabFront ? TEXT("CAMERA: CAB FRONT (truck interior unavailable)")
+					: TEXT("CAMERA: DRIVER (mouse / right stick to look)");
+		GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Silver, Label);
+	}
 }
 
 void AExternalVehiclePawn::ToggleVehicleDebug()
 {
 	bVehicleDebugEnabled = !bVehicleDebugEnabled;
+	if (SimCoreClient) SimCoreClient->bShowDebugHud = bVehicleDebugEnabled;
 	if (GEngine)
 	{
 		GEngine->AddOnScreenDebugMessage(
@@ -533,13 +521,20 @@ void AExternalVehiclePawn::DrawVehicleDebug(
 		&& State.CollisionHalfWidthMeters > 0.0f
 		&& State.CollisionHalfHeightMeters > 0.0f)
 	{
+		SimCoreVehicleVisualProfile::FProfile Profile;
+		SimCoreVehicleVisualProfile::Resolve(State.RuntimeVehicleClass, Profile);
+		// The planar solver uses a vertical prism above the ground, not an OBB
+		// centred on the visual CG. Pitch/roll is handled by the chassis shell.
+		const FVector CollisionCentre = GetActorLocation() + FVector::UpVector
+			* (0.10f + State.CollisionHalfHeightMeters - Profile.CgHeightMeters) * 100.0f;
 		DrawDebugBox(
-			GetWorld(), GetActorLocation(),
+			GetWorld(), CollisionCentre,
 			FVector(
 				State.CollisionHalfLengthMeters,
 				State.CollisionHalfWidthMeters,
 				State.CollisionHalfHeightMeters) * 100.0f,
-			GetActorQuat(), FColor::Cyan, false, -1.0f, 0, 2.0f);
+			FRotator(0.0, GetActorRotation().Yaw, 0.0).Quaternion(),
+			FColor::Cyan, false, -1.0f, 0, 2.0f);
 	}
 
 	const FVector VelocityWorldCmPerSecond(
@@ -684,11 +679,44 @@ void AExternalVehiclePawn::ApplyDentMaterialParameters(
 
 void AExternalVehiclePawn::UpdateOrbitCamera(float DeltaSeconds)
 {
-	SimCoreOrbitCamera::AddGamepadRate(OrbitCameraState, CameraGamepadYaw,
-		CameraGamepadPitch, CameraGamepadDegreesPerSecond, DeltaSeconds);
-	CameraBoom->TargetArmLength = OrbitCameraState.DistanceCm;
-	CameraBoom->SetWorldRotation(SimCoreOrbitCamera::BuildWorldRotation(
-		OrbitCameraState, static_cast<float>(GetActorRotation().Yaw)));
+	using namespace SimCoreOrbitCamera;
+	const FVehicleMounts Mounts = GetVehicleMounts(DisplayedVehicleClass);
+	const bool bDriver = CameraMode == EMode::Driver;
+	DriverPresentation->SetDriverViewActive(bDriver);
+	CameraBoom->bDoCollisionTest = !bDriver;
+	Camera->SetFieldOfView(bDriver ? 95.0f : 90.0f);
+	if (CameraMode == EMode::Follow)
+	{
+		AddGamepadRate(OrbitCameraState, CameraGamepadYaw,
+			CameraGamepadPitch, CameraGamepadDegreesPerSecond, DeltaSeconds);
+		CameraBoom->TargetOffset = FVector(0.0, 0.0, Mounts.FixedTargetHeightCm);
+		CameraBoom->TargetArmLength = OrbitCameraState.DistanceCm;
+		CameraBoom->SetWorldRotation(BuildWorldRotation(
+			OrbitCameraState, static_cast<float>(GetActorRotation().Yaw)));
+	}
+	else if (bDriver)
+	{
+		AddDriverGamepadRate(DriverCameraLook, CameraGamepadYaw,
+			CameraGamepadPitch, CameraGamepadDegreesPerSecond, DeltaSeconds);
+		// Zero-length boom deliberately has no scenery pull-in: this camera is
+		// mounted in the car, not swept from a chase target through the cabin.
+		FVector DriverMount = Mounts.DriverLocationCm;
+		if (!SedanBodyMesh && DisplayedVehicleClass == SimCoreProtocol::ERuntimeVehicleClass::Unspecified)
+		{
+			DriverMount = FVector(215.0, -34.0, 82.0);
+		}
+		CameraBoom->TargetOffset = GetActorQuat().RotateVector(DriverMount);
+		CameraBoom->TargetArmLength = 0.0f;
+		CameraBoom->SetWorldRotation(BuildBodyRelativeRotation(DriverCameraLook, GetActorQuat()));
+	}
+	else
+	{
+		CameraBoom->TargetOffset = GetActorQuat().RotateVector(FVector(0.0, 0.0, Mounts.FixedTargetHeightCm));
+		CameraBoom->TargetArmLength = Mounts.FixedDistanceCm;
+		FDriverLook FixedLook;
+		FixedLook.PitchDegrees = -12.0f;
+		CameraBoom->SetWorldRotation(BuildBodyRelativeRotation(FixedLook, GetActorQuat()));
+	}
 }
 
 void AExternalVehiclePawn::UpdateSteeringInput(const float DeltaSeconds)

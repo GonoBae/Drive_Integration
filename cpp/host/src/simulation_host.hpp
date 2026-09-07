@@ -5,6 +5,7 @@
 #include "protocol/vehicle_messages.hpp"
 #include "replay/physics_replay.hpp"
 #include "simulation_clock.hpp"
+#include "runtime_collision_reaction.hpp"
 #include "terrain/map_package_runtime.hpp"
 #include "traffic/npc_horn_policy.hpp"
 #include "traffic/npc_lane_follower.hpp"
@@ -203,10 +204,18 @@ private:
     bool npc_sample_blocked(const LaneNpcRuntime& npc,
         const simcore_host::NpcLaneSample& sample, bool stationary_only = false,
         const simcore_host::ObbPrism* collision_shape = nullptr,
-        bool ignore_ego = false) const;
-    bool try_npc_lane_change(LaneNpcRuntime& npc);
+        bool ignore_ego = false, std::uint32_t* downed_pedestrian_id = nullptr) const;
+    bool try_npc_lane_change(LaneNpcRuntime& npc, double retreat_m = 0.0, bool commit = true);
     bool npc_reverse_path_clear(const LaneNpcRuntime& npc, double distance_m) const;
-    bool begin_npc_escape_reverse(LaneNpcRuntime& npc, double obstruction_distance_m);
+    bool begin_npc_escape_reverse(LaneNpcRuntime& npc, double obstruction_distance_m,
+        std::uint32_t downed_pedestrian_id = 0);
+    struct NpcRouteObstacle {
+        double distance_m = 0.0;
+        std::uint32_t downed_pedestrian_id = 0;
+    };
+    std::optional<NpcRouteObstacle> lane_npc_obstacle(
+        const LaneNpcRuntime& npc, double lookahead_m, bool stationary_only = false,
+        bool route_end_is_blocker = true) const;
     std::optional<double> lane_npc_blocked_distance(
         const LaneNpcRuntime& npc, double lookahead_m, bool stationary_only = false,
         bool route_end_is_blocker = true) const;
@@ -230,35 +239,6 @@ private:
     std::vector<simcore_host::RuntimeEntityState> initial_runtime_entities_;
     std::vector<simcore_host::RuntimeEntityState> runtime_entities_;
     simcore_host::StructureDamageRuntime structure_damage_;
-    struct RuntimeCollisionReaction {
-        simcore_host::CollisionVector2 offset_enu_m;
-        simcore_host::CollisionVector2 velocity_enu_mps;
-        simcore_host::CollisionVector2 nominal_velocity_enu_mps;
-        double heading_offset_rad = 0.0;
-        double heading_rate_rad_s = 0.0;
-        double nominal_heading_rate_rad_s = 0.0;
-        simcore_host::ImpactRecoveryState recovery;
-        double return_speed_mps = 0.0;
-        double return_yaw_speed_rad_s = 0.0;
-        // The UE driver presentation needs this fixed interval to close the
-        // door and sit down before the NPC begins its self-driven return.
-        double return_departure_grace_remaining_s = 0.0;
-        // A recoverable vehicle follows one fixed body-aligned cubic back to
-        // its paused route pose. Keeping the plan stable prevents per-tick
-        // forward/reverse flips and world-space "UFO" translations.
-        bool vehicle_return_path_initialized = false;
-        int vehicle_return_direction = 0;
-        double vehicle_return_progress = 0.0;
-        simcore_host::CollisionVector2 vehicle_return_p0;
-        simcore_host::CollisionVector2 vehicle_return_p1;
-        simcore_host::CollisionVector2 vehicle_return_p2;
-        std::uint32_t presented_event_sequence = 0;
-        double presented_impact_impulse_n_s = 0.0;
-        simcore_host::CollisionVector2 impact_direction_enu;
-        VehicleDamageZone damage_zone = VehicleDamageZone::None;
-        std::vector<simcore_host::VehicleDentPatch> dent_patches;
-        simcore_host::ImpactRecoveryPhase reported_phase = simcore_host::ImpactRecoveryPhase::Driving;
-    };
     struct LaneNpcRuntime {
         enum class AvoidancePhase : std::uint8_t {
             None,
@@ -281,7 +261,7 @@ private:
         simcore_host::NpcLaneFollower follower;
         std::optional<simcore_host::RuntimeEntityState> pending;
         std::optional<simcore_host::RuntimeEntityState> nominal_pending;
-        RuntimeCollisionReaction reaction;
+        simcore_host::RuntimeCollisionReaction reaction;
         simcore_host::ImpactTumbleState tumble;
         simcore_host::NpcHornPolicy horn;
         std::vector<std::uint32_t> navigation_route;
@@ -314,7 +294,7 @@ private:
         bool crossing = false;
         std::optional<simcore_host::RuntimeEntityState> pending;
         std::optional<simcore_host::RuntimeEntityState> nominal_pending;
-        RuntimeCollisionReaction reaction;
+        simcore_host::RuntimeCollisionReaction reaction;
         simcore_host::PedestrianImpactState body;
     };
     std::vector<LaneNpcRuntime> lane_npcs_;

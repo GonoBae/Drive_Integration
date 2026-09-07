@@ -41,6 +41,9 @@ struct NpcHornObservation {
     double speed_mps = 0.0;
     double closing_speed_mps = 0.0;
     std::optional<double> obstacle_clearance_m;
+    // Stable entity ID for an obstacle that cannot respond (for example a
+    // fallen pedestrian). Zero retains the ordinary reminder/TTC policy.
+    std::uint32_t nonresponsive_obstacle_id = 0;
 };
 
 struct NpcHornState {
@@ -56,7 +59,10 @@ struct NpcHornState {
 // Pure deterministic intent/pulse policy. It owns no audio, wall clock,
 // collision query or random source. A persistent obstruction may produce a
 // short reminder after each cooldown; one continuous imminent hazard produces
-// at most one event until its TTC leaves the hysteresis band.
+// at most one event until its TTC leaves the hysteresis band. A nonresponsive
+// entity receives only one warning, including TTC warnings, until a different
+// nonzero entity is observed or the policy is reset. Missing observations do
+// not release that entity latch.
 class NpcHornPolicy {
 public:
     explicit NpcHornPolicy(NpcHornPolicyConfig config = {});
@@ -74,6 +80,8 @@ private:
     NpcHornPolicyConfig config_;
     NpcHornState state_;
     bool imminent_latched_ = false;
+    std::uint32_t nonresponsive_obstacle_id_ = 0;
+    bool nonresponsive_obstacle_warned_ = false;
 };
 
 } // namespace simcore_host

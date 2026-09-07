@@ -1,7 +1,29 @@
 #include "SimCoreDriveReplay.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
+#include "GameFramework/InputSettings.h"
 #include "Misc/AutomationTest.h"
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSimCoreDriveRecordKeyTest,
+	"DriveIntegration.Replay.RecordKeyAvoidsEditorF5",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FSimCoreDriveRecordKeyTest::RunTest(const FString& Parameters)
+{
+	const UInputSettings* Settings = UInputSettings::GetInputSettings();
+	if (!TestNotNull(TEXT("project input settings"), Settings)) return false;
+	TArray<FInputActionKeyMapping> Mappings;
+	Settings->GetActionMappingByName(TEXT("DriveRecord"), Mappings);
+	bool bOk = TestTrue(TEXT("R toggles recording without modifiers"), Mappings.ContainsByPredicate(
+		[](const FInputActionKeyMapping& Mapping)
+		{
+			return Mapping.Key == EKeys::R && !Mapping.bShift && !Mapping.bCtrl
+				&& !Mapping.bAlt && !Mapping.bCmd;
+		}));
+	bOk &= TestFalse(TEXT("F5 is no longer a recording key"), Mappings.ContainsByPredicate(
+		[](const FInputActionKeyMapping& Mapping) { return Mapping.Key == EKeys::F5; }));
+	return bOk;
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSimCoreDriveReplayRoundTripTest,
 	"DriveIntegration.Replay.RecordCsvRoundTrip",

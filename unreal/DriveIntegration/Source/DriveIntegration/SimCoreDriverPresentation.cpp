@@ -14,6 +14,7 @@
 #include "SimCoreDamagePresentation.h"
 #include "SimCoreDeformableBody.h"
 #include "SimCoreSedanVisualContract.h"
+#include "SimCoreVehicleVisualProfile.h"
 #include "UObject/ConstructorHelpers.h"
 
 namespace
@@ -430,9 +431,8 @@ USimCoreDriverPresentation::USimCoreDriverPresentation()
 	DriverSkeletalMesh = Manny.Object;
 	InteriorBaseMaterial = Material.Object;
 	DoorPaintMaterial = DoorPaint.Object;
-	// The first scoped BuildSedanVisual bootstrap intentionally starts without
-	// this package. Avoid an optional finder warning/error on the component CDO;
-	// the next editor/game process loads the asset once the package exists.
+	// The door package is optional until BuildSedanVisual has generated it.
+	// Check existence before loading to avoid an error on the component CDO.
 	if (FPackageName::DoesPackageExist(
 		SimCoreSedanVisualContract::DriverDoorPackagePath()))
 	{
@@ -451,16 +451,28 @@ void USimCoreDriverPresentation::OnRegister()
 void USimCoreDriverPresentation::ApplyAuthoritativeState(
 	const SimCoreProtocol::FVehicleState& State)
 {
+	UpdateRiderState(State);
 	const SimCoreDriverPresentation::FTarget Target =
 		SimCoreDriverPresentation::BuildTarget(State);
 	TargetInjuryAlpha = Target.InjuryAlpha;
 	TargetLateralLeanDegrees = Target.LateralLeanDegrees;
-	TargetProtestAlpha = Target.ProtestAlpha;
+	// Only the sedan has an authored opening door and a matching exit path.
+	TargetProtestAlpha = PresentationVehicleClass == SimCoreProtocol::ERuntimeVehicleClass::Sedan
+		? Target.ProtestAlpha : 0.0f;
 }
 
 void USimCoreDriverPresentation::ApplyDoorDamage(
 	const SimCoreDamagePresentation::FZoneWeights& Weights)
 {
+	if (!bPresentationEnabled
+		|| PresentationVehicleClass != SimCoreProtocol::ERuntimeVehicleClass::Sedan)
+	{
+		// ApplyDamage restores its source mesh even for an empty/reset payload.
+		// Never let that resurrect a sedan door on a bike or a merged fleet body.
+		if (DriverDoorDeformableBody) DriverDoorDeformableBody->ResetDeformation();
+		if (DriverDoorPanel) DriverDoorPanel->SetVisibility(false);
+		return;
+	}
 	for (UMaterialInstanceDynamic* Material : DriverDoorDamageMaterials)
 	{
 		if (!Material)
@@ -487,9 +499,77 @@ void USimCoreDriverPresentation::ApplyDoorDamage(
 
 void USimCoreDriverPresentation::SetPresentationEnabled(const bool bEnabled)
 {
+	if (bPresentationEnabled != bEnabled && DriverDoorDeformableBody)
+	{
+		DriverDoorDeformableBody->ResetDeformation();
+	}
 	bPresentationEnabled = bEnabled;
-	SetVisibility(bEnabled, true);
+	UpdatePartVisibility();
 	SetComponentTickEnabled(bEnabled);
+}
+
+void USimCoreDriverPresentation::ConfigureVehicleClass(
+	SimCoreProtocol::ERuntimeVehicleClass VehicleClass)
+{
+	if (VehicleClass == SimCoreProtocol::ERuntimeVehicleClass::Unspecified)
+	{
+		VehicleClass = SimCoreProtocol::ERuntimeVehicleClass::Sedan;
+	}
+	if (PresentationVehicleClass != VehicleClass)
+	{
+		ResetRider();
+		bRiderStateInitialized = false;
+		if (DriverDoorDeformableBody) DriverDoorDeformableBody->ResetDeformation();
+		TargetInjuryAlpha = CurrentInjuryAlpha = 0.0f;
+		TargetLateralLeanDegrees = CurrentLateralLeanDegrees = 0.0f;
+		TargetProtestAlpha = CurrentProtestAlpha = 0.0f;
+		ProtestAnimationTime = 0.0f;
+	}
+	PresentationVehicleClass = VehicleClass;
+	SimCoreVehicleVisualProfile::FProfile Profile;
+	SimCoreVehicleVisualProfile::Resolve(VehicleClass, Profile);
+	SetRelativeTransform(Profile.DriverTransform);
+	SetPresentationEnabled(true);
+	ApplyPose();
+}
+
+void USimCoreDriverPresentation::UpdatePartVisibility()
+{
+	const bool bRider = PresentationVehicleClass == SimCoreProtocol::ERuntimeVehicleClass::Motorcycle;
+	const bool bTruck = PresentationVehicleClass == SimCoreProtocol::ERuntimeVehicleClass::Truck;
+	const bool bDoor = bPresentationEnabled
+		&& PresentationVehicleClass == SimCoreProtocol::ERuntimeVehicleClass::Sedan;
+	SetVisibility(bPresentationEnabled);
+	if (DriverMesh) DriverMesh->SetVisibility(bPresentationEnabled);
+	if (SteeringWheel) SteeringWheel->SetVisibility(bPresentationEnabled && !bRider);
+	for (UStaticMeshComponent* Panel : InteriorPanels)
+	{
+		if (!Panel || Panel == DriverDoorPanel) continue;
+		Panel->SetVisibility(bPresentationEnabled && !bRider
+			&& !(bTruck && Panel->GetName().StartsWith(TEXT("SimCoreRearSeat"))));
+	}
+	if (DriverDoorPivot) DriverDoorPivot->SetVisibility(bDoor);
+	const bool bDeformed = DriverDoorDeformableBody
+		&& DriverDoorDeformableBody->GetDeformedVertexCount() > 0;
+	if (DriverDoorPanel) DriverDoorPanel->SetVisibility(bDoor && !bDeformed);
+	if (DriverDoorDeformableBody) DriverDoorDeformableBody->SetVisibility(bDoor && bDeformed);
+	UpdateDriverOwnerVisibility();
+}
+
+void USimCoreDriverPresentation::SetDriverViewActive(const bool bActive)
+{
+	bDriverViewActive = bActive;
+	UpdateDriverOwnerVisibility();
+}
+
+void USimCoreDriverPresentation::UpdateDriverOwnerVisibility()
+{
+	if (DriverMesh)
+	{
+		// Hide only the seated driver's body from its owning first-person camera.
+		// The cabin and an exited driver remain visible.
+		DriverMesh->SetOwnerNoSee(bDriverViewActive && !bRiderEjected && CurrentDriverExitAlpha < 0.70f);
+	}
 }
 
 bool USimCoreDriverPresentation::HasDriverAssets() const
@@ -648,8 +728,7 @@ void USimCoreDriverPresentation::EnsureVisualComponents()
 	}
 	else
 	{
-		// Keep a visible fail-safe in development if the scoped asset migration
-		// has not run yet; production presentation uses SM_SedanDoorLeft.
+		// Use a placeholder panel until SM_SedanDoorLeft has been generated.
 		DriverDoorPanel->SetRelativeLocation(FVector(-54.5, -3.0, 6.0));
 		DriverDoorPanel->SetRelativeScale3D(FVector(1.09, 0.035, 0.54));
 	}
@@ -728,11 +807,14 @@ void USimCoreDriverPresentation::BuildSteeringWheel()
 
 void USimCoreDriverPresentation::ApplyPose()
 {
+	if (bRiderEjected) return;
 	if (!DriverMesh || !DriverSkeletalMesh)
 	{
 		return;
 	}
 	const FReferenceSkeleton& Skeleton = DriverSkeletalMesh->GetRefSkeleton();
+	const bool bRider = PresentationVehicleClass == SimCoreProtocol::ERuntimeVehicleClass::Motorcycle;
+	const float PresentedDriverScale = bRider ? 0.95f : DriverScale;
 	const int32 PelvisIndex = Skeleton.FindBoneIndex(TEXT("pelvis"));
 	const int32 SpineIndex = Skeleton.FindBoneIndex(TEXT("spine_01"));
 	const int32 NeckIndex = Skeleton.FindBoneIndex(TEXT("neck_01"));
@@ -765,8 +847,8 @@ void USimCoreDriverPresentation::ApplyPose()
 	const float FacingAlpha = SmoothRange(0.12f, 0.82f, CurrentDriverExitAlpha);
 	const FQuat Facing = FQuat::Slerp(SeatedFacing, StandingFacing,
 		FacingAlpha).GetNormalized();
-	FVector LeftFoot = ExitFootPosition(true, CurrentDriverExitAlpha);
-	FVector RightFoot = ExitFootPosition(false, CurrentDriverExitAlpha);
+	FVector LeftFoot = bRider ? FVector(0.0, -38.0, 16.0) : ExitFootPosition(true, CurrentDriverExitAlpha);
+	FVector RightFoot = bRider ? FVector(0.0, 38.0, 16.0) : ExitFootPosition(false, CurrentDriverExitAlpha);
 	FVector LeftSurface = LeftFoot;
 	FVector RightSurface = RightFoot;
 	FVector LeftFootNormal = FVector::UpVector;
@@ -792,15 +874,15 @@ void USimCoreDriverPresentation::ApplyPose()
 	}
 	const float StandingPelvisZCm = StandingGroundZCm + 67.0f;
 	const FVector StandingPelvisCm(-20.0, -145.0, StandingPelvisZCm);
-	FVector PresentedPelvisCm = ExitPelvisPosition(
-		CurrentDriverExitAlpha, StandingPelvisZCm);
+	FVector PresentedPelvisCm = bRider ? FVector(-12.0, 0.0, 75.0)
+		: ExitPelvisPosition(CurrentDriverExitAlpha, StandingPelvisZCm);
 	const float LeftStep = SmoothRange(0.04f, 0.54f, CurrentDriverExitAlpha);
 	const float RightStep = SmoothRange(0.34f, 0.82f, CurrentDriverExitAlpha);
 	PresentedPelvisCm.Z += 2.0f * (FMath::Sin(LeftStep * UE_PI)
 		+ FMath::Sin(RightStep * UE_PI));
 	const FVector Translation = PresentedPelvisCm
-		- Facing.RotateVector(ReferencePelvis.GetLocation() * DriverScale);
-	DriverModelTransform = FTransform(Facing, Translation, FVector(DriverScale));
+		- Facing.RotateVector(ReferencePelvis.GetLocation() * PresentedDriverScale);
+	DriverModelTransform = FTransform(Facing, Translation, FVector(PresentedDriverScale));
 	DriverMesh->SetRelativeTransform(DriverModelTransform);
 
 	const FVector Pelvis = ReferencePelvis.GetLocation();
@@ -809,7 +891,7 @@ void USimCoreDriverPresentation::ApplyPose()
 	const float StandingSway = CurrentGestureAlpha
 		* (0.65f * FMath::Sin(ProtestAnimationTime * 1.35f)
 			+ 0.20f * FMath::Sin(ProtestAnimationTime * 2.35f + 0.7f));
-	const float ForwardLeanDegrees = FMath::Lerp(-7.0f, 0.0f, CurrentDriverExitAlpha)
+	const float ForwardLeanDegrees = (bRider ? -40.0f : FMath::Lerp(-7.0f, 0.0f, CurrentDriverExitAlpha))
 		- PresentedInjuryAlpha * 35.0f - ExitCrouch * 9.0f;
 	const FQuat ForwardLean(FVector::ForwardVector,
 		FMath::DegreesToRadians(ForwardLeanDegrees));
@@ -827,16 +909,14 @@ void USimCoreDriverPresentation::ApplyPose()
 	DriverMesh->SetBoneTransformByName(TEXT("neck_01"), Neck, EBoneSpaces::ComponentSpace);
 	const float Gesture = FMath::Sin(ProtestAnimationTime * 2.35f);
 	const float GestureLift = FMath::Sin(ProtestAnimationTime * 1.18f + 0.45f);
-	// 9-and-3 grips are evaluated from the wheel's actual transform. Both palms
-	// now land on the rim instead of floating above it, and remain symmetric if
-	// the steering-column angle changes later.
+	// Wheel-local 9-and-3 grip targets follow the steering-column transform.
 	const FTransform WheelToVehicle = SteeringWheel
 		? SteeringWheel->GetRelativeTransform()
 		: FTransform(FRotator(78.0, 0.0, 0.0), SteeringCentreCm);
-	const FVector LeftWheelHand = WheelToVehicle.TransformPosition(
-		FVector(0.0, -14.2, 0.0));
-	const FVector RightWheelHand = WheelToVehicle.TransformPosition(
-		FVector(0.0, 14.2, 0.0));
+	const FVector LeftWheelHand = bRider ? FVector(75.0, -40.0, 70.0)
+		: WheelToVehicle.TransformPosition(FVector(0.0, -14.2, 0.0));
+	const FVector RightWheelHand = bRider ? FVector(75.0, 40.0, 70.0)
+		: WheelToVehicle.TransformPosition(FVector(0.0, 14.2, 0.0));
 	FVector DoorHandleHand(1.0, -89.0, 24.0);
 	if (DriverDoorPivot)
 	{
@@ -863,10 +943,10 @@ void USimCoreDriverPresentation::ApplyPose()
 		RightExitHand, RightWaveHand, CurrentGestureAlpha);
 	const float LeftReach = FMath::Max(OpeningReachAlpha,
 		FMath::Max(ClosingReachAlpha, CurrentDriverExitAlpha));
-	const FVector LeftElbowHint = FMath::Lerp(
+	const FVector LeftElbowHint = bRider ? FVector(38.0, -54.0, 75.0) : FMath::Lerp(
 		FVector(-10.0, -55.0, 45.0),
 		LeftHand + FVector(-16.0, -7.0, -10.0), LeftReach);
-	const FVector RightElbowHint = FMath::Lerp(
+	const FVector RightElbowHint = bRider ? FVector(38.0, 54.0, 75.0) : FMath::Lerp(
 		FVector(-10.0, -13.0, 45.0),
 		RightHand + FVector(-16.0, 7.0, -10.0), CurrentDriverExitAlpha);
 	SolveArm(DriverMesh, Skeleton, UpperBodyRotation, Pelvis,
@@ -874,11 +954,11 @@ void USimCoreDriverPresentation::ApplyPose()
 	SolveArm(DriverMesh, Skeleton, UpperBodyRotation, Pelvis,
 		DriverModelTransform, false, RightHand, RightElbowHint);
 	SolveLeg(DriverMesh, Skeleton, DriverModelTransform, true, LeftFoot,
-		FMath::Lerp(FVector(8.0, -47.0, 37.0),
+		bRider ? FVector(32.0, -36.0, 38.0) : FMath::Lerp(FVector(8.0, -47.0, 37.0),
 			FVector(10.0, -158.0, LeftFoot.Z + 38.0f),
 			CurrentDriverExitAlpha), LeftFootNormal);
 	SolveLeg(DriverMesh, Skeleton, DriverModelTransform, false, RightFoot,
-		FMath::Lerp(FVector(18.0, -22.0, 37.0),
+		bRider ? FVector(32.0, 36.0, 38.0) : FMath::Lerp(FVector(18.0, -22.0, 37.0),
 			FVector(-17.0, -133.0, RightFoot.Z + 38.0f),
 			CurrentDriverExitAlpha), RightFootNormal);
 	if (CurrentGestureAlpha > 0.01f)
@@ -892,4 +972,5 @@ void USimCoreDriverPresentation::ApplyPose()
 			TEXT("hand_r"), Hand, EBoneSpaces::ComponentSpace);
 	}
 	DriverMesh->RefreshBoneTransforms();
+	UpdateDriverOwnerVisibility();
 }

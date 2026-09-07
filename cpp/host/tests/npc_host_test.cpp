@@ -881,7 +881,7 @@ void test_ego_impact_holds_route_and_recovers_without_snapback(
                     const double north = current.position_enu().y() - previous_entity.position_enu().y();
                     const double lateral = east * std::cos(heading) - north * std::sin(heading);
                     require(std::abs(lateral) <= displacement * 0.08 + 1e-5,
-                        "post-crash route recovery must move along the car body, never strafe like a UFO");
+                        "post-crash route recovery must move along the car body without body-lateral translation");
                     saw_longitudinal_recovery = true;
                 }
             }

@@ -89,6 +89,9 @@ def make_steps(engine_root, output, skip_build=False, skip_unreal=False):
         Step("launcher", ["powershell.exe", "-NoProfile", "-NonInteractive",
                           "-ExecutionPolicy", "Bypass", "-File",
                           str(ROOT / "scripts/test_server_launcher.ps1")], ROOT),
+        Step("package-plan", ["powershell.exe", "-NoProfile", "-NonInteractive",
+                              "-ExecutionPolicy", "Bypass", "-File",
+                              str(ROOT / "scripts/test_package_windows.ps1")], ROOT),
         Step("signal-city-wire", [python, str(ROOT / "scripts/smoke_signal_city.py")], ROOT, 120),
         Step("physics-replay-wire", [python, str(ROOT / "scripts/smoke_physics_replay.py")],
              ROOT, 180),
@@ -225,7 +228,8 @@ def preflight(engine_root, skip_unreal, skip_build):
     for module in ("grpc_tools", "websockets", "google.protobuf"):
         if importlib.util.find_spec(module) is None:
             raise ValueError("Missing Python dependency: " + module)
-    for script in ("smoke_physics_replay.py", "smoke_signal_city.py", "test_server_launcher.ps1"):
+    for script in ("smoke_physics_replay.py", "smoke_signal_city.py", "test_server_launcher.ps1",
+                   "test_package_windows.ps1"):
         if not (ROOT / "scripts" / script).is_file():
             raise ValueError("Required check missing: " + script)
     if skip_build and not (ROOT / "cpp/host/build/Release/simcore_publisher.exe").is_file():

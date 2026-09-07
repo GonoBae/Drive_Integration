@@ -66,9 +66,9 @@ TArray<uint8> StructureBytes(const FStructureState& State, bool bIncludeKind = t
 	Number(Out, 15, State.ImpactSeverity); return Out;
 }
 TArray<uint8> SignalBytes(uint32 Id = 7, bool bOutOfService = true,
-	ETrafficSignalAspect Aspect = ETrafficSignalAspect::Red, uint32 Controller = 1)
+	ETrafficSignalAspect Aspect = ETrafficSignalAspect::Red, uint32 Controller = 1, uint32 Group = 0)
 {
-	TArray<uint8> Out; Integer(Out, 1, Id); Integer(Out, 2, Id);
+	TArray<uint8> Out; Integer(Out, 1, Id); Integer(Out, 2, Group ? Group : Id);
 	Integer(Out, 3, static_cast<uint8>(Aspect)); Integer(Out, 7, Controller);
 	Integer(Out, 9, bOutOfService ? 1 : 0); return Out;
 }
@@ -141,6 +141,18 @@ bool FSimCoreStructureProtocolTest::RunTest(const FString& Parameters)
 	Ok &= TestTrue(TEXT("An unrelated signal controller may remain green"),
 		ParseWorldStateEnvelope(Envelope({StructureBytes(Pole())},
 			{SignalBytes(), SignalBytes(8, false, ETrafficSignalAspect::Green, 2)}), 1, State, Error));
+	Ok &= TestTrue(TEXT("Functioning heads on the damaged pole controller retain their phase"),
+		ParseWorldStateEnvelope(Envelope({StructureBytes(Pole())},
+			{SignalBytes(), SignalBytes(8, false, ETrafficSignalAspect::Green)}), 1, State, Error));
+	for (bool First : {false, true})
+	{
+		const auto Healthy = SignalBytes(8, false, ETrafficSignalAspect::Green, 1, 7);
+		const TArray<TArray<uint8>> Signals = First
+			? TArray<TArray<uint8>>{Healthy, SignalBytes()}
+			: TArray<TArray<uint8>>{SignalBytes(), Healthy};
+		Ok &= TestTrue(TEXT("Disabled lens does not contradict a functioning same-group head"),
+			ParseWorldStateEnvelope(Envelope({StructureBytes(Pole())}, Signals), 1, State, Error));
+	}
 	TArray<TArray<uint8>> Maximum;
 	for (int32 Index = 0; Index < MaxWorldStateStructures; ++Index)
 	{
@@ -208,8 +220,12 @@ bool FSimCoreStructureProtocolValidationTest::RunTest(const FString& Parameters)
 	Ok &= Reject(TEXT("Missing referenced signal"), Envelope({StructureBytes(Pole())}));
 	Ok &= Reject(TEXT("Missing damaged pole for outage"), Envelope({}, {SignalBytes()}));
 	Ok &= Reject(TEXT("Outage cannot be green"), Envelope({StructureBytes(Pole())}, {SignalBytes(7, true, ETrafficSignalAspect::Green)}));
-	Ok &= Reject(TEXT("Outage forces all groups in its controller red"), Envelope({StructureBytes(Pole())},
-		{SignalBytes(), SignalBytes(8, false, ETrafficSignalAspect::Green)}));
+	Ok &= Reject(TEXT("Damage never permits conflicting functioning vehicle groups"), Envelope({StructureBytes(Pole())},
+		{SignalBytes(), SignalBytes(8, false, ETrafficSignalAspect::Green),
+			SignalBytes(9, false, ETrafficSignalAspect::Green)}));
+	Ok &= Reject(TEXT("Functioning heads of one group must still agree after damage"), Envelope({StructureBytes(Pole())},
+		{SignalBytes(), SignalBytes(8, false, ETrafficSignalAspect::Green, 1, 7),
+			SignalBytes(9, false, ETrafficSignalAspect::Red, 1, 7)}));
 	TArray<uint8> Duplicate = StructureBytes(Building()); Integer(Duplicate, 5, 5);
 	Ok &= Reject(TEXT("Duplicate known field fails closed"), Envelope({Duplicate}));
 	TArray<uint8> Huge = StructureBytes(Building()); TArray<uint8> Padding; Padding.SetNumZeroed(1025); Message(Huge, 99, Padding);

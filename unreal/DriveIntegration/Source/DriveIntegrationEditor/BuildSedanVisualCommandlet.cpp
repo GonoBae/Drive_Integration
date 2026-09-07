@@ -814,9 +814,7 @@ void BuildBody(FAuthor& M)
 	}, [](double, double) { return FVector::UpVector; }, 28, 12, Paint);
 	for (double Side : {-1.0, 1.0})
 	{
-		// Belt and roof rails surround true window openings. The glazing below is
-		// now the only surface in each aperture, rather than a tinted decal over
-		// an opaque side sheet.
+		// Belt and roof rails surround the window openings; glass has no opaque backing.
 		auto AddLowerRail = [&](const double StartX, const double EndX,
 			const int32 Steps)
 		{
@@ -1178,12 +1176,26 @@ void BuildTruckBody(FAuthor& M)
 	// its silhouette unambiguous at traffic-camera distance.
 	M.Box(FVector(-15, 0, -8), FVector(310, 103, 18), Black);
 	M.Box(FVector(-138, 0, 72), FVector(145, 101, 92), Paint);
-	M.Box(FVector(94, 0, 49), FVector(72, 99, 57), Paint);
-	M.Ellipsoid(FVector(103, 0, 105), FVector(76, 98, 62), Paint, 20, 10);
+	// Keep the lower cab, but leave its upper volume empty for the shared driver
+	// rig. Thin walls, pillars and a roof surround real window openings.
+	M.Box(FVector(94, 0, 33), FVector(72, 99, 41), Paint);
+	M.Box(FVector(100, 0, 72), FVector(75, 95, 2.5), Black);
+	M.Box(FVector(24, 0, 117), FVector(2, 99, 43), Paint);
+	M.Box(FVector(100.5, 0, 163.5), FVector(78.5, 99, 3.5), Paint);
+	M.Box(FVector(176.5, 0, 86), FVector(2.5, 99, 12), Paint);
+	for (double Side : {-1.0, 1.0})
+	{
+		M.Box(FVector(100, Side * 97, 86), FVector(75, 2, 12), Paint);
+		M.Box(FVector(29, Side * 97, 129), FVector(3, 2, 31), Paint);
+		M.Box(FVector(175, Side * 97, 129), FVector(4, 2, 31), Paint);
+		M.Quad(FVector(32, Side * 98, 98), FVector(171, Side * 98, 98),
+			FVector(171, Side * 98, 160), FVector(32, Side * 98, 160),
+			FVector(0, Side, 0), Glass);
+	}
+	M.Quad(FVector(178, -95, 98), FVector(178, 95, 98),
+		FVector(178, 95, 160), FVector(178, -95, 160),
+		FVector::ForwardVector, Glass);
 	M.Box(FVector(194, 0, 31), FVector(43, 96, 35), Paint);
-	M.Box(FVector(151, -99.5, 104), FVector(35, 1.5, 31), Glass);
-	M.Box(FVector(151, 99.5, 104), FVector(35, 1.5, 31), Glass);
-	M.Box(FVector(176.5, 0, 106), FVector(1.5, 78, 31), Glass);
 	M.Box(FVector(236, 0, 13), FVector(8, 105, 9), Chrome);
 	M.Box(FVector(-291, 0, 6), FVector(8, 105, 9), Chrome);
 	for (double Side : {-1.0, 1.0})
@@ -1194,6 +1206,61 @@ void BuildTruckBody(FAuthor& M)
 		M.Box(FVector(-294, Side * 96, 64), FVector(3.0, 7.0, 6.0), Amber);
 	}
 	M.Box(FVector(-292, 0, 22), FVector(2.0, 31, 11), Plate);
+}
+
+bool ValidateTruckCabinGeometry(const FMeshDescription& Mesh, const bool bLogFailure = true)
+{
+	const FStaticMeshConstAttributes Attributes(Mesh);
+	const auto Positions = Attributes.GetVertexPositions();
+	const auto Slots = Attributes.GetPolygonGroupMaterialSlotNames();
+	// Both the seated driver's face and steering wheel must be visible through
+	// each side window and the windshield, without an opaque backing surface.
+	for (const FVector& Inside : {FVector(85, -34, 145), FVector(124, -34, 116)})
+	{
+		const FVector OutsidePoints[] = {
+			FVector(Inside.X, -160, Inside.Z), FVector(Inside.X, 160, Inside.Z),
+			FVector(240, Inside.Y, Inside.Z)};
+		for (const FVector& Outside : OutsidePoints)
+		{
+			bool bCrossesGlass = false;
+			bool bCrossesOpaque = false;
+			const FVector Direction = Outside - Inside;
+			for (const FTriangleID Triangle : Mesh.Triangles().GetElementIDs())
+			{
+				const auto Instances = Mesh.GetTriangleVertexInstances(Triangle);
+				const FVector A(Positions[Mesh.GetVertexInstanceVertex(Instances[0])]);
+				const FVector B(Positions[Mesh.GetVertexInstanceVertex(Instances[1])]);
+				const FVector C(Positions[Mesh.GetVertexInstanceVertex(Instances[2])]);
+				const FVector Edge1 = B - A;
+				const FVector Edge2 = C - A;
+				const FVector Cross = FVector::CrossProduct(Direction, Edge2);
+				const double Determinant = FVector::DotProduct(Edge1, Cross);
+				if (FMath::Abs(Determinant) < 1.e-8) continue;
+				const FVector FromA = Inside - A;
+				const double U = FVector::DotProduct(FromA, Cross) / Determinant;
+				const FVector Q = FVector::CrossProduct(FromA, Edge1);
+				const double V = FVector::DotProduct(Direction, Q) / Determinant;
+				const double T = FVector::DotProduct(Edge2, Q) / Determinant;
+				if (U < -1.e-6 || V < -1.e-6 || U + V > 1.0 + 1.e-6
+					|| T <= 0.0 || T >= 1.0) continue;
+				if (Slots[Mesh.GetTrianglePolygonGroup(Triangle)] == FName(Finishes[Glass].Name))
+					bCrossesGlass = true;
+				else
+					bCrossesOpaque = true;
+			}
+			if (!bCrossesGlass || bCrossesOpaque)
+			{
+				if (bLogFailure)
+				{
+					UE_LOG(LogBuildSedanVisual, Error,
+						TEXT("Truck cab sightline %s to %s requires glass without opaque backing."),
+						*Inside.ToString(), *Outside.ToString());
+				}
+				return false;
+			}
+		}
+	}
+	return true;
 }
 
 void BuildMotorcycleBody(FAuthor& M)
@@ -1626,6 +1693,8 @@ bool ValidateFleetMesh(UStaticMesh* Mesh, const TCHAR* Name)
 		if (Mesh->GetStaticMaterials()[Index].MaterialSlotName
 			!= FName(Finishes[Index].Name)) return false;
 	}
+	if (FName(Name) == FName(TEXT("SM_TruckBody"))
+		&& !ValidateTruckCabinGeometry(*Mesh->GetMeshDescription(0))) return false;
 	UE_LOG(LogBuildSedanVisual, Display,
 		TEXT("Validated fleet mesh %s: triangles=%d bounds=%s"),
 		Name, Triangles, *Box.ToString());
@@ -1664,6 +1733,8 @@ bool MakeFleetMesh(const TCHAR* Name, TFunctionRef<void(FAuthor&)> Builder,
 	Builder(Author);
 	if (Author.bInvalidTriangle || Author.TriangleCount < 80
 		|| Author.TriangleCount > 35000) return false;
+	if (FName(Name) == FName(TEXT("SM_TruckBody"))
+		&& !ValidateTruckCabinGeometry(Author.Mesh)) return false;
 	Mesh->SetNumSourceModels(1);
 	FMeshBuildSettings& Build = Mesh->GetSourceModel(0).BuildSettings;
 	Build.bRecomputeNormals = false;
@@ -1701,6 +1772,7 @@ int32 UBuildSedanVisualCommandlet::Main(const FString& Params)
 	if (FParse::Param(*Params, TEXT("UpdateNpcFleet")))
 	{
 		const bool bValidateOnly = FParse::Param(*Params, TEXT("ValidateOnly"));
+		const bool bTruckOnly = FParse::Param(*Params, TEXT("TruckOnly"));
 		TArray<UMaterial*> Materials;
 		for (int32 Index = 0; Index < FinishCount; ++Index)
 		{
@@ -1713,17 +1785,18 @@ int32 UBuildSedanVisualCommandlet::Main(const FString& Params)
 			}
 			Materials.Add(Material);
 		}
-		const bool bOk = MakeFleetMesh(TEXT("SM_CompactBody"), BuildCompactBody,
-			Materials, bValidateOnly)
+		const bool bOk = (bTruckOnly || MakeFleetMesh(TEXT("SM_CompactBody"), BuildCompactBody,
+			Materials, bValidateOnly))
 			&& MakeFleetMesh(TEXT("SM_TruckBody"), BuildTruckBody,
 				Materials, bValidateOnly)
-			&& MakeFleetMesh(TEXT("SM_MotorcycleBody"), BuildMotorcycleBody,
-				Materials, bValidateOnly);
+			&& (bTruckOnly || MakeFleetMesh(TEXT("SM_MotorcycleBody"), BuildMotorcycleBody,
+				Materials, bValidateOnly));
 		if (bOk)
 		{
 			UE_LOG(LogBuildSedanVisual, Display,
-				TEXT("NPC fleet %s: compact, truck and motorcycle authored meshes."),
-				bValidateOnly ? TEXT("validation") : TEXT("update"));
+				TEXT("NPC fleet %s: %s authored meshes."),
+				bValidateOnly ? TEXT("validation") : TEXT("update"),
+				bTruckOnly ? TEXT("truck") : TEXT("compact, truck and motorcycle"));
 		}
 		else
 		{
@@ -1780,7 +1853,7 @@ int32 UBuildSedanVisualCommandlet::Main(const FString& Params)
 	if (FParse::Param(*Params, TEXT("UpdateGlass")))
 	{
 		// Scoped migration: preserve the wheel and every owned material except
-		// M_Sedan_Glass, then rebuild only our generated body to cut real windows.
+		// M_Sedan_Glass, then rebuild the generated body to cut window openings.
 		UStaticMesh* Body = LoadObject<UStaticMesh>(nullptr,
 			SimCoreSedanVisualContract::BodyObjectPath());
 		if (!Body || !IsAuthoredAsset(Body)
@@ -1834,7 +1907,7 @@ int32 UBuildSedanVisualCommandlet::Main(const FString& Params)
 	if (FParse::Param(*Params, TEXT("UpdateIndicators")))
 	{
 		// Scoped migration: never regenerate wheels, replace unrelated materials,
-		// or overwrite a body that is not identified as our own generated asset.
+		// or overwrite a body without the project's generated-asset marker.
 		UStaticMesh* Body = LoadObject<UStaticMesh>(nullptr, SimCoreSedanVisualContract::BodyObjectPath());
 		if (!Body || !IsAuthoredAsset(Body) || Body->GetStaticMaterials().Num() != FinishCount)
 		{
@@ -1914,6 +1987,32 @@ int32 UBuildSedanVisualCommandlet::Main(const FString& Params)
 }
 
 #if WITH_DEV_AUTOMATION_TESTS
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTruckCabinVisibilityTest,
+	"DriveIntegration.NpcFleet.TruckCabinVisibility",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FTruckCabinVisibilityTest::RunTest(const FString& Parameters)
+{
+	FAuthor Truck;
+	BuildTruckBody(Truck);
+	bool bOk = TestFalse(TEXT("Truck shell triangles are finite"), Truck.bInvalidTriangle);
+	bOk &= TestTrue(TEXT("Driver and wheel are visible through all three cab windows"),
+		ValidateTruckCabinGeometry(Truck.Mesh));
+	FBox Bounds(ForceInit);
+	for (const FVertexID Vertex : Truck.Mesh.Vertices().GetElementIDs())
+	{
+		Bounds += FVector(Truck.Attributes.GetVertexPositions()[Vertex]);
+	}
+	bOk &= TestTrue(TEXT("Hollow cab preserves the existing truck body bounds"),
+		Bounds.Min.Equals(FVector(-325, -105, -26), 0.001)
+		&& Bounds.Max.Equals(FVector(295, 105, 167), 0.001));
+	// Reintroducing the old upper cab must fail even though its glass remains.
+	Truck.Ellipsoid(FVector(103, 0, 105), FVector(76, 98, 62), Paint, 20, 10);
+	bOk &= TestFalse(TEXT("Opaque backing behind transparent windows is rejected"),
+		ValidateTruckCabinGeometry(Truck.Mesh, false));
+	return bOk;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSedanGeometryIntegrityTest,
 	"DriveIntegration.SedanVisual.GeometryIntegrity",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

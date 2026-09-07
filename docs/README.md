@@ -11,6 +11,7 @@
 | [03_architecture.md](./03_architecture.md) | 시스템 설계 관리 | C++·Unreal·Python 책임, 지도·충돌·통신·센서 구조 |
 | [refactoring.md](./refactoring.md) | 2026-09-02 전체 리팩터링 기록 | C++·Unreal 책임 분리, 보존 계약, 공통 서버 launcher와 검증 체크포인트 |
 | [core_validation.md](./core_validation.md) | Core 자동 통합과 측정 | 한 명령 검증, 서버 입력 기반 Ego 물리 재생, opt-in UE frame/state 측정과 수동 gate 경계 |
+| [windows_package.md](./windows_package.md) | Windows 배포와 설정 | 게임·서버·지도 패키지 제작, 외부 접속 INI, 이동 가능한 실행 폴더와 인수 경계 |
 | [04_environment_plan.md](./04_environment_plan.md) | 배경 제작 기준 | 가상 도심 전환 승인, 수정 가능한 코스 초안과 blockout→충돌→외형→성능 순서 |
 | [virtual_city_quickstart.md](./virtual_city_quickstart.md) | 가상 도심 실행 | 전용 서버·새 맵·주행·Bake·자동 시험과 남은 수동 확인 |
 | [signal_city_quickstart.md](./signal_city_quickstart.md) | 다중 교차로 신호 도심 실행 | 별도 v2 맵·서버, 두 controller 신호, 생성·검증 순서와 PIE 인수 경계 |
@@ -64,7 +65,7 @@
 - 차량 물리: 외부 차량 물리 SDK 없이 C++ 서버에서 직접 개발. Unreal의 보행자 ragdoll 등 표시용 엔진 물리와 서버 차량 계산 권한은 구분한다.
 - 실시간 통신: R1은 localhost-only WebSocket binary + Protobuf와 양방향 Hello schema/map checksum/capability, connection identity/order/readiness gate를 사용; JSON runtime protocol은 제거
 - 공통 좌표: ROS 호환 right-handed FLU; Unreal의 left-handed FRU는 경계 adapter에서만 변환하고 C++/UE quaternion 계약 Automation 1/1 통과
-- 실행 설정: C++ server는 strict `runtime_server.cfg`와 cfg&lt;CLI override를 사용; packaged UE 서버 주소 외부화는 후속
+- 실행 설정: C++ server는 strict `runtime_server.cfg`와 cfg&lt;CLI override를 사용. UE도 `SimCoreClient.ini`와 CLI URL override를 사용하며 R1 loopback 연결을 유지한다. Windows 배포·실행 인수는 별도다.
 - Unreal 역할: 입력, IG(영상 생성), UI, 센서, 에이전트 표현과 Editor scene collision의 지면·정적 marker 측정
 - Python 역할: 향후 자율주행 판단; 기존 relay/ZMQ observer는 default-OFF로 동결하고 수동운전 필수 경로와 R1 검증에서 제외
 - 차량 사고 파손 및 변형: 충돌 위치별 vertex dent와 사고 상태 표시 구현. 구조물은 부분 손상·파편·기둥 전도를 표시하지만 차량 금속 파괴·부품 분리 및 변형된 충돌체는 구현하지 않았다.
@@ -103,8 +104,9 @@
   차종별 물리·CSV v2/physics replay, 커브 차선 v3를 구현했다. collision checksum은
   `86c3103f3e2c7a5b`, traffic checksum은 `b19c15afba6936d7`다. 9/5 기록 기준 CTest34/34,
   재생 통합 후 관련4/4, UE Automation84/84(경고 없는79개·예상 경고5개)를 통과했다.
-  9/7에는 문서를 정리했으며 빌드·시험을 새로 실행하지 않았다. 현재 전체 스냅샷의 단일
-  통합 검증과 PIE, 카메라 잔여 모드, 패키지·성능·지연·30분 주행·촬영은 남아 있다.
+  9/7 초기 문서 정리에서는 빌드·시험을 실행하지 않았고 이후 구현·검증을 별도로 진행한다. 전체 스냅샷의 단일
+  통합 검증과 PIE, 패키지·성능·지연·30분 주행·촬영은 별도 인수다. 9/7 후속으로
+  카메라 3종 전환·외부 접속 INI·Windows 배포 절차를 구현했고 최신 결과는 작업일지에 기록한다.
   RGB 센서는 Should, LiDAR/radar/segmentation은 Future이며 Core 필수 인수와 구분한다.
   [현재 현황과 일정](./worklogs/2026-09-07.md), [9/5 구현·검증](./worklogs/2026-09-05.md).
 

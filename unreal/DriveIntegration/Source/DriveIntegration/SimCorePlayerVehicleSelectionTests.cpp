@@ -96,7 +96,7 @@ bool FSimCorePlayerVehiclePresentationTest::RunTest(const FString& Parameters)
 	}
 	Ok &= TestEqual(TEXT("all four player choices have distinct body assets"),
 		MeshPaths.Num(), 4);
-	Ok &= TestFalse(TEXT("motorcycle does not show sedan-only driver/interior"),
+	Ok &= TestTrue(TEXT("motorcycle keeps its rider presentation enabled"),
 		Pawn->DriverPresentation->IsVisible());
 	Ok &= TestTrue(TEXT("switching back restores sedan driver/interior"),
 		Pawn->ConfigureVehicleClass(SimCoreProtocol::ERuntimeVehicleClass::Sedan)

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "physics/vehicle_physics.hpp"
+#include "physics/vehicle_parameters.hpp"
 
 #include <filesystem>
 #include <string>

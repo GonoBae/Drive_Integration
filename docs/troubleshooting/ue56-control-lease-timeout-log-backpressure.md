@@ -66,7 +66,7 @@ Get-Content .\runtime_logs\simcore-landscape-*.stderr.log -Tail 30
 Landscape에서 `static_colliders=0`은 marker를 아직 bake하지 않은 상태와 일치한다.
 
 사용자가 콘솔을 직접 열어 계속 보고 있는 foreground 실행은 그대로 사용할 수 있다.
-Codex·CI·background task처럼 pipe 소비가 보장되지 않는 경우에는 `-Background`를 쓴다.
+CI·background task 등 pipe 소비가 보장되지 않는 자동화 실행에서는 `-Background`를 쓴다.
 
 ## 회귀 기준
 

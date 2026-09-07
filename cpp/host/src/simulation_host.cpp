@@ -682,7 +682,9 @@ void SimulationHost::run_tick()
     advance_runtime_entities(dt_seconds);
     if (structures_enabled) {
         const simcore_host::ObbPrism impact_body{
-            {state.position_enu.x, state.position_enu.y}, state.position_enu.z,
+            {state.position_enu.x, state.position_enu.y},
+            state.position_enu.z - config_.vehicle_parameters.cg_height_m
+                + 0.10 + state.collision_half_height_m,
             state.heading * std::numbers::pi / 180.0,
             state.collision_half_length_m, state.collision_half_width_m, state.collision_half_height_m};
         structure_damage_.record_contacts(physics_.get_last_collision_contacts(), state.position_enu.z, &impact_body);

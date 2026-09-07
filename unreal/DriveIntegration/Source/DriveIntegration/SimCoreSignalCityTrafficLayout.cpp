@@ -98,56 +98,11 @@ namespace
 	}
 
 	void AddCollector(FTrafficLayout& Layout, uint32 Id,
-		const FVector2D& A, const FVector2D& B, const FVector2D& C, const FVector2D& D,
-		bool bReverse, const FVector2D& ExactStart, const FVector2D& ExactEnd,
-		uint32 Successor, const FVector2D& IncomingForward, const FVector2D& OutgoingForward)
+		bool bEast, bool bReverse, uint32 Successor)
 	{
-		TArray<FVector> Center;
-		Cubic(Center, A, B, C, D, 48);
-		if (bReverse) { Algo::Reverse(Center); }
-		TArray<FVector> OffsetCenter;
-		for (int32 Index = 0; Index < Center.Num(); ++Index)
-		{
-			const FVector Previous = Center[FMath::Max(0, Index-1)];
-			const FVector Next = Center[FMath::Min(Center.Num()-1, Index+1)];
-			const FVector2D Tangent(Next.X-Previous.X, Next.Y-Previous.Y);
-			const FVector2D Right(Tangent.Y, -Tangent.X);
-			const FVector2D Position(Center[Index].X, Center[Index].Y);
-			Point(OffsetCenter, Position + Right.GetSafeNormal() * 2.0);
-		}
-		// An exact endpoint followed by the raw offset curve made a cusp (and
-		// sometimes a short backwards segment) at collector entrances. Replace
-		// only the two 12m merge ends with tangent-matched cubic transitions;
-		// their footprint stays inside the existing asphalt merge aprons.
-		int32 EntryIndex = 1, ExitIndex = OffsetCenter.Num()-2;
-		double Distance = 0.0;
-		for (int32 Index = 1; Index < OffsetCenter.Num()-2; ++Index)
-		{
-			Distance += FVector::Dist2D(OffsetCenter[Index-1], OffsetCenter[Index]);
-			EntryIndex = Index;
-			if (Distance >= 12.0) break;
-		}
-		Distance = 0.0;
-		for (int32 Index = OffsetCenter.Num()-2; Index > EntryIndex+1; --Index)
-		{
-			Distance += FVector::Dist2D(OffsetCenter[Index+1], OffsetCenter[Index]);
-			ExitIndex = Index;
-			if (Distance >= 12.0) break;
-		}
-		const auto Enu2 = [](const FVector& Value) { return FVector2D(Value.X, Value.Y); };
-		const FVector2D Entry = Enu2(OffsetCenter[EntryIndex]);
-		const FVector2D Exit = Enu2(OffsetCenter[ExitIndex]);
-		const FVector2D EntryForward = (Enu2(OffsetCenter[EntryIndex+1]) - Entry).GetSafeNormal();
-		const FVector2D ExitForward = (Exit - Enu2(OffsetCenter[ExitIndex-1])).GetSafeNormal();
-		TArray<FVector>& Points = Add(Layout, Id, {Successor}, 0, 6.944444).PointsEnuM;
-		Cubic(Points, ExactStart, ExactStart + IncomingForward * 4.0,
-			Entry - EntryForward * 4.0, Entry, 64);
-		for (int32 Index = EntryIndex+1; Index <= ExitIndex; ++Index)
-		{
-			Point(Points, Enu2(OffsetCenter[Index]));
-		}
-		Cubic(Points, Exit, Exit + ExitForward * 4.0,
-			ExactEnd - OutgoingForward * 4.0, ExactEnd, 64);
+		TArray<FVector> Points = OffsetCollectorCenterline(BuildCollectorCenterline(bEast), bReverse ? -2.0 : 2.0);
+		if (bReverse) { Algo::Reverse(Points); }
+		Add(Layout, Id, {Successor}, 0, 6.944444).PointsEnuM = MoveTemp(Points);
 	}
 
 	void AddMovement(FTrafficLayout& Layout, uint32 Id, FVector2D A, FVector2D B,
@@ -276,17 +231,17 @@ FTrafficLayout BuildTrafficLayout()
 	Result.Signals.Reserve(16);
 
 	// South intersection, east/west approaches and all permissive movements.
-	AddStraight(Result, 1010, {-105,38}, {-10,38}, {1011,1012,1013}, 101);
+	AddStraight(Result, 1010, {-93,38}, {-10,38}, {1011,1012,1013}, 101);
 	AddStraight(Result, 1011, {-10,38}, {10,38}, {1014}, 0, 6.944444);
 	AddMovement(Result, 1012, {-10,38}, {-5,38}, {-2,35}, {-2,30}, 1044);
 	AddMovement(Result, 1013, {-10,38}, {0,38}, {2,40}, {2,50}, 1034);
-	AddStraight(Result, 1014, {10,38}, {105,38}, {3001});
+	AddStraight(Result, 1014, {10,38}, {93,38}, {3001});
 
-	AddStraight(Result, 1020, {105,42}, {10,42}, {1021,1022,1023}, 103);
+	AddStraight(Result, 1020, {93,42}, {10,42}, {1021,1022,1023}, 103);
 	AddStraight(Result, 1021, {10,42}, {-10,42}, {1024}, 0, 6.944444);
 	AddMovement(Result, 1022, {10,42}, {5,42}, {2,45}, {2,50}, 1034);
 	AddMovement(Result, 1023, {10,42}, {0,42}, {-2,40}, {-2,30}, 1044);
-	AddStraight(Result, 1024, {-10,42}, {-105,42}, {3002});
+	AddStraight(Result, 1024, {-10,42}, {-93,42}, {3002});
 
 	// Central avenue. The middle approaches are controlled by the other junction.
 	AddStraight(Result, 1030, {2,-10}, {2,30}, {1031,1032,1033}, 102);
@@ -306,17 +261,17 @@ FTrafficLayout BuildTrafficLayout()
 	AddStraight(Result, 1044, {-2,30}, {-2,-10}, {});
 
 	// North intersection, again with explicit straight/right/left connectors.
-	AddStraight(Result, 2010, {-90,118}, {-10,118}, {2011,2012,2013}, 201);
+	AddStraight(Result, 2010, {-78,118}, {-10,118}, {2011,2012,2013}, 201);
 	AddStraight(Result, 2011, {-10,118}, {10,118}, {2014}, 0, 6.944444);
 	AddMovement(Result, 2012, {-10,118}, {-5,118}, {-2,115}, {-2,110}, 1040);
 	AddMovement(Result, 2013, {-10,118}, {0,118}, {2,120}, {2,130}, 2034);
-	AddStraight(Result, 2014, {10,118}, {100,118}, {3003});
+	AddStraight(Result, 2014, {10,118}, {88,118}, {3003});
 
-	AddStraight(Result, 2020, {100,122}, {10,122}, {2021,2022,2023}, 203);
+	AddStraight(Result, 2020, {88,122}, {10,122}, {2021,2022,2023}, 203);
 	AddStraight(Result, 2021, {10,122}, {-10,122}, {2024}, 0, 6.944444);
 	AddMovement(Result, 2022, {10,122}, {5,122}, {2,125}, {2,130}, 2034);
 	AddMovement(Result, 2023, {10,122}, {0,122}, {-2,120}, {-2,110}, 1040);
-	AddStraight(Result, 2024, {-10,122}, {-90,122}, {3004});
+	AddStraight(Result, 2024, {-10,122}, {-78,122}, {3004});
 
 	AddStraight(Result, 2031, {2,110}, {2,130}, {2034}, 0, 6.944444);
 	AddMovement(Result, 2032, {2,110}, {2,115}, {5,118}, {10,118}, 2014);
@@ -325,12 +280,10 @@ FTrafficLayout BuildTrafficLayout()
 
 	// Two asymmetric, bidirectional collectors close the urban blocks without
 	// falling back to the old map's rectangular perimeter road.
-	const FVector2D EastA(105,40), EastB(112,68), EastC(110,101), EastD(100,120);
-	const FVector2D WestA(-105,40), WestB(-112,62), WestC(-108,101), WestD(-90,120);
-	AddCollector(Result, 3001, EastA, EastB, EastC, EastD, false, {105,38}, {100,122}, 2020, {1,0}, {-1,0});
-	AddCollector(Result, 3002, WestA, WestB, WestC, WestD, false, {-105,42}, {-90,118}, 2010, {-1,0}, {1,0});
-	AddCollector(Result, 3003, EastA, EastB, EastC, EastD, true, {100,118}, {105,42}, 1020, {1,0}, {-1,0});
-	AddCollector(Result, 3004, WestA, WestB, WestC, WestD, true, {-90,122}, {-105,38}, 1010, {-1,0}, {1,0});
+	AddCollector(Result, 3001, true, false, 2020);
+	AddCollector(Result, 3002, false, false, 2010);
+	AddCollector(Result, 3003, true, true, 1020);
+	AddCollector(Result, 3004, false, true, 1010);
 
 	for (uint32 Approach : {1010u, 1020u, 1030u, 1040u, 2010u, 2020u, 1034u, 2040u})
 	{

@@ -60,6 +60,18 @@ void SetUnavailableStatus(
 }
 }
 
+SimCoreInstrumentCluster::FLayout SimCoreInstrumentCluster::BuildLayout(float ViewWidth, float ViewHeight)
+{
+	FLayout Layout;
+	ViewWidth = FMath::IsFinite(ViewWidth) ? FMath::Max(1.0f, ViewWidth) : 1.0f;
+	ViewHeight = FMath::IsFinite(ViewHeight) ? FMath::Max(1.0f, ViewHeight) : 1.0f;
+	Layout.Scale = FMath::Min3(ViewWidth / 1280.0f, ViewHeight / 720.0f, 1.35f);
+	Layout.Size = FVector2D(350.0f, 136.0f) * Layout.Scale;
+	const float Margin = 16.0f * Layout.Scale;
+	Layout.Position = FVector2D(ViewWidth, ViewHeight) - Layout.Size - FVector2D(Margin, Margin);
+	return Layout;
+}
+
 SimCoreInstrumentCluster::FDisplayState SimCoreInstrumentCluster::BuildDisplayState(
 	const ESimCoreConnectionState ConnectionState,
 	const bool bHasState,
@@ -154,7 +166,7 @@ void ASimCoreInstrumentClusterHud::DrawHUD()
 		bHazardLightsRequested = Vehicle->AreHazardLightsEnabled();
 	}
 
-	DrawCluster(SimCoreInstrumentCluster::BuildDisplayState(
+	auto Display = SimCoreInstrumentCluster::BuildDisplayState(
 		ConnectionState,
 		bHasState,
 		State,
@@ -162,104 +174,68 @@ void ASimCoreInstrumentClusterHud::DrawHUD()
 		StaleTimeoutSeconds,
 		bSideBrakeRequested,
 		ManualIndicator,
-		bHazardLightsRequested));
+		bHazardLightsRequested);
+	if (Client && ConnectionState == ESimCoreConnectionState::Connected)
+	{
+		// Safety remains visible when the optional numeric diagnostics are off.
+		const auto Health = Client->GetHealthDisplay();
+		Display.StatusText = Health.Status;
+		Display.StatusColor = FLinearColor(Health.Color);
+	}
+	DrawCluster(Display);
 }
 
 void ASimCoreInstrumentClusterHud::DrawCluster(const SimCoreInstrumentCluster::FDisplayState& Display)
 {
-	const float Scale = FMath::Clamp(FMath::Min(Canvas->SizeX / 1920.0f, Canvas->SizeY / 1080.0f), 0.55f, 1.35f);
-	const float Width = 850.0f * Scale;
-	const float Height = 220.0f * Scale;
-	const float X = (Canvas->SizeX - Width) * 0.5f;
-	const float Y = Canvas->SizeY - Height - 26.0f * Scale;
-	const float CenterX = X + Width * 0.5f;
-	const FLinearColor Panel(0.012f, 0.018f, 0.030f, 0.91f);
-	const FLinearColor PanelEdge(0.11f, 0.20f, 0.31f, 0.95f);
-	const FLinearColor White(0.90f, 0.96f, 1.0f, 1.0f);
-	const FLinearColor Muted(0.36f, 0.48f, 0.58f, 1.0f);
-	const FLinearColor Cyan(0.08f, 0.76f, 1.0f, 1.0f);
-	const FLinearColor Amber(1.0f, 0.58f, 0.08f, 1.0f);
-	const FLinearColor HazardRed(1.0f, 0.16f, 0.08f, 1.0f);
+	const SimCoreInstrumentCluster::FLayout Layout =
+		SimCoreInstrumentCluster::BuildLayout(Canvas->SizeX, Canvas->SizeY);
+	const float Scale = Layout.Scale;
+	const float X = Layout.Position.X;
+	const float Y = Layout.Position.Y;
+	const FLinearColor White(0.92f, 0.96f, 1.0f);
+	const FLinearColor Muted(0.52f, 0.61f, 0.68f);
+	const FLinearColor Cyan(0.08f, 0.76f, 1.0f);
+	const FLinearColor Amber(1.0f, 0.58f, 0.08f);
+	DrawRect(FLinearColor(0.012f, 0.018f, 0.03f, 0.62f),
+		X, Y, Layout.Size.X, Layout.Size.Y);
+	UFont* Small = GEngine ? GEngine->GetSmallFont() : nullptr;
+	UFont* Large = GEngine ? GEngine->GetLargeFont() : nullptr;
+	if (!Small || !Large) return;
 
-	DrawRect(Panel, X, Y, Width, Height);
-	DrawRect(PanelEdge, X, Y, Width, 2.0f * Scale);
-	DrawRect(PanelEdge, X, Y + Height - 2.0f * Scale, Width, 2.0f * Scale);
-	DrawRect(PanelEdge, X, Y, 2.0f * Scale, Height);
-	DrawRect(PanelEdge, X + Width - 2.0f * Scale, Y, 2.0f * Scale, Height);
+	const FVector2D Dial(X + 76.0f * Scale, Y + 82.0f * Scale);
+	DrawArc(Dial, 55.0f * Scale, 145.0f, 395.0f, Muted, 2.0f * Scale);
+	const float RpmFraction = Display.bAuthoritative
+		? FMath::Clamp(Display.EngineRpm / 8000.0f, 0.0f, 1.0f) : 0.0f;
+	DrawArc(Dial, 55.0f * Scale, 145.0f, 145.0f + RpmFraction * 250.0f, Cyan, 3.0f * Scale);
+	DrawCenteredText(Display.RpmText, White, Dial.X, Y + 61.0f * Scale, Small, Scale);
+	DrawCenteredText(TEXT("RPM"), Muted, Dial.X, Y + 84.0f * Scale, Small, 0.8f * Scale);
 
-	UFont* Small = GEngine != nullptr ? GEngine->GetSmallFont() : nullptr;
-	UFont* Medium = GEngine != nullptr ? GEngine->GetMediumFont() : nullptr;
-	UFont* Large = GEngine != nullptr ? GEngine->GetLargeFont() : nullptr;
-	if (Small == nullptr || Medium == nullptr || Large == nullptr)
-	{
-		return;
-	}
-
-	const float StatusWidth = 112.0f * Scale;
-	DrawRect(FLinearColor(Display.StatusColor.R, Display.StatusColor.G, Display.StatusColor.B, 0.15f),
-		CenterX - StatusWidth * 0.5f, Y + 10.0f * Scale, StatusWidth, 22.0f * Scale);
-	DrawCenteredText(Display.StatusText, Display.StatusColor, CenterX, Y + 12.0f * Scale, Small, 0.82f * Scale);
-	const bool bLeftSelected = Display.bHazardLightsRequested
-		|| Display.ManualIndicator == SimCoreProtocol::ETurnIndicator::Left;
-	const bool bRightSelected = Display.bHazardLightsRequested
-		|| Display.ManualIndicator == SimCoreProtocol::ETurnIndicator::Right;
-	const float IndicatorY = Y + 14.0f * Scale;
-	const float LeftIndicatorX = CenterX - 92.0f * Scale;
-	const float RightIndicatorX = CenterX + 92.0f * Scale;
-	DrawRect(FLinearColor(Amber.R, Amber.G, Amber.B, bLeftSelected ? 0.24f : 0.04f),
-		LeftIndicatorX - 25.0f * Scale, Y + 9.0f * Scale, 50.0f * Scale, 25.0f * Scale);
-	DrawRect(FLinearColor(Amber.R, Amber.G, Amber.B, bRightSelected ? 0.24f : 0.04f),
-		RightIndicatorX - 25.0f * Scale, Y + 9.0f * Scale, 50.0f * Scale, 25.0f * Scale);
-	DrawCenteredText(TEXT("< Q"), bLeftSelected ? Amber : Muted,
-		LeftIndicatorX, IndicatorY, Small, 0.82f * Scale);
-	DrawCenteredText(TEXT("E >"), bRightSelected ? Amber : Muted,
-		RightIndicatorX, IndicatorY, Small, 0.82f * Scale);
-	if (Display.bHazardLightsRequested)
-	{
-		DrawCenteredText(TEXT("X HAZARD"), HazardRed, CenterX,
-			Y + 34.0f * Scale, Small, 0.70f * Scale);
-	}
-
-	// Left: an RPM sweep with a thin redline segment. The raw number remains authoritative.
-	const FVector2D TachCenter(X + 170.0f * Scale, Y + 133.0f * Scale);
-	DrawArc(TachCenter, 82.0f * Scale, 145.0f, 395.0f, Muted, 3.0f * Scale, 40);
-	const float RpmFraction = Display.bAuthoritative ? FMath::Clamp(Display.EngineRpm / 8000.0f, 0.0f, 1.0f) : 0.0f;
-	DrawArc(TachCenter, 82.0f * Scale, 145.0f, 145.0f + 250.0f * RpmFraction, Cyan, 5.0f * Scale, 40);
-	DrawArc(TachCenter, 82.0f * Scale, 355.0f, 395.0f, FLinearColor(1.0f, 0.13f, 0.10f, 1.0f), 5.0f * Scale, 8);
-	DrawCenteredText(Display.RpmText, Display.bAuthoritative ? White : Muted,
-		TachCenter.X, Y + 104.0f * Scale, Medium, 1.0f * Scale);
-	DrawCenteredText(TEXT("RPM"), Muted, TachCenter.X, Y + 135.0f * Scale, Small, 0.72f * Scale);
-
-	// Centre: large digital speed and gear, legible at 720p through 4K.
 	DrawCenteredText(Display.SpeedText, Display.bAuthoritative ? White : Muted,
-		CenterX, Y + 50.0f * Scale, Large, 1.72f * Scale);
-	DrawCenteredText(TEXT("KM/H"), Muted, CenterX, Y + 117.0f * Scale, Small, 0.78f * Scale);
-	DrawCenteredText(Display.GearText, Display.bAuthoritative ? Cyan : Muted,
-		CenterX, Y + 143.0f * Scale, Large, 1.18f * Scale);
+		X + 205.0f * Scale, Y + 30.0f * Scale, Large, 1.40f * Scale);
+	DrawCenteredText(TEXT("km/h"), Muted, X + 205.0f * Scale, Y + 84.0f * Scale, Small, Scale);
+	DrawCenteredText(Display.GearText, Cyan, X + 299.0f * Scale, Y + 40.0f * Scale, Large, 1.05f * Scale);
+	DrawCenteredText(Display.FuelText + TEXT("%"), Muted,
+		X + 299.0f * Scale, Y + 86.0f * Scale, Small, 0.85f * Scale);
+	DrawRect(Muted, X + 274.0f * Scale, Y + 108.0f * Scale, 50.0f * Scale, 3.0f * Scale);
+	if (Display.bAuthoritative)
+		DrawRect(Display.FuelPercent < 15.0f ? Amber : Cyan,
+			X + 274.0f * Scale, Y + 108.0f * Scale,
+			50.0f * Scale * Display.FuelPercent / 100.0f, 3.0f * Scale);
 
-	// Right: fuel percentage plus a segmented horizontal gauge.
-	const float FuelX = X + Width - 270.0f * Scale;
-	DrawCenteredText(TEXT("FUEL"), Muted, FuelX + 100.0f * Scale, Y + 66.0f * Scale, Small, 0.76f * Scale);
-	DrawCenteredText(Display.FuelText + TEXT("%"), Display.bAuthoritative ? White : Muted,
-		FuelX + 100.0f * Scale, Y + 91.0f * Scale, Medium, 1.0f * Scale);
-	const float SegmentWidth = 15.0f * Scale;
-	for (int32 Segment = 0; Segment < 10; ++Segment)
-	{
-		const bool bFilled = Display.bAuthoritative && Display.FuelPercent >= (Segment + 1) * 10.0f;
-		const FLinearColor FuelColor = Display.FuelPercent <= 15.0f ? Amber : Cyan;
-		DrawRect(bFilled ? FuelColor : FLinearColor(0.10f, 0.16f, 0.21f, 1.0f),
-			FuelX + Segment * (SegmentWidth + 4.0f * Scale), Y + 132.0f * Scale,
-			SegmentWidth, 9.0f * Scale);
-	}
-
-	const FLinearColor BrakeColor = Display.bSideBrakeRequested ? Amber : Muted;
-	DrawRect(FLinearColor(BrakeColor.R, BrakeColor.G, BrakeColor.B,
-		Display.bSideBrakeRequested ? 0.18f : 0.06f),
-		FuelX + 43.0f * Scale, Y + 166.0f * Scale, 114.0f * Scale, 24.0f * Scale);
-	DrawCenteredText(Display.bSideBrakeRequested ? TEXT("SIDE BRAKE") : TEXT("SIDE BRAKE OFF"),
-		BrakeColor, FuelX + 100.0f * Scale, Y + 170.0f * Scale, Small, 0.72f * Scale);
-	DrawCenteredText(TEXT("Q LEFT   X HAZARD   E RIGHT"), Muted,
-		CenterX, Y + Height - 22.0f * Scale, Small, 0.60f * Scale);
+	const bool bBlink = GetWorld() && FMath::Fmod(GetWorld()->GetTimeSeconds(), 0.8f) < 0.4f;
+	const bool bLeft = bBlink && (Display.bHazardLightsRequested
+		|| Display.ManualIndicator == SimCoreProtocol::ETurnIndicator::Left);
+	const bool bRight = bBlink && (Display.bHazardLightsRequested
+		|| Display.ManualIndicator == SimCoreProtocol::ETurnIndicator::Right);
+	DrawCenteredText(TEXT("<"), bLeft ? Amber : Muted,
+		X + 28.0f * Scale, Y + 8.0f * Scale, Small, Scale);
+	DrawCenteredText(TEXT(">"), bRight ? Amber : Muted,
+		X + 322.0f * Scale, Y + 8.0f * Scale, Small, Scale);
+	DrawCenteredText(Display.StatusText, Display.StatusColor,
+		X + 175.0f * Scale, Y + 8.0f * Scale, Small, 0.90f * Scale);
+	if (Display.bSideBrakeRequested)
+		DrawCenteredText(TEXT("(P)"), Amber,
+			X + 249.0f * Scale, Y + 111.0f * Scale, Small, 0.85f * Scale);
 }
 
 void ASimCoreInstrumentClusterHud::DrawCenteredText(

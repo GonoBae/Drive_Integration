@@ -23,7 +23,7 @@ namespace {
 constexpr double kRadians = std::numbers::pi_v<double> / 180.0;
 constexpr double kDt = 1.0 / 60.0;
 constexpr char kExpectedCollisionChecksum[] =
-    "fnv1a64:86c3103f3e2c7a5b";
+    "fnv1a64:7d7812b84f728ac7";
 
 void require(bool condition, const std::string& message)
 {
@@ -88,8 +88,8 @@ std::vector<RoutePoint> load_route(const std::filesystem::path& directory)
         route.push_back(point);
     }
     require(saw_header, "drive_route.csv is missing its header");
-    require(route.size() == 394,
-            "signal city must retain exactly 394 QA route checkpoints");
+    require(route.size() == 453,
+            "curved signal city must retain exactly 453 QA route checkpoints");
     require(std::hypot(route.front().east + 80.0,
                        route.front().north - 40.0) < 0.01
                 && std::abs(route.front().up) < 0.01
@@ -98,8 +98,8 @@ std::vector<RoutePoint> load_route(const std::filesystem::path& directory)
     require(std::hypot(route.back().east - route.front().east,
                        route.back().north - route.front().north) < 0.01,
             "signal-city route must close at its first checkpoint");
-    require(std::abs(route.back().distance - 566.123) < 0.02,
-            "394-point drive_route.csv must remain 566.123 m long");
+    require(std::abs(route.back().distance - 549.155) < 0.02,
+            "curved drive_route.csv must remain 549.155 m long");
     return route;
 }
 
@@ -168,9 +168,9 @@ void test_package_contract(
             break;
         }
     }
-    require(package.collision_world->static_collider_count() == 49,
-            "Signal City must retain exactly 49 static colliders");
-    require(curb_count == 42, "Signal City must retain all 42 semantic curbs");
+    require(package.collision_world->static_collider_count() == 453,
+            "curved Signal City must retain exactly 453 static colliders");
+    require(curb_count == 446, "curved Signal City must retain all 446 semantic curbs");
     require(wall_count == 7 && building_ids.size() == 7,
             "Signal City must retain exactly seven Building_* walls");
     for (int index = 0; index < 7; ++index) {
@@ -315,8 +315,8 @@ void test_every_curb_has_near_and_far_support(
             ++support_samples;
         }
     }
-    require(curb_count == 42,
-            "near/far support test must exercise every one of the 42 curbs");
+    require(curb_count == 446,
+            "near/far support test must exercise every one of the 446 curbs");
     std::cout << "signal-city curb support: curbs=" << curb_count
               << " perpendicular_samples=" << support_samples << '\n';
 }
@@ -559,7 +559,7 @@ int main(int argc, char** argv)
         run("package/checksum/static contract", [&] {
             test_package_contract(directory, package);
         });
-        run("394-point route and four-tire support", [&] {
+        run("453-point curved route and four-tire support", [&] {
             test_route_ground_and_tire_support(package, route, parameters);
         });
         run("all-curb near/far support", [&] {

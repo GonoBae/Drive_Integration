@@ -21,5 +21,7 @@ public class DriveIntegration : ModuleRules
 		});
 		PrivateDependencyModuleNames.Add("Json");
 		PrivateDependencyModuleNames.AddRange(new string[] { "RenderCore", "RHI" });
+		// SensorRig reads JSON through FFileHelper, not Unreal's INI config system.
+		RuntimeDependencies.Add("$(ProjectDir)/Config/sensors.json", StagedFileType.NonUFS);
 	}
 }

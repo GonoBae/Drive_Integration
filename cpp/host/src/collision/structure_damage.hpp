@@ -65,8 +65,8 @@ public:
     [[nodiscard]] const std::vector<KinematicCollisionProxy>& collision_proxies() const noexcept {
         return proxies_;
     }
-    // Apply to freshly evaluated signal snapshots. A damaged controller is
-    // fail-safe all-red; only physically disabled heads are out_of_service.
+    // Apply to freshly evaluated snapshots. Disabled heads are dark/Red0;
+    // functioning heads retain the independent controller's phase and timer.
     void apply_signal_faults(std::vector<TrafficSignalSnapshot>& signals) const;
 
 private:

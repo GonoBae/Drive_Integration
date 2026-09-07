@@ -4,7 +4,7 @@
 
 | 항목 | 값 |
 |---|---|
-| 버전 | 3.20 |
+| 버전 | 3.21 |
 | 작성일 | 2026-08-19 |
 | 최종 수정 | 2026-09-07 |
 | R1 | 수동운전 버티컬 슬라이스; Core RC 2026-09-07(9/8 수정 버퍼), Should 확장 2026-09-11(9/14 위험 버퍼) |
@@ -20,9 +20,11 @@
 플레이어는 `1/2/3/4`로 세단·경차·트럭·오토바이를 선택하며 출발점 reset과 서버 물리 profile
 변경이 함께 적용된다. 차종은 기록·재생에도 보존하며 SensorRig는 새 세션에서 초기화한다.
 
-9/5 검증은 C++ **34/34**, 후속 관련 검사 **4/4**, Unreal **84/84** 통과다.
-Unreal은 경고 없는 성공 79개와 기존 예상 경고 포함 성공 5개이며 실패는 없다.
-최신 PIE 주행·충돌·차종/차선 표시, 운전석·외부 카메라 잔여, 패키징·서버 주소 설정,
+9/7 후속 검증은 C++ **34/34**, Unreal **89/89**, Python 검사 도구 **48/48** 통과다.
+Unreal은 경고 없는 성공 84개와 기존 예상 경고 포함 성공 5개이며 실패는 없다.
+9/7 후속으로 카메라 3종 전환과 외부 접속 INI, Windows 패키지 제작 절차를 구현했다.
+Windows 패키지 생성과 NullRHI 서버 연결·상태 수신도 통과했다.
+최신 PIE 주행·충돌·차종/차선/카메라 표시, 다른 경로/PC 배포·실제 화면,
 목표 PC 1080p 60fps·입력 지연·30분 안정성과 촬영은 미인수다. 9/4 조기 인수는 미달성이며
 9/7 Core 목표·9/8 수정 버퍼, 9/11 확장·9/14 위험 버퍼를 유지한다.
 RGB smoke는 Should, LiDAR payload는 Future다. 오토바이는 네 접점 축약 모델로 실제 이륜
@@ -44,7 +46,7 @@ rollover contact·6구역 dent·Ego↔NPC/보행자 반작용, `signal_city_v2` 
 (차량8·보행8)/2 controllers,
 NPC4·보행자8이다. map/traffic checksum은 `fnv1a64:7446108adad3e25b` /
 `fnv1a64:dfcb5e4541d71adf`이며 CTest20/20·UE47/47·2,280-state smoke를 통과했다.
-SensorRig metadata와 F5 snapshot CSV/F6 visual ghost는 골격만 구현됐고 결정적 물리 재생은
+SensorRig metadata와 R snapshot CSV/F6 visual ghost는 골격만 구현됐고 결정적 물리 재생은
 아니다. 서버는 공통 launcher가 port9000 listener PID와 실행 로그를 확인하며,
 PIE·60fps·30분 인수는 남아 있다.
 [빠른 시작](./signal_city_quickstart.md)과
@@ -261,12 +263,12 @@ AT-05 전체의 완료가 아니다. [설계·검증 경계](./traffic_network_s
 | UE-002 | Must | 구현 | ExternalVehiclePawn | C++ Ego pose·wheel state를 표시하며 시각 휠 회전은 부호 있는 종방향 속도와 타이어 반지름에 연동하고 정지 시 0이다. authoritative 차종 수신 뒤 세단/경차/트럭/오토바이 차체·휠 위치/크기·램프·배기 위치를 변경한다. 오토바이는 보이는 바퀴만 2개이며 서버는 네 접점이다. 세단 실내·운전자는 다른 차종에서 비활성화한다. Ego Chaos 동역학은 비활성이고 NPC/보행자는 별도 proxy로 표시한다. 최신 비율·주행 감각 PIE는 별도 인수 | 외부 물리 엔티티 공통 기반 |
 | UE-003 | Must | 구현 중 | 상태 표시·제한 외삽 | 최대 50ms dead reckoning, stale wheel 정지, 자동 재연결, checksum/play-session gate와 runtime entity 표시를 구현했다. 재연결마다 manifest를 재검증하며 checksum 변경 시 새 PlaySession/Reset을 자동 수행한다. 경량 HUD가 state rate·sequence·local/server age·max gap과 forward sequence `missing`, duplicate/out-of-order `old`를 분리 집계한다. 실제 재연결 full snapshot과 demo/map-reload PIE 검증은 후속 | 네트워크 지연 완화 |
 | UE-004 | Must | 구현 중 | 좌표 변환 어댑터 | C++/UE가 `map_enu`·body FLU↔Unreal FRU position, polar/axial vector와 quaternion basis 계약을 구현했고 Windows headless round-trip Automation 1/1이 통과했다. 로컬 지도 원점 metadata, SensorRig frame과 실제 코스 PIE 시각 검증은 후속; Cesium geodetic 통합은 Future | 지도 원점 변경과 ROS 호환 센서에 재사용 |
-| UE-005 | Must | 구현 중 | 운전자 카메라와 외부 카메라 | 8/31 외부 추적 orbit 카메라·마우스 회전·휠 줌·C 복귀·수평 유지·벽 충돌 검사와 실제 입력 QA 구현. 운전석과 외부 고정 camera rig 및 replay 촬영은 후속 | 센서와 촬영 분리 |
+| UE-005 | Must | 구현 중 | 운전자 카메라와 외부 카메라 | 9/7 V로 외부 추적→운전석→차량 기준 고정 후방을 전환하고 C로 기본 추적을 복원한다. 운전석 시선 제한·차종별 장착 위치·플레이어 운전자 가림 방지, 외부 충돌 probe를 유지한다. 트럭은 실내가 없어 차체 앞 시점으로 대체하며 표시한다. 최신 실제 시야·주행 인수와 replay 촬영은 후속 | 센서와 촬영 분리 |
 | UE-006 | Must | 구현 중 | 핵심 디버그 HUD | 연결·Hello·map·state·Health/SafeStop 진단과 damage/impact 표시를 구현. 실제 PIE 가독성은 후속 | 통합 문제 진단 |
 | UE-007 | Should | 구현 중 | 충돌·차선·휠 디버그 오버레이 | `F3`로 chassis box, wheel/contact normal·force와 impact 정보를 켜고 끈다. 실제 PIE 가독성·포트폴리오 캡처는 후속 | 지도·차량 물리 보정과 FSD 디버깅 |
-| UE-008 | Must | 구현 중 | 패키지 실행 설정 | C++ 서버는 strict `runtime_server.cfg`와 cfg&lt;CLI 우선순위로 port/Hz/origin/spawn/timeouts/source/demo/vehicle/map을 외부화하고 unknown·duplicate·missing·non-finite·range 오류를 fail-closed한다. 목표 Windows packaged UE의 서버 주소 외부 파일화와 배포 smoke는 후속 | 배포 재사용 |
+| UE-008 | Must | 구현 중 | 패키지 실행 설정 | 기존 C++ cfg&lt;CLI 설정을 유지한다. UE는 직렬화 설정&lt;SimCoreClient.ini&lt;CLI URL 우선순위, loopback 주소/port 검증, 잘못된 설정의 연결 차단과 HUD 설명을 구현했다. map 경로는 INI 기준으로 해석한다. Windows 패키지 제작기는 게임·서버/DLL·MapPackage·SensorRig JSON과 실행기를 새 폴더에 구성한다. 배포·실행 인수는 별도 검증 | 배포 재사용 |
 | UE-009 | Should | 결정 | 운영 퀵 액션과 데모 프리셋 | reset·reconnect·scenario restart를 화면에서 실행하고 대표 데모 시나리오를 선택해 같은 초기 상태로 시작 | 반복 QA와 포트폴리오 시연 |
-| UE-010 | Should | 구현 중 | 4종 카메라 모드 | 외부 추적 카메라의 자유 orbit/줌/reset 선행 구현. 운전석·외부 고정·독립 자유 이동 전환과 replay 촬영을 포함한 전체 완료는 후속 | 센서와 촬영 분리 |
+| UE-010 | Should | 구현 중 | 4종 카메라 모드 | 외부 추적 orbit/줌, 운전석, 차량 기준 고정 후방 3종 구현. 독립 자유 이동과 replay 촬영 전환은 후속 | 센서와 촬영 분리 |
 | UE-011 | Should | 구현 중 | 통합 운전 대시보드 | Blueprint나 외부 UI 에셋 없이 GameMode가 코드 기반 계기판을 자동 생성한다. fresh·connected authoritative `WorldState`의 속도(km/h)·RPM·기어·연료만 표시하고 stale/reconnect/offline에서는 값을 `---`로 지운다. `SIDE BRAKE`는 서버 확인값이 없어 로컬 command intent만 별도 표시한다. 16:9 반응형 Canvas와 표시 계약·자동 GameMode 설치 Automation 2/2는 통과했다. 기존 diagnostics HUD의 FPS/state age/SafeStop 통합과 실제 PIE 가독성은 후속 | 데모 운전과 성능·지연 진단 |
 | UE-012 | Should | 구현 중 | 차량 시청각 피드백 | Pawn이 별도 에셋 없이 exhaust CPU sprite와 procedural synth를 자동 생성한다. 배기가스는 authoritative RPM·종가속도, 엔진음은 RPM, 타이어 마찰음은 차속·접지·published slip만 읽으며 stale/unavailable state에서는 emission을 감쇠하고 소리를 끈다. 물리·제어·protocol에 값을 되먹임하지 않는다. focused Automation은 배기가스 2/2·오디오 1/1 통과했고 실제 PIE 외형·음량·공간감 인수는 후속 | 차량 상태를 체감 가능한 포트폴리오 표현으로 연결 |
 
@@ -291,7 +293,7 @@ AT-05 전체의 완료가 아니다. [설계·검증 경계](./traffic_network_s
 | SEN-003 | Should | 제안 | 전방 RGB 카메라 smoke test | 낮은 주기로 프레임과 메타데이터 1개를 기록 | 향후 인지 입력 |
 | SEN-004 | Future | 연기 | GNSS·IMU 모델 | noise/bias가 구성 가능한 GNSS·IMU 생성 | localization 학습·평가 |
 | SEN-005 | Future | 연기 | LiDAR·Radar·분할 카메라 | 개별 주기와 좌표계로 데이터 생성 | perception 입력 |
-| REC-001 | Must | 구현 중 | 주행 기록 | `F5` snapshot CSV v2와 서버 `--record-physics`에 적용 입력·reset/lifecycle·차종·동적 충돌 입력·결과 상태를 기록한다. AgentIntent/traffic AI 전체 이벤트 재실행과 사용자 기록 인수는 후속 | 회귀 시험과 데이터셋 |
+| REC-001 | Must | 구현 중 | 주행 기록 | `R` snapshot CSV v2와 서버 `--record-physics`에 적용 입력·reset/lifecycle·차종·동적 충돌 입력·결과 상태를 기록한다. AgentIntent/traffic AI 전체 이벤트 재실행과 사용자 기록 인수는 후속 | 회귀 시험과 데이터셋 |
 | REC-002 | Must | 구현 중 | 결정적 재생 | `F6` visual ghost에 더해 서버 `--verify-physics-replay`가 동일 executable/cfg/map/origin/Hz에서 차종별 Ego 물리를 frame별 재계산한다. 외부 동적 proxy는 기록값을 사용하며 위치1cm/yaw0.1도 기준을 검증한다. 차종 없는 legacy RESET/CSV v1은 세단으로 읽는다. 실제 사용자 기록·재생 인수는 후속 | 버그 재현과 영상 촬영 |
 | REC-003 | Should | 구현 중 | replay 기반 영상 | snapshot ghost 재생은 가능. 카메라/MRQ 촬영 통합은 후속 | Movie Render Queue 촬영 |
 | REC-004 | Should | 결정 | replay 조작 UI | timeline, play/pause, 배속, seek, 카메라를 조작해 기록을 탐색·촬영 가능 | 회귀 분석과 데이터 검수 |
@@ -345,7 +347,7 @@ AT-05 전체의 완료가 아니다. [설계·검증 경계](./traffic_network_s
 9/2 자동 통합의 CTest20/20·UE47/47·Signal City 2,280-state 이력에 이어, 9/3에는 별도
 서버 적용 입력 기반 Ego replay와 opt-in 성능 측정 도구를 추가했다. 9/5에는 차종별 기록·재생과
 세션 초기화까지 보완했다. 최신 실행 결과는 [9/5 작업일지](./worklogs/2026-09-05.md)를 따른다.
-`F5/F6` 자체는 여전히 snapshot/ghost이며
+`R/F6` 자체는 여전히 snapshot/ghost이며
 NPC·보행자 AI 재실행과 사용자 실제 기록 인수까지 완료했다는 의미는 아니다.
 AT-02/04/05/08의 조작감·HUD·traffic PIE·패키지60fps·30분 시험과 입력 지연은 미완료다.
 
@@ -385,6 +387,9 @@ Editor/Game 빌드 성공도 같은 구분을 적용한다. 최신 통합 QA 결
 | DEC-F11 | **완료: 배경을 작은 가상 도심으로 전환** ([ADR-013](./decisions/ADR-013-small-virtual-city-course.md)) | 사용자 승인 2026-08-31 | Wall/Broad·실제 랜드마크·GIS/Cesium 통합 요구를 R1에서 제외하되 교통 개체 수·SensorRig·기록/재생·성능/안정성·AT 게이트는 유지 |
 
 ## 8. 변경 이력
+
+3.21(2026-09-07): UE-005/008의 카메라 3종·외부 접속 설정·Windows 패키지 제작 구현과
+CTest34/34·UE89/89·도구48/48 후속 검증을 반영. 자유 카메라와 실제 주행·배포 인수는 별도다.
 
 3.6(2026-08-31): v7 고정 앞/뒤 per-tire 강성 60k/50k·v5/v6 명시적 migration·hard-stop 반력·
 접지 상실 조향 표시 수정의 CTest 16/16(4.92초)·UE 26/26·Editor/Game·Health smoke·서버 적용

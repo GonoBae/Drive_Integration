@@ -12,11 +12,9 @@ from dataclasses import dataclass
 from datetime import datetime
 import json
 import math
-import os
 from pathlib import Path
 import re
 import socket
-import subprocess
 import time
 import uuid
 
@@ -24,6 +22,7 @@ import websockets
 from websockets.exceptions import ConnectionClosed
 
 from smoke_health import Controller, ROOT, pb, require
+from smoke_host import child_host, connect_child
 
 SECOND_NS = 1_000_000_000
 CYCLE_NS = 30 * SECOND_NS
@@ -333,16 +332,7 @@ async def observe(controller, stop_when, timeout):
 
 
 async def exercise(url, process, expected_source, expected):
-    deadline = time.monotonic() + 10
-    while True:
-        require(process.poll() is None, "isolated host exited during startup; inspect its logs")
-        try:
-            connection = await websockets.connect(url, open_timeout=1, close_timeout=1, max_queue=256)
-            break
-        except (OSError, TimeoutError):
-            if time.monotonic() >= deadline:
-                raise
-            await asyncio.sleep(0.1)
+    connection = await connect_child(url, process)
     play_id = "traffic-play-" + uuid.uuid4().hex
     try:
         controller = TrafficController(connection, play_id, expected_source, expected)
@@ -380,10 +370,8 @@ async def exercise(url, process, expected_source, expected):
     finally:
         await connection.close()
 
-    # A real new PIE constructs a new client/socket/session. The server binds
-    # play identity to a connection generation and correctly rejects changing
-    # play_id in-place on the previous socket; do not weaken that production
-    # fence just to make the smoke reset its full-cycle run.
+    # A new PIE needs a fresh connection because the server binds play identity
+    # to the connection generation and rejects in-place play_id changes.
     play_id = "traffic-play-" + uuid.uuid4().hex
     async with websockets.connect(url, open_timeout=2, close_timeout=1, max_queue=256) as connection:
         controller = TrafficController(connection, play_id, expected_source, expected)
@@ -449,23 +437,13 @@ def main():
                "--ws-port", str(port), "--command-timeout-ms", "250",
                "--hard-command-timeout-ms", "1000", "--source-id", expected_source]
     with (log_dir / (stem + ".stdout.log")).open("wb") as stdout, \
-            (log_dir / (stem + ".stderr.log")).open("wb") as stderr:
-        process = subprocess.Popen(command, cwd=ROOT, stdout=stdout, stderr=stderr,
-                                   creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+            (log_dir / (stem + ".stderr.log")).open("wb") as stderr, \
+            child_host(command, cwd=ROOT, stdout=stdout, stderr=stderr) as process:
         print(f"Isolated server PID={process.pid} port={port}; logs={log_dir / stem}")
-        try:
-            overall_timeout = max(55, expected.observation_ns / SECOND_NS + 22)
-            asyncio.run(asyncio.wait_for(exercise(
-                f"ws://127.0.0.1:{port}", process, expected_source, expected), overall_timeout))
-            print("PASS Traffic WebSocket smoke (isolated child only)")
-        finally:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
+        overall_timeout = max(55, expected.observation_ns / SECOND_NS + 22)
+        asyncio.run(asyncio.wait_for(exercise(
+            f"ws://127.0.0.1:{port}", process, expected_source, expected), overall_timeout))
+        print("PASS Traffic WebSocket smoke (isolated child only)")
 
 
 if __name__ == "__main__":

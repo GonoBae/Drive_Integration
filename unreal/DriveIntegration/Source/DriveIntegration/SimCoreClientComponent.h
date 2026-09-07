@@ -81,7 +81,7 @@ public:
 
 	/** Lightweight runtime overlay for PIE and packaged smoke tests. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="SimCore|Diagnostics")
-	bool bShowDebugHud = true;
+	bool bShowDebugHud = false;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="SimCore|Diagnostics", meta=(ClampMin="1.0", ClampMax="20.0"))
 	float DebugHudRefreshHz = 4.0f;
@@ -111,6 +111,7 @@ public:
 
 	UFUNCTION(BlueprintPure, Category="SimCore|Diagnostics")
 	FString GetConnectionStatusText() const;
+	SimCoreClientDiagnostics::FHealthDisplay GetHealthDisplay() const { return EvaluateHealthDisplay(); }
 
 	// Steering is already canonical: -1=right, +1=left. Callers convert device
 	// or Unreal right-positive axes before entering this protocol boundary.
@@ -139,9 +140,11 @@ private:
 	friend class FSimCoreBinaryMessageFramingTest;
 	friend class FSimCoreBinaryMessageBoundarySafetyTest;
 	friend class FSimCorePlayerVehicleHelloValidationTest;
+	friend class FSimCoreClientSettingsFailureTest;
 	static constexpr int32 MaxIncomingMessageBytes = 1024 * 1024;
 
 	void StartConnectionAttempt();
+	bool PrepareRuntimeSettings();
 	bool PrepareMapPackageIdentity();
 	void TickConnection();
 	void TickControlTransmission(float DeltaTime);
@@ -240,6 +243,8 @@ private:
 	bool bHasSentControl = false;
 	bool bControlDirty = true;
 	bool bAutoReconnectEnabled = false;
+	bool bRuntimeSettingsLoaded = false;
+	FString RuntimeSettingsError;
 	bool bDiscardIncomingMessage = false;
 	bool bMapHandshakeComplete = false;
 	bool bProtocolHandshakeComplete = false;

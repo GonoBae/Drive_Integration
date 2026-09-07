@@ -28,17 +28,13 @@ unreal/**/Build/
 unreal/**/DerivedDataCache/
 unreal/**/Intermediate/
 unreal/**/Saved/
+unreal/**/SimCoreClient.ini
 unreal/**/.vs/
 unreal/**/.idea/
 unreal/**/*.sln
 unreal/**/*.suo
 unreal/**/*.vcxproj
 unreal/**/*.vcxproj.filters
-
-# ============================================================
-# Claude
-# ============================================================
-.claude/
 
 # ============================================================
 # macOS

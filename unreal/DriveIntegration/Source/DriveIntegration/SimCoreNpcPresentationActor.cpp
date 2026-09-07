@@ -13,6 +13,7 @@
 #include "SimCoreSedanVisualContract.h"
 #include "SimCoreTrafficSignalActor.h"
 #include "SimCoreVehicleHorn.h"
+#include "SimCoreVehicleVisualProfile.h"
 #include "UObject/ConstructorHelpers.h"
 
 bool SimCoreNpcPresentation::BuildAuthoredModelOffset(
@@ -96,7 +97,7 @@ ASimCoreNpcPresentationActor::ASimCoreNpcPresentationActor()
 	if (bHasAuthoredSedan)
 	{
 		AuthoredBounds = SedanBodyMesh->GetBoundingBox();
-		// The left mirror and complete front door now belong to the hinged mesh.
+		// The left mirror and complete front door belong to the hinged mesh.
 		// Include its closed-pose bounds so centering remains symmetric.
 		AuthoredBounds += SedanDriverDoor->GetBoundingBox();
 		TireRadiusMeters = static_cast<float>(SharedWheelMesh->GetBoundingBox().GetExtent().Z * 0.01);
@@ -186,81 +187,30 @@ bool ASimCoreNpcPresentationActor::ConfigureVehicleClass(
 	DamageMaterials.Reset();
 	DamageAccumulator = {};
 
-	TArray<FVector, TInlineAllocator<4>> WheelLocations;
-	TArray<FVector, TInlineAllocator<4>> WheelScales;
-	TArray<FVector, TInlineAllocator<4>> LampPositions;
-	const TConstArrayView<FVector> SedanWheels = SimCoreSedanVisualContract::WheelOriginsCm();
-	if (VehicleClass == SimCoreProtocol::ERuntimeVehicleClass::Sedan)
-	{
-		PresentationHalfHeightMeters = 0.75f;
-		WheelLocations.Append(SedanWheels.GetData(), SedanWheels.Num());
-		for (int32 Index = 0; Index < 4; ++Index) WheelScales.Add(FVector::OneVector);
-		for (int32 Index = 0; Index < 4; ++Index)
-		{
-			LampPositions.Add(SimCoreSedanVisualContract::TurnSignalLensPointCm(
-				Index < 2, Index % 2 == 0, 0.5, 0.5));
-		}
-	}
-	else if (VehicleClass == SimCoreProtocol::ERuntimeVehicleClass::Compact)
-	{
-		PresentationHalfHeightMeters = 0.70f;
-		for (const FVector& Origin : SedanWheels)
-		{
-			WheelLocations.Add(FVector(Origin.X * 0.79, Origin.Y * 0.90,
-				Origin.Z * 0.92 - 1.5));
-			WheelScales.Add(FVector(0.86, 0.82, 0.86));
-		}
-		for (int32 Index = 0; Index < 4; ++Index)
-		{
-			const FVector SedanLamp = SimCoreSedanVisualContract::TurnSignalLensPointCm(
-				Index < 2, Index % 2 == 0, 0.5, 0.5);
-			LampPositions.Add(FVector(SedanLamp.X * 0.79 - 4.0,
-				SedanLamp.Y * 0.90, SedanLamp.Z * 0.92 - 1.5));
-		}
-	}
-	else if (VehicleClass == SimCoreProtocol::ERuntimeVehicleClass::Truck)
-	{
-		PresentationHalfHeightMeters = 1.25f;
-		WheelLocations = {FVector(190, -102, -28), FVector(190, 102, -28),
-			FVector(-195, -102, -28), FVector(-195, 102, -28)};
-		for (int32 Index = 0; Index < 4; ++Index) WheelScales.Add(FVector(1.22, 1.08, 1.22));
-		LampPositions = {FVector(240, -96, 58), FVector(240, 96, 58),
-			FVector(-294, -96, 64), FVector(-294, 96, 64)};
-	}
-	else
-	{
-		PresentationHalfHeightMeters = 0.68f;
-		WheelLocations = {FVector(99, 0, -8), FVector::ZeroVector,
-			FVector(-82, 0, -8), FVector::ZeroVector};
-		WheelScales = {FVector(1.05, 0.42, 1.05), FVector::OneVector,
-			FVector(1.05, 0.42, 1.05), FVector::OneVector};
-		LampPositions = {FVector(93, -29, 61), FVector(93, 29, 61),
-			FVector(-94, -27, 47), FVector(-94, 27, 47)};
-	}
+	SimCoreVehicleVisualProfile::FProfile Profile;
+	if (!SimCoreVehicleVisualProfile::Resolve(VehicleClass, Profile)) return false;
+	PresentationHalfHeightMeters = Profile.HalfHeightMeters;
 
 	AuthoredBounds = TargetBody->GetBoundingBox();
 	for (int32 Index = 0; Index < Wheels.Num(); ++Index)
 	{
-		const bool bVisible = VehicleClass != SimCoreProtocol::ERuntimeVehicleClass::Motorcycle
-			|| Index == 0 || Index == 2;
+		const bool bVisible = Profile.IsWheelVisible(Index);
 		Wheels[Index]->SetVisibility(bVisible);
-		Wheels[Index]->SetRelativeLocation(WheelLocations[Index]);
-		Wheels[Index]->SetRelativeScale3D(WheelScales[Index]);
+		Wheels[Index]->SetRelativeLocation(Profile.WheelOriginsCm[Index]);
+		Wheels[Index]->SetRelativeScale3D(Profile.WheelScales[Index]);
 		Wheels[Index]->SetRelativeRotation(FRotator::ZeroRotator);
 		if (bVisible)
 		{
 			AuthoredBounds += SharedWheelMesh->GetBoundingBox().TransformBy(
-				FTransform(FQuat::Identity, WheelLocations[Index], WheelScales[Index]));
+				FTransform(FQuat::Identity, Profile.WheelOriginsCm[Index], Profile.WheelScales[Index]));
 		}
 	}
 	TireRadiusMeters = static_cast<float>(SharedWheelMesh->GetBoundingBox().GetExtent().Z
-		* WheelScales[0].Z * 0.01);
+		* Profile.WheelScales[0].Z * 0.01);
 	VehicleHorn->SetRelativeLocation(FVector(AuthoredBounds.Max.X - 18.0, 0.0,
 		FMath::Clamp(AuthoredBounds.GetCenter().Z, 18.0, 80.0)));
-	TurnSignals->SetLampPositions(LampPositions);
-	DriverPresentation->SetRelativeTransform(FTransform::Identity);
-	DriverPresentation->SetPresentationEnabled(
-		VehicleClass == SimCoreProtocol::ERuntimeVehicleClass::Sedan && bHasAuthoredSedan);
+	TurnSignals->SetLampPositions(MakeArrayView(Profile.LampLocationsCm));
+	DriverPresentation->ConfigureVehicleClass(VehicleClass);
 	RuntimeVehicleClass = VehicleClass;
 	return AuthoredBounds.IsValid != 0;
 }
@@ -328,21 +278,40 @@ bool ASimCoreNpcPresentationActor::ApplySnapshot(const SimCoreProtocol::FVehicle
 	{
 		VehicleHorn->ObserveAuthoritativeEvent(State.HornEventSequence);
 	}
-	if (SharedWheelMesh && bMotionAllowed
-		&& FMath::Abs(State.PitchDegrees) < 20.0f && FMath::Abs(State.RollDegrees) < 20.0f)
+	if (SharedWheelMesh)
 	{
 		const double Heading = FMath::DegreesToRadians(static_cast<double>(State.HeadingDegrees));
 		const double SignedForwardSpeed = State.LinearVelocityEnu.X * FMath::Sin(Heading)
 			+ State.LinearVelocityEnu.Y * FMath::Cos(Heading);
-		const float AngularSpeed = static_cast<float>(SignedForwardSpeed / FMath::Max(TireRadiusMeters, 0.01f));
-		WheelSpinDegrees = SimCorePresentation::AdvanceWheelSpinDegrees(
-			WheelSpinDegrees, AngularSpeed, FMath::Min(DeltaSeconds, 0.1f));
-		for (UStaticMeshComponent* Wheel : Wheels)
+		float FrontWheelYawDegrees = 0.0f;
+		if (bMotionAllowed && FMath::Abs(State.PitchDegrees) < 20.0f
+			&& FMath::Abs(State.RollDegrees) < 20.0f)
 		{
-			if (Wheel->IsVisible())
+			const float AngularSpeed = static_cast<float>(SignedForwardSpeed / FMath::Max(TireRadiusMeters, 0.01f));
+			WheelSpinDegrees = SimCorePresentation::AdvanceWheelSpinDegrees(
+				WheelSpinDegrees, AngularSpeed, FMath::Min(DeltaSeconds, 0.1f));
+			// Runtime NPCs send yaw rate and velocity, but no rack/wheel angles.
+			// Infer only the visual front axle angle from the accepted curvature.
+			// FLU yaw is left-positive; UE wheel yaw is right-positive. Signed
+			// speed preserves the steering direction when reversing. No heading
+			// history means wrapping, spawning and resets cannot leave old steer.
+			const double WheelbaseMeters = FMath::Abs(Wheels[0]->GetRelativeLocation().X
+				- Wheels[2]->GetRelativeLocation().X) * 0.01;
+			const double SpeedMagnitude = FMath::Abs(SignedForwardSpeed);
+			const double LowSpeedBlend = FMath::Clamp((SpeedMagnitude - 0.1) / 0.4, 0.0, 1.0);
+			const double SteeringDegrees = -FMath::RadiansToDegrees(FMath::Atan(
+				WheelbaseMeters * State.YawRateRad / FMath::Max(SpeedMagnitude, 0.5)))
+				* FMath::Sign(SignedForwardSpeed);
+			FrontWheelYawDegrees = static_cast<float>(
+				FMath::Clamp(SteeringDegrees, -35.0, 35.0) * LowSpeedBlend);
+		}
+		const FQuat Spin = SimCorePresentation::BuildWheelSpinRelativeRotation(WheelSpinDegrees).Quaternion();
+		for (int32 Index = 0; Index < Wheels.Num(); ++Index)
+		{
+			if (Wheels[Index]->IsVisible())
 			{
-				Wheel->SetRelativeRotation(
-					SimCorePresentation::BuildWheelSpinRelativeRotation(WheelSpinDegrees));
+				const FQuat Steering = FRotator(0.0f, Index < 2 ? FrontWheelYawDegrees : 0.0f, 0.0f).Quaternion();
+				Wheels[Index]->SetRelativeRotation(Steering * Spin);
 			}
 		}
 	}

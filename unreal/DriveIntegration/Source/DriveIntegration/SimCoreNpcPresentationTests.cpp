@@ -259,6 +259,81 @@ bool FSimCoreNpcActorPresentationTest::RunTest(const FString& Parameters)
 	return Ok;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSimCoreNpcWheelSteeringTest,
+	"DriveIntegration.NpcPresentation.FrontWheelSteering",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSimCoreNpcWheelSteeringTest::RunTest(const FString& Parameters)
+{
+	using namespace SimCoreNpcPresentationTests;
+	FTestWorld Scene;
+	auto* Actor = Scene.World ? Scene.World->SpawnActor<ASimCoreNpcPresentationActor>() : nullptr;
+	if (!TestNotNull(TEXT("Steering NPC actor"), Actor)
+		|| !TestTrue(TEXT("Authored fleet is available"), Actor->HasAuthoredSedan() && Actor->HasAuthoredFleet())) return false;
+	bool Ok = true;
+	const auto CheckWheelAxes = [&](double ExpectedFrontYaw)
+	{
+		for (int32 Index = 0; Index < 4; ++Index)
+		{
+			const auto* Wheel = Actor->GetWheel(Index);
+			if (!Wheel->IsVisible()) continue;
+			const double Yaw = FMath::DegreesToRadians(Index < 2 ? ExpectedFrontYaw : 0.0);
+			const FQuat Rotation = Wheel->GetRelativeRotation().Quaternion();
+			Ok &= TestTrue(TEXT("Front axle steers in the turn direction; rear axle stays straight"),
+				Rotation.RotateVector(FVector::RightVector).Equals(FVector(-FMath::Sin(Yaw), FMath::Cos(Yaw), 0), 0.0001));
+			Ok &= TestTrue(TEXT("Tire keeps rolling around its steered axle"),
+				Rotation.UnrotateVector(FVector::UpVector).Equals(
+					FRotator(-Actor->GetWheelSpinDegrees(), 0, 0).Quaternion().UnrotateVector(FVector::UpVector), 0.0001));
+		}
+	};
+	struct FCase { ERuntimeVehicleClass Class; double WheelbaseMeters; };
+	const FCase Cases[] = {
+		{ERuntimeVehicleClass::Sedan, 2.70}, {ERuntimeVehicleClass::Compact, 2.133},
+		{ERuntimeVehicleClass::Truck, 3.85}, {ERuntimeVehicleClass::Motorcycle, 1.81}};
+	for (const FCase& Case : Cases)
+	{
+		for (float Speed : {5.0f, -5.0f})
+		{
+			for (float YawRate : {0.3f, -0.3f})
+			{
+				for (float Heading : {0.0f, 90.0f, 359.9f, 0.1f})
+				{
+					auto State = Npc(Speed, Heading);
+					State.RuntimeVehicleClass = Case.Class;
+					State.YawRateRad = YawRate;
+					FVehicleState Parsed; FString Error;
+					Ok &= TestTrue(TEXT("Existing NPC wire provides yaw without wheel or rack state"),
+						ParseWorldStateEnvelope(Envelope(2, {State}), 1001, Parsed, Error)
+						&& Parsed.Wheels.IsEmpty() && Parsed.SteeringAngleRad == 0.0f);
+					Ok &= TestTrue(TEXT("Turning snapshot is accepted across headings and reverse motion"),
+						Actor->ApplySnapshot(Parsed, 0.0f, 0.016f, true, 0.05f, FVector::ZeroVector));
+					CheckWheelAxes(-FMath::RadiansToDegrees(FMath::Atan(Case.WheelbaseMeters * YawRate / Speed)));
+				}
+			}
+		}
+	}
+	auto State = Npc(5.0f);
+	State.YawRateRad = 100.0f;
+	Actor->ApplySnapshot(State, 0, 0.016f, true, 0.05f, FVector::ZeroVector);
+	CheckWheelAxes(-35.0); // Collision yaw cannot turn the visual axle through the body.
+	for (float Speed : {0.3f, 0.05f, 0.0f})
+	{
+		State = Npc(Speed); State.YawRateRad = 100.0f;
+		Actor->ApplySnapshot(State, 0, 0.016f, true, 0.05f, FVector::ZeroVector);
+		CheckWheelAxes(Speed == 0.3f ? -17.5 : 0.0);
+	}
+	State = Npc(5.0f); State.YawRateRad = 0.3f;
+	Actor->ApplySnapshot(State, 0, 0.016f, true, 0.05f, FVector::ZeroVector);
+	const float Spin = Actor->GetWheelSpinDegrees();
+	Actor->ApplySnapshot(State, 0, 0.016f, false, 0.05f, FVector::ZeroVector);
+	CheckWheelAxes(0.0);
+	Ok &= TestEqual(TEXT("Inactive motion still freezes accumulated tire spin"), Actor->GetWheelSpinDegrees(), Spin);
+	Actor->ApplySnapshot(State, 0, 0.016f, true, 0.05f, FVector::ZeroVector);
+	State = Npc(5.0f, 180.0f); State.PlaySessionId = TEXT("reset-play");
+	Actor->ApplySnapshot(State, 0, 0, true, 0.05f, FVector::ZeroVector);
+	CheckWheelAxes(0.0);
+	return Ok;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSimCoreNpcFleetVariantsTest,
 	"DriveIntegration.NpcPresentation.VehicleClassModels",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

@@ -20,6 +20,72 @@ namespace SimCoreOrbitCamera
 		}
 	}
 
+	EMode NextMode(const EMode Mode)
+	{
+		switch (Mode)
+		{
+		case EMode::Follow: return EMode::Driver;
+		case EMode::Driver: return EMode::FixedRear;
+		default: return EMode::Follow;
+		}
+	}
+
+	FVehicleMounts GetVehicleMounts(const SimCoreProtocol::ERuntimeVehicleClass VehicleClass)
+	{
+		FVehicleMounts Mounts;
+		switch (VehicleClass)
+		{
+		case SimCoreProtocol::ERuntimeVehicleClass::Compact:
+			Mounts.DriverLocationCm = Mounts.DriverLocationCm * FVector(0.79, 0.90, 0.92)
+				+ FVector(-4.0, 0.0, -1.5);
+			Mounts.FixedTargetHeightCm = 130.0f;
+			Mounts.FixedDistanceCm = 530.0f;
+			break;
+		case SimCoreProtocol::ERuntimeVehicleClass::Truck:
+			Mounts.DriverLocationCm = FVector(95.0, -34.0, 145.0);
+			Mounts.FixedTargetHeightCm = 220.0f;
+			Mounts.FixedDistanceCm = 850.0f;
+			Mounts.bDriverUsesCabFrontFallback = false;
+			break;
+		case SimCoreProtocol::ERuntimeVehicleClass::Motorcycle:
+			Mounts.DriverLocationCm = FVector(-10.0, 0.0, 125.0);
+			Mounts.FixedTargetHeightCm = 130.0f;
+			Mounts.FixedDistanceCm = 450.0f;
+			break;
+		default:
+			break;
+		}
+		return Mounts;
+	}
+
+	void AddDriverMouseDelta(FDriverLook& State, float YawDelta, float PitchDelta,
+		float DegreesPerInputUnit)
+	{
+		const float Scale = FMath::Max(0.0f, FiniteOrZero(DegreesPerInputUnit));
+		State.YawDegrees = FMath::Clamp(FiniteOrZero(State.YawDegrees)
+			+ FiniteOrZero(YawDelta) * Scale, -75.0f, 75.0f);
+		State.PitchDegrees = FMath::Clamp(FiniteOrZero(State.PitchDegrees)
+			+ FiniteOrZero(PitchDelta) * Scale, -40.0f, 30.0f);
+	}
+
+	void AddDriverGamepadRate(FDriverLook& State, float YawAxis, float PitchAxis,
+		float DegreesPerSecond, float DeltaSeconds)
+	{
+		const float Scale = FMath::Max(0.0f, FiniteOrZero(DegreesPerSecond))
+			* FMath::Max(0.0f, FiniteOrZero(DeltaSeconds));
+		AddDriverMouseDelta(State, FMath::Clamp(FiniteOrZero(YawAxis), -1.0f, 1.0f),
+			FMath::Clamp(FiniteOrZero(PitchAxis), -1.0f, 1.0f), Scale);
+	}
+
+	FRotator BuildBodyRelativeRotation(const FDriverLook& State, const FQuat& VehicleRotation)
+	{
+		FDriverLook Clamped = State;
+		AddDriverMouseDelta(Clamped, 0.0f, 0.0f, 0.0f);
+		const FQuat Body = VehicleRotation.ContainsNaN() || !VehicleRotation.IsNormalized()
+			? FQuat::Identity : VehicleRotation;
+		return (Body * FRotator(Clamped.PitchDegrees, Clamped.YawDegrees, 0.0f).Quaternion()).Rotator();
+	}
+
 	void AddMouseDelta(FState& State, float YawDelta, float PitchDelta, float DegreesPerInputUnit)
 	{
 		const float Scale = FMath::Max(0.0f, FiniteOrZero(DegreesPerInputUnit));

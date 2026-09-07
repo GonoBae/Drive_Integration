@@ -4,7 +4,7 @@
 
 | 항목 | 값 |
 |---|---|
-| 버전 | 3.20 |
+| 버전 | 3.21 |
 | 작성일 | 2026-08-19 |
 | 최종 수정 | 2026-09-07 |
 | 대상 | R1 수동운전 및 R2/R3 자율주행 확장 기반 |
@@ -40,6 +40,19 @@ flowchart LR
 
 현재 구현과 남은 경계는 다음과 같다.
 
+- 9/7에 클라이언트 시작 설정을 `SimCoreClientSettings`로 분리했다. 직렬화된 기본값,
+  선택적 `ProjectDir/SimCoreClient.ini`, `-SimCoreServerUrl` 순서로 적용한다.
+  `-SimCoreClientConfig`로 별도 INI를 지정하고 map 상대 경로는 그 INI 폴더에 고정한다.
+  잘못된 파일·중복/알 수 없는 키·비loopback URL은 첫 소켓 생성 전에 차단하며 HUD에
+  이유를 표시한다. 성공한 설정은 Play 수명주기에 고정하고 기존 map/Hello 검증을 유지한다.
+- 플레이어 카메라는 V로 추적·운전석·차량 기준 고정 후방을 전환하고 C로 추적에 복귀한다.
+  차량 pose나 서버 입력에는 영향을 주지 않는다. 차종별 장착 위치와 플레이어 운전자
+  owner-view 숨김을 사용한다. 트럭도 창 개구가 있는 객실의 운전석 시점을 사용한다.
+  독립 자유 이동·replay 촬영 전환은 후속이다.
+- Windows 배포기는 UE 게임, app-local C++ 서버 DLL·설정, MapPackage와 별도 실행기를
+  묶는다. SensorRig의 `Config/sensors.json`은 NonUFS runtime dependency로 포함한다.
+  배포 폴더를 이동해도 접속·map 경로가 개발 저장소를 참조하지 않도록 구성하며,
+  패키지 제작 성공과 주행·성능 인수는 구분한다. [배포 안내](./windows_package.md).
 - 9/5 기준 플레이어는 `1`~`4`로 세단·경차·트럭·오토바이를 선택한다. Unreal은 입력을
   비우고 새 PlaySession으로 연결한 뒤 `SimulationReset.requested_vehicle_class`를 보낸다.
   서버 Hello의 필수 capability `player-vehicle-selection.v1`을 확인해야 reset을 허용한다.
@@ -49,8 +62,13 @@ flowchart LR
   차종과 자세를 보존하며 같은 Play에서 차종만 바꾸는 요청은 거부한다.
 - 차종은 C++ physics replay의 `RESET`과 Unreal 주행 CSV v2에도 기록한다. 이전 차종 없는
   `RESET`과 CSV v1은 세단으로 읽는다. 새 Play에서는 SensorRig의 sequence와 센서별 capture
-  cadence도 초기화한다. 오토바이는 두 바퀴 외형을 사용하는 네 접점 축약 물리이며,
-  실제 이륜 균형·기울기 모델은 아니다. 세단 이외 차종의 세단용 실내·운전자 표시는 끈다.
+  cadence도 초기화한다. 오토바이는 앞·뒤 중심선 접점과 별도 균형 제어를 사용한다.
+  기존 네 wheel wire slot은 앞·뒤 접점마다 둘씩 같은 위치의 분할 하중으로 유지한다.
+  실제 횡가속도에서 안쪽 기울기를 구하고 제한된 탑승자 토크로 추종한다. 공중·충돌 이탈·
+  65도 이상 전도에서는 균형을 강제하지 않는다. 조향축/자이로까지 갖춘 완전한 이륜 모델은 아니다.
+  플레이어와 NPC 모두 차종별 운전자·실내를 표시하며 오토바이는 탑승자·핸들·발판을 사용한다.
+  사고 시 오토바이 탑승자는 세계좌표로 분리되어 관성·중력·지면 접촉으로 움직인다.
+  이탈 탑승자는 UE 표시이며 독립 서버 충돌 엔티티나 관절별 물리 래그돌은 아니다.
 - NPC10대는 네 차종의 크기·질량·관성·가속/제동 profile을 사용한다. C++는 0.25초마다
   신호, 장애물, 인접 차로 간격과 목적지 도달 가능성을 다시 평가한다. 차선 변경 공간이
   부족하면 정지 후 현재 차선 안에서 제한 후진해 공간을 만들고 안전한 인접 차로로
@@ -59,8 +77,10 @@ flowchart LR
 - 9/4~5 표시 후속에는 투명 세단 유리·실내·분리된 운전석 문, 절차적 하차·항의·복귀,
   비상등과 경적, 비충돌 원경 배경, 커브 차선 v3를 포함한다. C++가 충돌·손상·보행 몸통·
   구조물 전도를 확정하고 UE는 국부 정점 변형, 부분 래그돌, 문 힌지와 파편을 표시한다.
-  문·팔다리·파편의 표시 계산은 서버 차량 물리에 되먹이지 않는다. 최신 커브 수정은
-  비충돌 도색만 교체해 아래 map/traffic checksum을 유지했다.
+  문·팔다리·파편의 표시 계산은 서버 차량 물리에 되먹이지 않는다. 당시 v3는 비충돌 도색만
+  교체했지만 9/7 후속 곡선 수정은 아스팔트·연석·보도·NPC 경로를 함께 재생성한다.
+  최소 곡률 반경이 도로·보도 폭보다 크도록 제한하고 실제 높이 격자의 연석 지지면도 검사한다.
+  최신 map/traffic checksum과 검증 결과는 [9/7 작업일지](./worklogs/2026-09-07.md)에 기록한다.
 - C++ `VehiclePhysics`는 네 바퀴의 독립 tire contact와 1D spring/damper 반력으로 tire load,
   차체 heave·pitch·roll을 계산한다. 경사면 tangent 힘과 ENU XY/yaw도 C++가 소유하며,
   `GroundQuery`는 legacy ENU triangle 또는 `SIMGHF1/2` heightfield를 조회한다. v2는 cell
@@ -958,8 +978,9 @@ sequenceDiagram
 
 9/3 구조물 후속: `StructureDamageRuntime`은 Wall 접촉의 부분 피해와 traffic 기둥의
 충격량·중력 힌지 전도를 계산한다. 기둥은 runtime collision proxy로 추가하며 같은 tick의
-전도 자세를 wire와 물리에 사용한다. 고장 난 controller의 all-red snapshot을 NPC·보행자와
-UE에 공통 적용한다. 건물 shell은 유지하고 UE는 외벽 균열·짧은 비충돌 파편만 표시한다.
+전도 자세를 wire와 물리에 사용한다. 파손된 신호 head만 소등하고 정상 head의 주기는 유지한다.
+같은 신호 그룹에 정상 head가 남아 있으면 NPC는 그 신호를 따르며, 모두 고장 났으면 정지한다.
+SafeStop의 전체 적색 처리는 별도다. 건물 shell은 유지하고 UE는 외벽 균열·짧은 비충돌 파편만 표시한다.
 같은 Play 재연결은 유지, 새 Play/map·traffic reload는 복원한다. 차량 파편이나 건물 전체
 붕괴를 구현한 것은 아니다. [구조물 피해 계약](./structure_damage.md)을 따른다.
 
@@ -1062,7 +1083,7 @@ map checksum 또는 PlaySession이 바뀌면 metadata sequence와 센서별 capt
 
 영상은 실시간 플레이 캡처보다 State replay를 우선 사용한다. 동일한 주행에 카메라와 품질 설정을 바꿔 Movie Render Queue로 촬영할 수 있고, 녹화 부하가 물리 결과에 영향을 주지 않는다.
 
-현재 Unreal `F5`는 authoritative snapshot CSV를
+현재 Unreal `R`은 authoritative snapshot CSV를
 `Saved/DriveReplays/last_drive.csv`에 저장하고 `F6`는 collision-free visual ghost로 재생한다.
 CSV v2는 권한 차종을 함께 저장해 재생 외형에 적용하며 CSV v1은 세단으로 읽는다.
 이 화면 재생과 별도로 C++ `PhysicsReplayRecorder`가 실제 fixed tick의 `VehicleInput`,
@@ -1076,7 +1097,7 @@ AI를 offline에서 다시 실행했다고 주장하지 않는다.
 origin/spawn/Hz를 요구하며 기록된 외부 충돌 입력으로 Ego 물리를 재계산한다. 위치 1cm와
 yaw 0.1도 및 body/wheel/damage 상태를 frame별로 검사한다. format/version/count/footer와
 유한값을 엄격히 검증하고, map/traffic reload 또는 불완전 기록을 정상 재생으로 승인하지
-않는다. F5/F6 UI와 서버 recorder는 독립적이며 실제 사용자 기록·재생 인수는 별도다.
+않는다. R/F6 UI와 서버 recorder는 독립적이며 실제 사용자 기록·재생 인수는 별도다.
 [실행 절차와 제한](./core_validation.md)을 따른다.
 
 ## 14. 실패 처리
@@ -1243,6 +1264,7 @@ R1 구현 의존성이나 필수 작업을 의미하지 않는다.
 
 | 버전 | 날짜 | 변경 내용 |
 |---|---|---|
+| 3.21 | 2026-09-07 | 카메라 상태·차종별 시점과 운전자 가림 처리, strict loopback INI/CLI·경로 기준·실패 시 연결 차단, 동적 에셋 Cook·SensorRig JSON·서버와 지도의 Windows 배포 경계 추가 |
 | 3.20 | 2026-09-07 | 9/4~5 구현을 현재 요약에 동기화: 플레이어 차종 reset·Hello capability·서버 profile·권한 상태·CSV v2/physics replay·SensorRig 초기화, 네 차종 NPC와 근접 후진 회피, 운전자·충돌 표시 경계 및 커브 v3. CTest34/34·후속4/4·UE84/84와 남은 수동/배포 인수를 구분 |
 | 3.19 | 2026-09-03 | 실제 정점 기반 dent, 서버 보행 몸통/UE 부분 래그돌, microstep 내 runtime pair 충돌, wire downed/airborne/indicator, 58lane·NPC10·보행 전용 WALK와 보호 현시를 반영. 시각 인수·완전한 6자유도/전신 모델과 구분 |
 | 3.18 | 2026-09-03 | NPC RoutePlanner·quintic LaneChangePlan·상태 보존 reroute/adoption과 host 안전 가드, optional lane_changes 및 현재 Signal City 46lane/16head를 반영. legacy fixed 경로·맵/ground·wire·Ego 물리 유지; 검증 결과는 별도 작업일지로 관리 |

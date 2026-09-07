@@ -82,6 +82,108 @@ void ordinary_traffic_stops_never_horn()
         "a healthy transient vehicle queue is not a meaningful obstruction");
 }
 
+void nonresponsive_obstruction_has_one_warning_despite_observation_gaps()
+{
+    NpcHornPolicy policy;
+    auto obstruction = stopped_obstruction();
+    obstruction.nonresponsive_obstacle_id = 4201;
+    advance(policy, 30.0, obstruction);
+    require(policy.state().event_sequence == 1 && !policy.state().active,
+        "a fallen pedestrian must not receive repeated stationary reminders");
+
+    NpcHornObservation missing;
+    for (int index = 0; index < 10; ++index) {
+        advance(policy, 0.1, missing);
+        advance(policy, 3.0, obstruction);
+    }
+    require(policy.state().event_sequence == 1,
+        "brief missing or zero-ID observations must not release the entity latch");
+
+    auto approach = obstruction;
+    approach.motion_context = NpcHornMotionContext::Normal;
+    approach.speed_mps = approach.closing_speed_mps = 8.0;
+    policy.step(1.0 / 60.0, approach);
+    require(policy.state().event_sequence == 1,
+        "a prior stationary warning must also suppress a same-entity TTC warning");
+
+    auto unavailable = obstruction;
+    unavailable.nonresponsive_obstacle_id = 4202;
+    unavailable.enabled = false;
+    advance(policy, 10.0, unavailable);
+    unavailable.enabled = true;
+    unavailable.motion_context = NpcHornMotionContext::Inactive;
+    advance(policy, 10.0, unavailable);
+    unavailable.motion_context = NpcHornMotionContext::TrafficControlStop;
+    advance(policy, 10.0, unavailable);
+    unavailable.motion_context = NpcHornMotionContext::ObstructionStop;
+    unavailable.speed_mps = std::numeric_limits<double>::quiet_NaN();
+    policy.step(1.0 / 60.0, unavailable);
+    advance(policy, 10.0, obstruction);
+    require(policy.state().event_sequence == 1 && !policy.state().invalid_input,
+        "inactive, traffic-stop and malformed observations must preserve the latch");
+}
+
+void a_different_nonresponsive_entity_and_reset_allow_one_new_warning()
+{
+    NpcHornPolicy policy;
+    auto obstruction = stopped_obstruction();
+    obstruction.nonresponsive_obstacle_id = 4201;
+    advance(policy, 10.0, obstruction);
+    obstruction.nonresponsive_obstacle_id = 4202;
+    advance(policy, 30.0, obstruction);
+    require(policy.state().event_sequence == 2,
+        "a different nonresponsive entity may receive exactly one new warning");
+
+    policy.reset();
+    advance(policy, 30.0, obstruction);
+    require(policy.state().event_sequence == 1,
+        "explicit lifecycle reset must release the nonresponsive entity latch");
+}
+
+void nonresponsive_ttc_chatter_does_not_repeat_a_warning()
+{
+    NpcHornPolicy policy;
+    auto hazard = stopped_obstruction();
+    hazard.nonresponsive_obstacle_id = 4201;
+    hazard.motion_context = NpcHornMotionContext::Normal;
+    hazard.speed_mps = hazard.closing_speed_mps = 8.0;
+    hazard.obstacle_clearance_m = 6.0;
+    policy.step(1.0 / 60.0, hazard);
+    require(policy.state().event_sequence == 1
+            && policy.state().reason == NpcHornReason::ImminentCollision,
+        "the first approach to a nonresponsive entity retains its TTC warning");
+
+    auto stopped = stopped_obstruction();
+    stopped.nonresponsive_obstacle_id = hazard.nonresponsive_obstacle_id;
+    advance(policy, 30.0, stopped);
+    for (int index = 0; index < 5; ++index) {
+        auto clear = hazard;
+        clear.nonresponsive_obstacle_id = 0;
+        clear.obstacle_clearance_m = 12.0;
+        advance(policy, 6.0, clear);
+        advance(policy, 1.0, hazard);
+    }
+    require(policy.state().event_sequence == 1,
+        "TTC release, missing identity and reapproach must not rewarn the same entity");
+
+    hazard.nonresponsive_obstacle_id = 4202;
+    policy.step(1.0 / 60.0, hazard);
+    require(policy.state().event_sequence == 2
+            && policy.state().reason == NpcHornReason::ImminentCollision,
+        "a different imminent entity is a new hazard even without a TTC gap");
+
+    NpcHornObservation clear;
+    advance(policy, 6.0, clear);
+    hazard.nonresponsive_obstacle_id = 0;
+    policy.step(1.0 / 60.0, hazard);
+    require(policy.state().event_sequence == 3,
+        "ordinary new TTC hazards must retain their existing warning behavior");
+    advance(policy, 6.0, clear);
+    advance(policy, 6.0, stopped_obstruction());
+    require(policy.state().event_sequence == 4,
+        "ordinary obstructions must retain post-cooldown reminders");
+}
+
 void imminent_collision_is_one_shot_until_hysteresis_release()
 {
     NpcHornPolicyConfig config;
@@ -184,6 +286,9 @@ int main()
     try {
         persistent_obstruction_waits_then_pulses_with_cooldown();
         ordinary_traffic_stops_never_horn();
+        nonresponsive_obstruction_has_one_warning_despite_observation_gaps();
+        a_different_nonresponsive_entity_and_reset_allow_one_new_warning();
+        nonresponsive_ttc_chatter_does_not_repeat_a_warning();
         imminent_collision_is_one_shot_until_hysteresis_release();
         bumper_clearance_and_closing_speed_define_ttc();
         cooldown_and_delay_are_rate_stable();

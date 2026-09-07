@@ -25,16 +25,15 @@ from dataclasses import dataclass
 from datetime import datetime
 import json
 import math
-import os
 from pathlib import Path
 import re
 import socket
-import subprocess
 import time
 import uuid
 
 import websockets
 
+from smoke_host import child_host, connect_child
 from smoke_traffic import (SECOND_NS, ROOT, TrafficController, heartbeat,
                            network_expectations, pb, require,
                            reset_to_all_red, wait_state)
@@ -44,10 +43,47 @@ FIRST_NPC_ID = 1001
 FIRST_PEDESTRIAN_ID = 2001
 EXPECTED_NPC_COUNT = 10
 EXPECTED_PEDESTRIAN_COUNT = 8
-NPC_HALF_EXTENTS_M = (2.2, 1.0, 0.75)
 PEDESTRIAN_RADIUS_M = 0.35
 PEDESTRIAN_HALF_HEIGHT_M = 0.9
 PEDESTRIAN_MAX_SPEED_MPS = 1.36
+
+
+@dataclass(frozen=True)
+class NpcVehicleProfile:
+    vehicle_class: int
+    half_extents_m: tuple
+    speed_scale: float
+
+
+# Independent wire contract for the deterministic ID-order fleet in
+# simulation_host_npc.cpp (kNpcVehicleProfiles). Do not infer expectations from
+# the received class: a wrong class with a matching shape must still fail.
+NPC_VEHICLE_PROFILES = (
+    NpcVehicleProfile(pb.RUNTIME_VEHICLE_CLASS_SEDAN, (2.20, 1.00, 0.75), 1.00),
+    NpcVehicleProfile(pb.RUNTIME_VEHICLE_CLASS_COMPACT, (1.75, 0.86, 0.70), 1.08),
+    NpcVehicleProfile(pb.RUNTIME_VEHICLE_CLASS_TRUCK, (3.65, 1.22, 1.25), 0.72),
+    NpcVehicleProfile(pb.RUNTIME_VEHICLE_CLASS_MOTORCYCLE, (1.10, 0.42, 0.68), 1.12),
+)
+
+
+def npc_vehicle_profile(entity_id):
+    index = entity_id - FIRST_NPC_ID
+    require(0 <= index < EXPECTED_NPC_COUNT, f"unexpected NPC entity ID {entity_id}")
+    return NPC_VEHICLE_PROFILES[index % len(NPC_VEHICLE_PROFILES)]
+
+
+def validate_npc_profile(entity):
+    profile = npc_vehicle_profile(entity.entity_id)
+    require(entity.runtime_vehicle_class == profile.vehicle_class,
+            f"NPC {entity.entity_id} vehicle class changed: "
+            f"{entity.runtime_vehicle_class} != {profile.vehicle_class}")
+    actual = (entity.collision_half_length, entity.collision_half_width,
+              entity.collision_half_height)
+    require(all(abs(value - expected) < 1e-5
+                for value, expected in zip(actual, profile.half_extents_m))
+            and abs(entity.collision_radius) < 1e-8,
+            f"NPC {entity.entity_id} collision shape changed: "
+            f"{actual} != {profile.half_extents_m}")
 
 
 @dataclass(frozen=True)
@@ -180,9 +216,10 @@ def validate_npc_spawn_offsets(network, routes, count, start_offset, spacing):
         require(station > 0, "NPC spawn route must have positive length")
         route_spans.append(spans)
     result = []
-    # NpcLaneFollowerConfig: 2.2m body-front extent plus 0.5m stopping margin.
-    clearance = NPC_HALF_EXTENTS_M[0] + 0.5
     for index in range(count):
+        # Each follower uses its class's body-front extent and the common
+        # NpcLaneFollowerConfig stopping margin, including the longer truck.
+        clearance = npc_vehicle_profile(FIRST_NPC_ID + index).half_extents_m[0] + 0.5
         spans = route_spans[index % len(routes)]
         offset = (start_offset + (index // len(routes)) * spacing) % spans[-1][2]
         identity, begin, end, group = next(span for span in spans if span[1] <= offset < span[2])
@@ -439,14 +476,24 @@ def build_lane_change_cells(network, lanes):
                         cuts.add((station - begin) / (end - begin))
             cuts = sorted(cuts)
             for begin, end in zip(cuts, cuts[1:]):
-                cells.append((point_at_station(source, sb + (se - sb) * begin),
-                              point_at_station(source, sb + (se - sb) * end),
-                              point_at_station(target, tb + (te - tb) * end),
-                              point_at_station(target, tb + (te - tb) * begin)))
+                cell = (point_at_station(source, sb + (se - sb) * begin),
+                        point_at_station(source, sb + (se - sb) * end),
+                        point_at_station(target, tb + (te - tb) * end),
+                        point_at_station(target, tb + (te - tb) * begin))
+                # Corresponding vertices can create two fractional cuts that
+                # differ only by floating-point roundoff. The collapsed strip
+                # adds no region and has no tangent; keep its real neighbours.
+                source_length = math.dist(cell[0], cell[1])
+                target_length = math.dist(cell[2], cell[3])
+                if min(source_length, target_length) < 1e-8:
+                    require(max(source_length, target_length) < 1e-8,
+                            "lane-change mapping collapses only one lane")
+                    continue
+                cells.append(cell)
     return tuple(cells)
 
 
-def inside_lane_change(point, cells):
+def lane_change_cells_at(point, cells):
     def cross(a, b, c):
         return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
 
@@ -461,10 +508,54 @@ def inside_lane_change(point, cells):
                 or point[1] > max(a[1], b[1], c[1], d[1]) + PATH_TOLERANCE_M):
             continue
         if triangle(a, b, c) or triangle(a, c, d):
-            return True
-        if any(planar_distance(start, end) > 1e-9
+            yield a, b, c, d
+        elif any(planar_distance(start, end) > 1e-9
                and distance_to_segment(point, start, end) < 0.03
                for start, end in ((a, b), (b, c), (c, d), (d, a))):
+            yield a, b, c, d
+
+
+def inside_lane_change(point, cells):
+    return next(lane_change_cells_at(point, cells), None) is not None
+
+
+def lane_change_velocity_bounded(entity, cells, longitudinal_limit):
+    """Bound each velocity component from the authored quintic transition.
+
+    The follower caps SOURCE station speed, not planar resultant speed. Its
+    position derivative is (1-blend) S' + blend T' + blend' (T-S).
+    max(blend') = 1.875 / span; active span is not on the wire, so use the
+    planner's enforced 8m minimum. Cells split at every source/target vertex,
+    preserving each local tangent/mapping ratio even on curved authored lanes.
+    """
+    max_blend_derivative = 1.875 / 8.0
+    velocity = (entity.linear_velocity_enu.x, entity.linear_velocity_enu.y)
+    for a, b, c, d in lane_change_cells_at(position(entity), cells):
+        source_length = math.dist(a, b)
+        horizontal_length = planar_distance(a, b)
+        require(source_length > 0 and horizontal_length > 0,
+                "lane-change cell has no source tangent")
+        forward = ((b[0] - a[0]) / horizontal_length,
+                   (b[1] - a[1]) / horizontal_length)
+        side = (-forward[1], forward[0])
+        source = tuple((b[i] - a[i]) / source_length for i in range(2))
+        target = tuple((c[i] - d[i]) / source_length for i in range(2))
+        gaps = (tuple(d[i] - a[i] for i in range(2)),
+                tuple(c[i] - b[i] for i in range(2)))
+        bounded = True
+        for axis in (forward, side):
+            def projection(vector):
+                return sum(component * direction for component, direction in zip(vector, axis))
+            tangent_values = (projection(source), projection(target))
+            gap_values = (0.0, *(projection(gap) for gap in gaps))
+            lower = min(0.0, min(tangent_values)
+                        + max_blend_derivative * min(gap_values)) * longitudinal_limit - 0.05
+            upper = max(0.0, max(tangent_values)
+                        + max_blend_derivative * max(gap_values)) * longitudinal_limit + 0.05
+            if not lower <= projection(velocity) <= upper:
+                bounded = False
+                break
+        if bounded:
             return True
     return False
 
@@ -488,9 +579,15 @@ def validate_npc_path(entity, spec):
             raise AssertionError(
                 f"NPC {entity.entity_id} left its configured route: {route_distance:.6f} m")
         changing_lane = False
-    # Only measured lateral motion inside an authored transition may add up to
-    # 10% to the longitudinal limit. Normal lanes retain the original bound.
-    speed_limit = spec.npc_max_speed_mps * (1.1 if changing_lane else 1.0) + 0.05
+    profile = npc_vehicle_profile(entity.entity_id)
+    longitudinal_limit = spec.npc_max_speed_mps * profile.speed_scale
+    if changing_lane:
+        require(entity.speed >= 0 and lane_change_velocity_bounded(
+                    entity, spec.lane_change_cells, longitudinal_limit),
+                f"NPC {entity.entity_id} exceeded lane-change velocity bounds: "
+                f"({entity.linear_velocity_enu.x:.6f}, {entity.linear_velocity_enu.y:.6f}) m/s")
+        return
+    speed_limit = longitudinal_limit + 0.05
     require(0 <= entity.speed <= speed_limit,
             f"NPC {entity.entity_id} exceeded configured speed: "
             f"{entity.speed:.6f} m/s > {speed_limit:.6f} m/s")
@@ -518,13 +615,8 @@ def runtime_entities(message, spec):
         if entity.entity_id in spec.npc_ids:
             require(entity.entity_kind == pb.ENTITY_KIND_NPC_VEHICLE,
                     f"entity {entity.entity_id} is not an NPC vehicle")
+            validate_npc_profile(entity)
             validate_npc_path(entity, spec)
-            actual = (entity.collision_half_length, entity.collision_half_width,
-                      entity.collision_half_height)
-            require(all(abs(value - expected) < 1e-5
-                        for value, expected in zip(actual, NPC_HALF_EXTENTS_M))
-                    and abs(entity.collision_radius) < 1e-8,
-                    f"NPC {entity.entity_id} collision shape changed")
         else:
             require(entity.entity_kind == pb.ENTITY_KIND_PEDESTRIAN,
                     f"entity {entity.entity_id} is not a pedestrian")
@@ -630,20 +722,6 @@ class SignalCityController(TrafficController):
         validate_signal_kinds(message, self.spec)
         runtime_entities(message, self.spec)
         return message
-
-
-async def connect_child(url, process):
-    deadline = time.monotonic() + 10
-    while True:
-        require(process.poll() is None,
-                "isolated host exited during startup; inspect its logs")
-        try:
-            return await websockets.connect(url, open_timeout=1, close_timeout=1,
-                                            max_queue=256)
-        except (OSError, TimeoutError):
-            if time.monotonic() >= deadline:
-                raise
-            await asyncio.sleep(0.1)
 
 
 async def observe_active_cycle(controller, baseline, assignments, spec):
@@ -856,26 +934,15 @@ def main():
     command = [str(args.host.resolve()), "--runtime-config", str(spec.runtime_config),
                "--ws-port", str(port), "--source-id", source]
     with (directory / (stem + ".stdout.log")).open("wb") as stdout, \
-            (directory / (stem + ".stderr.log")).open("wb") as stderr:
-        process = subprocess.Popen(
-            command, cwd=ROOT, stdout=stdout, stderr=stderr,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+            (directory / (stem + ".stderr.log")).open("wb") as stderr, \
+            child_host(command, cwd=ROOT, stdout=stdout, stderr=stderr) as process:
         print(f"Isolated Signal City server PID={process.pid}, port={port}; "
               f"logs={directory / stem}", flush=True)
-        try:
-            overall_timeout = spec.expected_traffic.observation_ns / SECOND_NS + 25
-            asyncio.run(asyncio.wait_for(
-                exercise(f"ws://127.0.0.1:{port}", process, source, spec),
-                overall_timeout))
-            print("PASS Signal City v2 WebSocket smoke (isolated child only)", flush=True)
-        finally:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
+        overall_timeout = spec.expected_traffic.observation_ns / SECOND_NS + 25
+        asyncio.run(asyncio.wait_for(
+            exercise(f"ws://127.0.0.1:{port}", process, source, spec),
+            overall_timeout))
+        print("PASS Signal City v2 WebSocket smoke (isolated child only)", flush=True)
 
 
 if __name__ == "__main__":

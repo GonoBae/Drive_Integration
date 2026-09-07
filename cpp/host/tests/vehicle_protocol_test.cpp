@@ -312,7 +312,16 @@ void test_structure_damage_is_additive_atomic_and_bounded()
     require(rejects({}, {signal}), "out-of-service signal must have its authoritative damaged pole");
     auto unsafe = signal; unsafe.id = 8; unsafe.group_id = 2;
     unsafe.out_of_service = false; unsafe.aspect = SignalAspect::Green;
-    require(rejects({pole}, {signal, unsafe}), "broken controller must not publish any green head");
+    require(!rejects({pole}, {signal, unsafe}), "one broken head must not disable other controller groups");
+    unsafe.group_id = signal.group_id;
+    require(!rejects({pole}, {unsafe, signal}) && !rejects({pole}, {signal, unsafe}),
+        "healthy heads in the same group retain their phase regardless of wire order");
+    auto conflicting = unsafe; conflicting.id = 9; conflicting.group_id = 2;
+    require(rejects({pole}, {signal, unsafe, conflicting}),
+        "damaged heads cannot weaken the guard against conflicting healthy green groups");
+    conflicting.group_id = unsafe.group_id; conflicting.aspect = SignalAspect::Red;
+    require(rejects({pole}, {signal, unsafe, conflicting}),
+        "functioning heads in one group must still agree after damage");
     unsafe.controller_id = 2;
     require(!rejects({pole}, {signal, unsafe}), "unrelated controllers continue their own phase plan");
     std::vector<StructureDamageSnapshot> maximum;

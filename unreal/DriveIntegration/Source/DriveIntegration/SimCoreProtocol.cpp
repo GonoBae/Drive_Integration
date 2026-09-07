@@ -783,6 +783,9 @@ namespace
 		TSet<uint32> ControllersPermittingVehicles;
 		for (const FTrafficSignalState& Signal : Signals)
 		{
+			// Disabled lenses are Red0 on the wire, not a controller-wide phase.
+			// Their matching damage record is checked below.
+			if (Signal.bOutOfService) continue;
 			const uint64 GroupKey = (static_cast<uint64>(Signal.ControllerId) << 32)
 				| static_cast<uint64>(Signal.GroupId);
 			if (const FTrafficSignalState* const* Existing = GroupStates.Find(GroupKey))
@@ -827,14 +830,9 @@ namespace
 		for (const FTrafficSignalState& Signal : Signals)
 		{
 			if (!Signal.bOutOfService) continue;
-			const bool bUnsafeController = Signals.ContainsByPredicate(
-				[&](const FTrafficSignalState& Other) {
-					return Other.ControllerId == Signal.ControllerId
-						&& (Other.Aspect != ETrafficSignalAspect::Red || Other.RemainingSeconds != 0.0f);
-				});
-			if (!PoleSignalIds.Contains(Signal.SignalId) || bUnsafeController)
+			if (!PoleSignalIds.Contains(Signal.SignalId))
 			{
-				OutError = TEXT("WorldState broken head requires damaged pole and all-red controller");
+				OutError = TEXT("WorldState broken head requires its authoritative damaged pole");
 				return false;
 			}
 		}
