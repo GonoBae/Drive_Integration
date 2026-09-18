@@ -676,16 +676,47 @@ void SimulationHost::run_tick()
     const auto recorded_proxies = config_.physics_replay
         ? collision_snapshot : std::vector<simcore_host::KinematicCollisionProxy>{};
     const auto state = physics_.update(dt_seconds, std::move(collision_snapshot));
+    if (applied_input_.throttle > 0.2f && applied_input_.brake < 0.1f
+        && !applied_input_.handbrake && applied_input_.gear != VehicleGear::Neutral
+        && std::abs(state.speed) < 0.15f) {
+        drive_stall_seconds_ += dt_seconds;
+        if (drive_stall_seconds_ >= drive_stall_next_log_s_) {
+            drive_stall_next_log_s_ = drive_stall_seconds_ + 5.0;
+            std::cout << "[DriveBlock] duration_s=" << drive_stall_seconds_
+                << " east=" << state.east << " north=" << state.north
+                << " up=" << state.position_enu.z << " heading=" << state.heading
+                << " gear=" << static_cast<int>(applied_input_.gear)
+                << " steering=" << applied_input_.steering
+                << " ground_coverage_limited=" << physics_.ground_coverage_limited();
+            for (const auto& wheel : state.wheels) {
+                std::cout << " wheel" << wheel.wheel_index << "=" << wheel.in_contact
+                    << "/" << wheel.normal_load << "/" << wheel.longitudinal_force;
+            }
+            const auto& contacts = physics_.get_last_collision_contacts();
+            std::cout << " contacts=" << contacts.size();
+            for (std::size_t index=0; index<std::min<std::size_t>(contacts.size(),4); ++index)
+                std::cout << " collider=" << contacts[index].collider_id;
+            std::cout << std::endl;
+        }
+    } else {
+        drive_stall_seconds_ = 0.0;
+        drive_stall_next_log_s_ = 1.0;
+    }
     if (config_.physics_replay) {
         config_.physics_replay->tick(applied_input_, recorded_proxies, state);
     }
     advance_runtime_entities(dt_seconds);
     if (structures_enabled) {
+        const auto parameters = simcore_host::make_player_vehicle_parameters(
+            config_.vehicle_parameters, active_vehicle_class_);
+        const double heading_rad = state.heading * std::numbers::pi / 180.0;
+        const double body_offset_m = parameters.collision_body_center_forward_offset_m;
         const simcore_host::ObbPrism impact_body{
-            {state.position_enu.x, state.position_enu.y},
-            state.position_enu.z - config_.vehicle_parameters.cg_height_m
-                + 0.10 + state.collision_half_height_m,
-            state.heading * std::numbers::pi / 180.0,
+            {state.position_enu.x + std::sin(heading_rad) * body_offset_m,
+             state.position_enu.y + std::cos(heading_rad) * body_offset_m},
+            state.position_enu.z - parameters.cg_height_m
+                + parameters.collision_body_ground_clearance_m + state.collision_half_height_m,
+            heading_rad,
             state.collision_half_length_m, state.collision_half_width_m, state.collision_half_height_m};
         structure_damage_.record_contacts(physics_.get_last_collision_contacts(), state.position_enu.z, &impact_body);
         for (const auto& pair : physics_.get_last_runtime_proxy_contacts()) {

@@ -275,6 +275,30 @@ ObbBasis make_basis(double heading_rad)
     return {{sine, cosine}, {cosine, -sine}};
 }
 
+CollisionVector2 body_center_of_mass(const PlanarRigidBody& body)
+{
+    return add(body.shape.center_enu,
+        multiply(make_basis(body.shape.heading_rad).forward,
+            body.center_of_mass_forward_offset_m));
+}
+
+void advance_body(PlanarRigidBody& body, double dt_seconds)
+{
+    const auto old_forward = make_basis(body.shape.heading_rad).forward;
+    body.shape.center_enu = add(body.shape.center_enu,
+        multiply(body.linear_velocity_enu_mps, dt_seconds));
+    body.shape.heading_rad = normalize_heading(
+        body.shape.heading_rad + body.heading_rate_rad_s * dt_seconds);
+    // Move the COM by its linear velocity, then rotate the OBB around it.
+    // Applying the offset delta avoids subtracting two large COM positions.
+    if (body.center_of_mass_forward_offset_m != 0.0) {
+        const auto new_forward = make_basis(body.shape.heading_rad).forward;
+        body.shape.center_enu = add(body.shape.center_enu,
+            multiply(subtract(old_forward, new_forward),
+                body.center_of_mass_forward_offset_m));
+    }
+}
+
 HorizontalAabb horizontal_aabb(const ObbPrism& shape)
 {
     const ObbBasis basis = make_basis(shape.heading_rad);
@@ -486,7 +510,7 @@ double resolve_contact(
             manifold.penetration_m + kSeparationSlopM));
 
     const CollisionVector2 contact_offset = subtract(
-        manifold.contact_point_enu, body.shape.center_enu);
+        manifold.contact_point_enu, body_center_of_mass(body));
     const CollisionVector2 velocity_at_contact = subtract(
         contact_velocity(body, contact_offset), obstacle_contact_velocity);
     const double normal_velocity = dot(
@@ -547,7 +571,7 @@ double resolve_finite_proxy_contact(
 {
     double anchor_impulse = 0.0;
     if (proxy.breakaway_impulse_n_s > 0.0 && !proxy.breakaway_released) {
-        const auto offset = subtract(manifold.contact_point_enu, body.shape.center_enu);
+        const auto offset = subtract(manifold.contact_point_enu, body_center_of_mass(body));
         const double closing = dot(contact_velocity(body, offset), manifold.normal_enu);
         const double arm = cross(offset, manifold.normal_enu);
         const double denominator = 1.0 / body.mass_kg + arm * arm / body.yaw_inertia_kg_m2;
@@ -580,7 +604,7 @@ double resolve_finite_proxy_contact(
                  -separation * proxy_inverse_mass / inverse_mass_sum));
 
     const CollisionVector2 body_contact_offset = subtract(
-        manifold.contact_point_enu, body.shape.center_enu);
+        manifold.contact_point_enu, body_center_of_mass(body));
     const CollisionVector2 proxy_contact_offset = subtract(
         manifold.contact_point_enu, proxy_center(proxy));
     const CollisionVector2 relative_contact_velocity = subtract(
@@ -770,7 +794,9 @@ double proxy_required_substeps(
         body.linear_velocity_enu_mps, proxy.linear_velocity_enu_mps);
     const double relative_translation = std::hypot(
         relative_velocity.east_m * dt_seconds,
-        relative_velocity.north_m * dt_seconds);
+        relative_velocity.north_m * dt_seconds)
+        + std::abs(body.center_of_mass_forward_offset_m)
+            * std::abs(body.heading_rate_rad_s * dt_seconds);
     double required = std::ceil(
         relative_translation / kMaximumTranslationPerSubstepM);
     if (std::holds_alternative<ObbPrism>(proxy.shape)) {
@@ -1061,6 +1087,8 @@ CollisionStepResult CollisionWorld::integrate_with_tire_supported_curbs(
         || !std::isfinite(body.mass_kg) || body.mass_kg <= 0.0
         || !std::isfinite(body.yaw_inertia_kg_m2)
         || body.yaw_inertia_kg_m2 <= 0.0
+        || !std::isfinite(body.center_of_mass_forward_offset_m)
+        || !finite_vector(body_center_of_mass(body))
         || !std::isfinite(dt_seconds) || dt_seconds <= 0.0
         || dt_seconds > 0.1) {
         throw std::invalid_argument("Planar collision step input is invalid");
@@ -1095,11 +1123,12 @@ CollisionStepResult CollisionWorld::integrate_with_tire_supported_curbs(
         if (proxy == dynamic_proxies.end() || proxy->proxy_id != id || !proxy->tire_support_candidate)
             throw std::invalid_argument("Tire support requires an eligible dynamic proxy ID: " + id);
     }
-    const double requested_translation = std::hypot(
-        body.linear_velocity_enu_mps.east_m * dt_seconds,
-        body.linear_velocity_enu_mps.north_m * dt_seconds);
     const double requested_rotation = std::abs(
         body.heading_rate_rad_s * dt_seconds);
+    const double requested_translation = std::hypot(
+        body.linear_velocity_enu_mps.east_m * dt_seconds,
+        body.linear_velocity_enu_mps.north_m * dt_seconds)
+        + std::abs(body.center_of_mass_forward_offset_m) * requested_rotation;
     double required_substeps = std::max({
         1.0,
         std::ceil(requested_translation / kMaximumTranslationPerSubstepM),
@@ -1139,11 +1168,7 @@ CollisionStepResult CollisionWorld::integrate_with_tire_supported_curbs(
     }
 
     if (static_colliders_.empty() && dynamic_proxies.empty()) {
-        body.shape.center_enu = add(
-            body.shape.center_enu,
-            multiply(body.linear_velocity_enu_mps, integrated_dt));
-        body.shape.heading_rad = normalize_heading(
-            body.shape.heading_rad + body.heading_rate_rad_s * integrated_dt);
+        advance_body(body, integrated_dt);
         result.body = std::move(body);
         return result;
     }
@@ -1151,11 +1176,7 @@ CollisionStepResult CollisionWorld::integrate_with_tire_supported_curbs(
     const double substep_dt = integrated_dt
         / static_cast<double>(result.substep_count);
     for (std::size_t substep = 0; substep < result.substep_count; ++substep) {
-        body.shape.center_enu = add(
-            body.shape.center_enu,
-            multiply(body.linear_velocity_enu_mps, substep_dt));
-        body.shape.heading_rad = normalize_heading(
-            body.shape.heading_rad + body.heading_rate_rad_s * substep_dt);
+        advance_body(body, substep_dt);
         for (auto& proxy : dynamic_proxies) {
             advance_proxy(proxy, substep_dt);
         }

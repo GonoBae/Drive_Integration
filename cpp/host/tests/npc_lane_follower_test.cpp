@@ -4,6 +4,7 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <numbers>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -219,6 +220,102 @@ void test_polyline_and_sloped_three_dimensional_arc_length()
                      "nonzero reset offset must use the same 3D route metric");
     require(near(slope_follower.state().distance_travelled_m, 0),
             "reset offset must not count as distance travelled since reset");
+}
+
+void test_curve_heading_is_continuous_across_vertices_lane_joins_and_loop()
+{
+    const FlatGroundQuery ground;
+    constexpr double radius_m = 15.0;
+    constexpr int segments = 72;
+    constexpr double angle_step_deg = 360.0 / segments;
+    std::vector<GroundPointEnu> points;
+    for (int index = 0; index <= segments; ++index) {
+        const double angle = (-10.0 + angle_step_deg * index) * std::numbers::pi / 180.0;
+        points.push_back({radius_m * std::cos(angle), radius_m * std::sin(angle), 0.0});
+    }
+    points.back() = points.front();
+    TrafficNetwork single_lane;
+    single_lane.lanes = {lane(10, points, {10}, 6.0, 0, false)};
+    TrafficNetwork split_lanes;
+    for (std::size_t index = 0; index < 3; ++index) {
+        const auto begin = points.begin() + static_cast<std::ptrdiff_t>(index * 24);
+        split_lanes.lanes.push_back(lane(static_cast<std::uint32_t>(10 + index),
+            std::vector<GroundPointEnu>(begin, begin + 25),
+            {static_cast<std::uint32_t>(10 + (index + 1) % 3)}, 6.0, 0, false));
+    }
+    NpcLaneFollower whole, split;
+    whole.rebuild(single_lane, ground, {10}, true);
+    split.rebuild(split_lanes, ground, {10, 11, 12}, true);
+    const double segment_length = whole.route_length_m() / segments;
+    constexpr double sample_step_m = 0.05;
+    const double expected_heading_step = -angle_step_deg * sample_step_m / segment_length;
+    auto previous = whole.sample_ahead(0.0);
+    require(previous.has_value(), "the curve must have a supported initial anchor");
+    int wrapped_headings = 0;
+    // Include a complete lap and both sides of the closing seam. Equal-radius
+    // vertices must keep turning between samples, not turn then pause on every
+    // metre-long segment, and splitting a road into lanes must not change it.
+    for (double progress = sample_step_m;
+         progress < whole.route_length_m() + 2.0; progress += sample_step_m) {
+        const auto current = whole.sample_ahead(progress);
+        const auto divided = split.sample_ahead(progress);
+        require(current && divided, "all curve and seam samples must remain supported");
+        const double heading_step = std::remainder(current->heading_deg - previous->heading_deg, 360.0);
+        require(near(heading_step, expected_heading_step, 1e-7),
+            "constant-radius travel must keep a continuous nonzero heading change through every vertex");
+        require(near(std::remainder(divided->heading_deg - current->heading_deg, 360.0), 0.0)
+                && near(divided->position_enu.east_m, current->position_enu.east_m)
+                && near(divided->position_enu.north_m, current->position_enu.north_m),
+            "lane boundaries and loop closure must share the same heading and authored position");
+        wrapped_headings += std::abs(current->heading_deg - previous->heading_deg) > 180.0;
+        const double local = std::fmod(progress, whole.route_length_m());
+        const auto segment = std::min(static_cast<std::size_t>(local / segment_length),
+                                      points.size() - 2);
+        const double fraction = (local - segment * segment_length) / segment_length;
+        require_position(*current,
+            points[segment].east_m + (points[segment + 1].east_m - points[segment].east_m) * fraction,
+            points[segment].north_m + (points[segment + 1].north_m - points[segment].north_m) * fraction,
+            0.0, "heading smoothing must preserve the original polyline centre and arc metric");
+        previous = current;
+    }
+    require(wrapped_headings >= 1, "the curve must exercise the 359-to-zero degree wrap");
+    require(near(whole.state().distance_travelled_m, 0.0)
+            && near(split.state().distance_travelled_m, 0.0),
+        "orientation lookahead must not move either follower");
+}
+
+void test_heading_blend_is_bounded_near_long_straights_and_open_ends()
+{
+    const FlatGroundQuery ground;
+    TrafficNetwork network;
+    network.lanes = {lane(10, {{0, 0, 0}, {10, 0, 0}, {10, 20, 0}})};
+    NpcLaneFollower follower;
+    follower.rebuild(network, ground, {10});
+    for (const double station : {0.0, 5.0, 8.0}) {
+        const auto sample = follower.sample_ahead(station);
+        require(sample && near(sample->heading_deg, 90.0),
+            "the open start and distant straight must retain their authored direction");
+    }
+    for (const double station : {12.0, 20.0, 30.0}) {
+        const auto sample = follower.sample_ahead(station);
+        require(sample && near(sample->heading_deg, 0.0),
+            "a vertex must not leave a heading correction over the following long straight or open end");
+    }
+    const auto before = follower.sample_ahead(10.0 - 1e-5);
+    const auto at = follower.sample_ahead(10.0);
+    const auto after = follower.sample_ahead(10.0 + 1e-5);
+    require(before && at && after && near(at->heading_deg, 45.0)
+            && std::abs(std::remainder(after->heading_deg - before->heading_deg, 360.0)) < 0.001,
+        "the two sides of a sharp authored vertex must meet at the same bounded heading");
+    follower.reset(9.5);
+    const auto stopped = follower.state();
+    for (int index = 0; index < 10; ++index) {
+        const auto frozen = follower.step(step_seconds, {}, false);
+        require(near(frozen.heading_deg, stopped.heading_deg)
+                && near(frozen.position_enu.east_m, stopped.position_enu.east_m)
+                && near(frozen.distance_travelled_m, 0.0),
+            "a disabled follower must not advance its orientation blend while stopped");
+    }
 }
 
 void test_lower_successor_limit_is_anticipated_without_hard_clamp()
@@ -826,6 +923,94 @@ void test_bounded_host_escape_retreat_stays_on_current_lane()
         "a moving route follower must brake before host-authorized reverse begins");
 }
 
+void test_protected_left_requires_its_own_green_after_lane_change()
+{
+    const FlatGroundQuery ground;
+    auto network = signal_network();
+    network.lanes.push_back(lane(40, {{0,3.2,0},{30,3.2,0}}, {50},6.0,7,false));
+    network.lanes.push_back(lane(50, {{30,3.2,0},{60,3.2,0}}));
+    network.lanes[0].lane_changes.push_back({40,5,25,5,25});
+    for (auto& head : network.signals) head.left_group_id = 7;
+    auto snapshots = signal_snapshots(SignalAspect::Green);
+    for (auto& head : snapshots) {
+        head.left_group_id = 7;
+        head.left_aspect = SignalAspect::Red;
+        head.left_remaining_seconds = 100;
+    }
+    NpcLaneFollower follower;
+    follower.rebuild(network,ground,{10,20,30},false,20.0);
+    require(follower.complete_lane_change(network,{40,50},20.0),
+        "an authored pre-stopline corridor may enter the same approach's protected lane");
+    for (int tick=0;tick<600;++tick) follower.step(step_seconds,snapshots);
+    require(follower.state().lane_id == 40 && follower.state().stop_reason == NpcLaneStopReason::Signal,
+        "through green must not authorize a protected left after changing lanes");
+    for (auto& head : snapshots) {
+        head.aspect = SignalAspect::Red;
+        head.left_aspect = SignalAspect::Green;
+    }
+    for (int tick=0;tick<180;++tick) follower.step(step_seconds,snapshots);
+    require(follower.state().lane_id == 50,
+        "protected left green must release its lane independently of through red");
+}
+
+void test_nose_only_stopline_entry_can_back_out_but_not_reverse_through_junction()
+{
+    const FlatGroundQuery ground;
+    NpcLaneFollower follower;
+    follower.rebuild(signal_network(),ground,{10,20,30},false,26.0);
+    const auto green = signal_snapshots(SignalAspect::Green);
+    for (int tick=0; tick<300 && !follower.state().stopline_committed; ++tick)
+        follower.step(step_seconds,green);
+    require(follower.state().stopline_committed && follower.state().lane_id == 10,
+        "the test must reproduce front-bumper entry while the centre is still on the approach");
+    follower.step(0.0,green,false);
+    require(follower.can_retreat_from_current_lane() && follower.retreat_for_obstacle(1.0)
+            && !follower.state().stopline_committed,
+        "a swept stopped retreat may withdraw a nose-only entry behind its own stopline");
+    const auto red = signal_snapshots(SignalAspect::Red);
+    for (int tick=0;tick<180;++tick) follower.step(step_seconds,red);
+    require(follower.state().lane_id == 10 && !follower.state().stopline_committed
+            && follower.state().stop_reason == NpcLaneStopReason::Signal,
+        "backing out must revoke the old commitment and respect the current red");
+    for (int tick=0;tick<300 && follower.state().lane_id == 10;++tick)
+        follower.step(step_seconds,green);
+    follower.step(0.0,green,false);
+    require(follower.state().lane_id == 20 && !follower.can_retreat_from_current_lane()
+            && !follower.retreat_for_obstacle(0.1),
+        "a committed junction connector must not reverse across crossing traffic");
+}
+void test_turn_signals_describe_junction_intention_not_road_curvature()
+{
+    const FlatGroundQuery ground;
+    for (const double side : {-1.0,1.0}) {
+        auto network=signal_network();
+        network.lanes[1].points={{30,0,0},{32,0,0},{34,2*side,0},{34,10*side,0}};
+        network.lanes[2].points={{34,10*side,0},{34,30*side,0},{50,35*side,0}};
+        NpcLaneFollower follower;
+        follower.rebuild(network,ground,{10,20,30},false,10.0);
+        require(follower.turn_signal_intent(12.0)==0,
+            "a distant junction must not turn on an early indicator for the intervening road");
+        follower.reset(24.0);
+        const std::uint32_t intended=side>0.0 ? 1 : 2;
+        require(follower.turn_signal_intent(12.0)==intended,
+            "the selected left/right junction connector defines the actual turn intention");
+        follower.reset(31.0);
+        require(follower.turn_signal_intent(12.0)==intended,
+            "the selected indicator must remain on through its junction connector");
+        follower.reset(47.0);
+        require(follower.turn_signal_intent(12.0)==0,
+            "after the junction, ordinary successor curvature must not keep the indicator on");
+        network.lanes[0].signal_group_id=0;
+        network.signals.clear();
+        follower.rebuild(network,ground,{10,20,30},false,24.0);
+        require(follower.turn_signal_intent(12.0)==0,
+            "a road bend alone is not an intersection or a lane-change intention");
+    }
+    NpcLaneFollower straight;
+    straight.rebuild(signal_network(),ground,{10,20,30},false,24.0);
+    require(straight.turn_signal_intent(12.0)==0,
+        "a straight intersection movement must keep both turn indicators off");
+}
 } // namespace
 
 int main()
@@ -833,6 +1018,8 @@ int main()
     try {
         test_straight_acceleration_speed_and_ground_anchor();
         test_polyline_and_sloped_three_dimensional_arc_length();
+        test_curve_heading_is_continuous_across_vertices_lane_joins_and_loop();
+        test_heading_blend_is_bounded_near_long_straights_and_open_ends();
         test_lower_successor_limit_is_anticipated_without_hard_clamp();
         test_signals_fail_closed_for_aspects_missing_conflicting_and_expired_heads();
         test_broken_head_uses_functioning_redundant_head_only();
@@ -846,7 +1033,10 @@ int main()
         test_reroute_preserves_green_commitment_in_approach_and_connector();
         test_lane_change_completion_requires_authored_window_and_preserves_motion();
         test_bounded_host_escape_retreat_stays_on_current_lane();
+        test_nose_only_stopline_entry_can_back_out_but_not_reverse_through_junction();
+        test_protected_left_requires_its_own_green_after_lane_change();
         test_loop_lap_distance_and_exact_deterministic_reset();
+        test_turn_signals_describe_junction_intention_not_road_curvature();
         std::cout << "npc_lane_follower_test: all checks passed\n";
         return 0;
     } catch (const std::exception& error) {

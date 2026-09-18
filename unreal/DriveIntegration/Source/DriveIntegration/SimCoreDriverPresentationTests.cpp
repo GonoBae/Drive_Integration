@@ -229,7 +229,23 @@ bool FSimCoreDriverActorTest::RunTest(const FString& Parameters)
 	State.RuntimeRecoveryPhase = SimCoreProtocol::ERuntimeRecoveryPhase::Holding;
 	Ok &= TestTrue(TEXT("damaged snapshot applies"),
 		Actor->ApplySnapshot(State, 0.0f, 0.0f, true, 0.05f, FVector::ZeroVector));
+	Driver->AdvancePresentation(0.05f);
+	const float FrozenInjuryAlpha = Driver->GetCurrentInjuryAlpha();
+	const FTransform FrozenInjuryHead = Mesh->GetBoneTransformByName(
+		TEXT("head"), EBoneSpaces::ComponentSpace);
+	Driver->FreezePresentation();
+	Driver->FreezePresentation();
+	Driver->AdvancePresentation(0.4f);
+	Ok &= TestTrue(TEXT("stale injury freeze preserves the visible blend and bone pose"),
+		Driver->IsPresentationFrozen() && Mesh->IsVisible()
+		&& FrozenInjuryAlpha > 0.0f && FrozenInjuryAlpha < Driver->GetTargetInjuryAlpha()
+		&& Driver->GetCurrentInjuryAlpha() == FrozenInjuryAlpha
+		&& Mesh->GetBoneTransformByName(TEXT("head"), EBoneSpaces::ComponentSpace)
+			.Equals(FrozenInjuryHead, 0.001f));
+	Driver->ApplyAuthoritativeState(State);
 	Driver->AdvancePresentation(1.0f);
+	Ok &= TestTrue(TEXT("fresh state resumes the existing injury blend"),
+		!Driver->IsPresentationFrozen() && Driver->GetCurrentInjuryAlpha() > FrozenInjuryAlpha);
 	const FVector InjuredHead = Mesh->GetBoneTransformByName(
 		TEXT("head"), EBoneSpaces::ComponentSpace).GetLocation();
 	Ok &= TestTrue(TEXT("impact blends driver head forward toward the wheel"),
@@ -252,6 +268,18 @@ bool FSimCoreDriverActorTest::RunTest(const FString& Parameters)
 		&& Driver->GetCurrentDriverExitAlpha() == 0.0f
 		&& Driver->GetDriverDoorPivot() != nullptr
 		&& Driver->GetDriverDoorPivot()->GetRelativeRotation().Yaw > 1.0f);
+	const float FrozenProtestAlpha = Driver->GetCurrentProtestAlpha();
+	const FTransform FrozenDoor = Driver->GetDriverDoorPivot()->GetRelativeTransform();
+	const FTransform FrozenHand = Mesh->GetBoneTransformByName(
+		TEXT("hand_l"), EBoneSpaces::ComponentSpace);
+	Driver->FreezePresentation();
+	Driver->AdvancePresentation(0.4f);
+	Ok &= TestTrue(TEXT("stale exit freeze keeps the staged door and hand exactly in place"),
+		Driver->IsPresentationFrozen() && Driver->GetCurrentProtestAlpha() == FrozenProtestAlpha
+		&& Driver->GetDriverDoorPivot()->GetRelativeTransform().Equals(FrozenDoor, 0.001f)
+		&& Mesh->GetBoneTransformByName(TEXT("hand_l"), EBoneSpaces::ComponentSpace)
+			.Equals(FrozenHand, 0.001f));
+	Driver->ApplyAuthoritativeState(State);
 	Driver->AdvancePresentation(0.65f);
 	Ok &= TestTrue(TEXT("open door remains staged while the driver crosses the sill"),
 		Driver->GetCurrentDoorOpenAlpha() > 0.99f
@@ -446,12 +474,34 @@ bool FSimCoreMotorcycleRiderEjectionTest::RunTest(const FString& Parameters)
 	Driver->ApplyAuthoritativeState(State);
 	Ok &= TestTrue(TEXT("paused simulation clock freezes the detached rider"),
 		Driver->GetDriverMesh()->GetBoneLocation(TEXT("pelvis")).Equals(AirbornePelvis, 0.01));
+	const FTransform FrozenRiderTransform = Driver->GetDriverMesh()->GetComponentTransform();
+	const FVector FrozenRiderVelocity = Driver->GetRiderVelocityCmPerSecond();
+	Driver->FreezePresentation();
+	Driver->FreezePresentation();
+	Driver->AdvancePresentation(0.2f);
+	Ok &= TestTrue(TEXT("stale freeze preserves the detached rider's world pose and trajectory state"),
+		Driver->IsPresentationFrozen() && Driver->IsRiderEjected()
+		&& Driver->GetDriverMesh()->GetComponentTransform().Equals(FrozenRiderTransform, 0.001f)
+		&& Driver->GetRiderVelocityCmPerSecond().Equals(FrozenRiderVelocity, 0.001f));
+	State.SimulationTimeNs += 200000000;
+	Driver->ApplyAuthoritativeState(State);
+	Ok &= TestTrue(TEXT("first fresh rider state rebases a 200ms gap without catch-up or relaunch"),
+		!Driver->IsPresentationFrozen() && Driver->IsRiderEjected()
+		&& Driver->GetDriverMesh()->GetComponentTransform().Equals(FrozenRiderTransform, 0.001f)
+		&& Driver->GetRiderVelocityCmPerSecond().Equals(FrozenRiderVelocity, 0.001f));
+	State.SimulationTimeNs += 50000000;
+	Driver->ApplyAuthoritativeState(State);
+	const FVector ResumedPelvis = Driver->GetDriverMesh()->GetBoneLocation(TEXT("pelvis"));
+	Ok &= TestTrue(TEXT("the next fresh rider interval resumes only its 50ms trajectory step"),
+		ResumedPelvis.X > AirbornePelvis.X + 40.0
+		&& FMath::IsNearlyEqual(Driver->GetRiderVelocityCmPerSecond().Z,
+			FrozenRiderVelocity.Z - 49.05, 0.5));
 	State.ServerHealth.bPresent = true;
 	State.ServerHealth.Status = EServerHealthStatus::SafeStop;
 	State.SimulationTimeNs += 2000000000;
 	Driver->ApplyAuthoritativeState(State);
 	Ok &= TestTrue(TEXT("SafeStop freezes the rider even while the host clock advances"),
-		Driver->GetDriverMesh()->GetBoneLocation(TEXT("pelvis")).Equals(AirbornePelvis, 0.01));
+		Driver->GetDriverMesh()->GetBoneLocation(TEXT("pelvis")).Equals(ResumedPelvis, 0.01));
 	State.ServerHealth.Status = EServerHealthStatus::Active;
 	for (int32 Step = 0; Step < 100; ++Step)
 	{
@@ -466,12 +516,13 @@ bool FSimCoreMotorcycleRiderEjectionTest::RunTest(const FString& Parameters)
 		LowestBone = FMath::Min(LowestBone, Driver->GetDriverMesh()->GetBoneLocation(Bone).Z);
 	Ok &= TestTrue(TEXT("settled limbs remain on the ground, not buried or floating"),
 		LowestBone >= 9.0 && LowestBone <= 25.0);
+	Driver->FreezePresentation();
 	State.PlaySessionId = TEXT("rider-new-play");
 	State.SimulationTimeNs = 0;
 	State.CollisionEventSequence = 0;
 	Driver->ApplyAuthoritativeState(State);
 	Ok &= TestTrue(TEXT("new Play restores a seated rider on the motorcycle"),
-		!Driver->IsRiderEjected() && !Driver->IsRiderGrounded()
+		!Driver->IsPresentationFrozen() && !Driver->IsRiderEjected() && !Driver->IsRiderGrounded()
 		&& !Driver->GetDriverMesh()->IsUsingAbsoluteLocation()
 		&& Driver->GetDriverMesh()->bOwnerNoSee);
 	State.CollisionEventSequence = 1;

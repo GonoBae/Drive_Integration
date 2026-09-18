@@ -67,6 +67,9 @@ public:
 	USimCoreDriverPresentation();
 
 	void ApplyAuthoritativeState(const SimCoreProtocol::FVehicleState& State);
+	/** Pause local blends/flight during a bounded runtime receive gap. */
+	void FreezePresentation() { bPresentationFrozen = true; }
+	bool IsPresentationFrozen() const { return bPresentationFrozen; }
 	/** Mirrors the body's existing bounded dent weights onto the separated door MIDs. */
 	void ApplyDoorDamage(const SimCoreDamagePresentation::FZoneWeights& Weights);
 	void SetPresentationEnabled(bool bEnabled);
@@ -166,6 +169,7 @@ private:
 	float CurrentGestureAlpha = 0.0f;
 	float ProtestAnimationTime = 0.0f;
 	bool bPresentationEnabled = true;
+	bool bPresentationFrozen = false;
 	bool bDriverViewActive = false;
 	bool bRiderStateInitialized = false;
 	bool bRiderEjected = false;

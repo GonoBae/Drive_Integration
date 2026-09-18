@@ -15,6 +15,7 @@
 #include "SimCoreDamagePresentation.h"
 #include "SimCoreDeformableBody.h"
 #include "SimCoreDriverPresentation.h"
+#include "SimCoreSuspensionPresentation.h"
 #include "SimCoreTurnSignals.h"
 #include "SimCoreDriveReplay.h"
 #include "SimCoreExhaustComponent.h"
@@ -25,6 +26,7 @@
 #include "SimCoreVehicleControlResolver.h"
 #include "SimCoreVehicleAudio.h"
 #include "SimCoreVehicleHorn.h"
+#include "SimCoreVehicleVisualApplication.h"
 #include "SimCoreVehicleVisualProfile.h"
 #include "UObject/ConstructorHelpers.h"
 
@@ -44,6 +46,8 @@ AExternalVehiclePawn::AExternalVehiclePawn()
 	TurnSignals->BindBodies(VehicleMesh, DeformableBody);
 	DriverPresentation = CreateDefaultSubobject<USimCoreDriverPresentation>(TEXT("DriverPresentation"));
 	DriverPresentation->SetupAttachment(PresentationRoot);
+	SuspensionPresentation = CreateDefaultSubobject<USimCoreSuspensionPresentation>(TEXT("SuspensionPresentation"));
+	SuspensionPresentation->SetupAttachment(PresentationRoot);
 	static ConstructorHelpers::FObjectFinder<UStaticMesh> Cube(TEXT("/Engine/BasicShapes/Cube.Cube"));
 	// The editor generator authors centimeter-space meshes at the same CG and
 	// wheel origins as SimCore. Never rescale the root or alter the physics rig.
@@ -94,6 +98,7 @@ AExternalVehiclePawn::AExternalVehiclePawn()
 		WheelPivot->SetupAttachment(PresentationRoot);
 		WheelPivot->SetRelativeLocation(WheelOrigins[Index]);
 		WheelPivots.Add(WheelPivot);
+		SuspensionPresentation->SetWheelHub(Index, WheelPivot);
 
 		UStaticMeshComponent* Wheel = CreateDefaultSubobject<UStaticMeshComponent>(
 			*FString::Printf(TEXT("Wheel%d"), Index));
@@ -143,6 +148,7 @@ AExternalVehiclePawn::AExternalVehiclePawn()
 	// The authored sedan's tailpipe is behind the rear axle on the right.
 	ExhaustEffect->SetRelativeLocation(FVector(-221.0, 55.0, -25.0));
 	DriveReplay = CreateDefaultSubobject<USimCoreDriveReplayComponent>(TEXT("DriveReplay"));
+	DriveReplay->AddTickPrerequisiteActor(this);
 	SensorRig = CreateDefaultSubobject<USimCoreSensorRigComponent>(TEXT("SensorRig"));
 	SensorRig->SetupAttachment(PresentationRoot);
 }
@@ -150,6 +156,10 @@ AExternalVehiclePawn::AExternalVehiclePawn()
 void AExternalVehiclePawn::BeginPlay()
 {
 	Super::BeginPlay();
+	DriveReplay->PresentationOffsetCm = VisualPositionOffsetCm;
+	ManualIndicator = SimCoreProtocol::ETurnIndicator::Off;
+	bHazardLights = false;
+	IndicatorAutoCancel.Reset();
 	InitializeDamagePresentation();
 	VehicleAudio->Silence();
 	VehicleAudio->Start();
@@ -169,14 +179,18 @@ void AExternalVehiclePawn::EndPlay(const EEndPlayReason::Type EndPlayReason)
 void AExternalVehiclePawn::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+	DriveReplay->PresentationOffsetCm = VisualPositionOffsetCm;
 	UpdateSteeringInput(DeltaSeconds);
-	TurnSignals->UpdateSignal(ManualIndicator, GetWorld()->GetTimeSeconds(), bHazardLights);
 
 	SimCoreProtocol::FVehicleState State;
 	float StateAgeSeconds = 0.0f;
 	if (!SimCoreClient->GetLatestState(State, StateAgeSeconds))
 	{
+		IndicatorAutoCancel.Reset();
+		TurnSignals->UpdateSignal(ManualIndicator, GetWorld()->GetTimeSeconds(), bHazardLights);
 		VehicleAudio->Silence();
+		VehicleAudio->UpdateIndicator(ManualIndicator, TurnSignals->GetPhaseTimeSeconds(), bHazardLights);
+		VehicleHorn->HandleHornRelease();
 		ExhaustEffect->ApplyUnavailableState(DeltaSeconds);
 		// Camera input remains useful while disconnected or awaiting reset; it
 		// must not depend on, or send, an authoritative vehicle control command.
@@ -184,7 +198,18 @@ void AExternalVehiclePawn::Tick(float DeltaSeconds)
 		return;
 	}
 	ConfigureVehicleClass(State.RuntimeVehicleClass);
+	if (IndicatorAutoCancel.Update(ManualIndicator, bHazardLights, State,
+		FMath::IsFinite(StateAgeSeconds) && StateAgeSeconds >= 0.0f && StateAgeSeconds <= StateStaleTimeoutSeconds))
+	{
+		ManualIndicator = SimCoreProtocol::ETurnIndicator::Off;
+	}
+	TurnSignals->UpdateSignal(ManualIndicator, GetWorld()->GetTimeSeconds(), bHazardLights);
+	if (!FMath::IsFinite(StateAgeSeconds) || StateAgeSeconds > StateStaleTimeoutSeconds)
+	{
+		VehicleHorn->HandleHornRelease();
+	}
 	VehicleAudio->SetAuthoritativeState(State, StateAgeSeconds, StateStaleTimeoutSeconds);
+	VehicleAudio->UpdateIndicator(ManualIndicator, TurnSignals->GetPhaseTimeSeconds(), bHazardLights);
 	ExhaustEffect->ApplyAuthoritativeState(
 		State, StateAgeSeconds, StateStaleTimeoutSeconds, DeltaSeconds);
 	DriveReplay->CaptureAuthoritativeState(State);
@@ -249,6 +274,7 @@ void AExternalVehiclePawn::Tick(float DeltaSeconds)
 		WheelMeshes[WheelState.WheelIndex]->SetRelativeRotation(
 			SimCorePresentation::BuildWheelSpinRelativeRotation(AxleSpinDegrees));
 	}
+	SuspensionPresentation->UpdateLinks();
 	DrawVehicleDebug(State);
 	UpdateOrbitCamera(DeltaSeconds);
 }
@@ -278,6 +304,8 @@ void AExternalVehiclePawn::SetupPlayerInputComponent(UInputComponent* Input)
 	Input->BindAction(TEXT("HazardLights"), IE_Pressed, this, &AExternalVehiclePawn::ToggleHazardLights);
 	Input->BindAction(TEXT("Horn"), IE_Pressed, VehicleHorn.Get(),
 		&USimCoreVehicleHornComponent::HandleHornInput);
+	Input->BindAction(TEXT("Horn"), IE_Released, VehicleHorn.Get(),
+		&USimCoreVehicleHornComponent::HandleHornRelease).bExecuteWhenPaused = true;
 	Input->BindAction(TEXT("SelectSedan"), IE_Pressed, this,
 		&AExternalVehiclePawn::SelectSedan);
 	Input->BindAction(TEXT("SelectCompact"), IE_Pressed, this,
@@ -325,6 +353,9 @@ void AExternalVehiclePawn::SelectPlayerVehicleClass(
 	AnalogSteeringInput = 0.0f;
 	KeyboardSteeringInput = 0.0f;
 	SteeringInput = 0.0f;
+	ManualIndicator = SimCoreProtocol::ETurnIndicator::Off;
+	bHazardLights = false;
+	IndicatorAutoCancel.Reset();
 	bSideBrakeInput = false;
 	if (GEngine)
 	{
@@ -367,19 +398,11 @@ int32 AExternalVehiclePawn::GetVisibleWheelCount() const
 bool AExternalVehiclePawn::ConfigureVehicleClass(
 	SimCoreProtocol::ERuntimeVehicleClass VehicleClass)
 {
-	if (VehicleClass == SimCoreProtocol::ERuntimeVehicleClass::Unspecified)
-	{
-		VehicleClass = SimCoreProtocol::ERuntimeVehicleClass::Sedan;
-	}
-	UStaticMesh* BodyMesh = nullptr;
-	switch (VehicleClass)
-	{
-	case SimCoreProtocol::ERuntimeVehicleClass::Sedan: BodyMesh = SedanBodyMesh; break;
-	case SimCoreProtocol::ERuntimeVehicleClass::Compact: BodyMesh = CompactBodyMesh; break;
-	case SimCoreProtocol::ERuntimeVehicleClass::Truck: BodyMesh = TruckBodyMesh; break;
-	case SimCoreProtocol::ERuntimeVehicleClass::Motorcycle: BodyMesh = MotorcycleBodyMesh; break;
-	default: return false;
-	}
+	const SimCoreVehicleVisualApplication::FBodySelection Selection =
+		SimCoreVehicleVisualApplication::SelectBody(VehicleClass,
+			{SedanBodyMesh, CompactBodyMesh, TruckBodyMesh, MotorcycleBodyMesh});
+	VehicleClass = Selection.VehicleClass;
+	UStaticMesh* BodyMesh = Selection.BodyMesh;
 	if (!BodyMesh || !SharedWheelMesh || WheelMeshes.Num() != 4 || WheelPivots.Num() != 4)
 	{
 		return false;
@@ -393,10 +416,7 @@ bool AExternalVehiclePawn::ConfigureVehicleClass(
 	if (!SimCoreVehicleVisualProfile::Resolve(VehicleClass, Profile)) return false;
 
 	DeformableBody->ResetDeformation();
-	VehicleMesh->EmptyOverrideMaterials();
-	VehicleMesh->SetStaticMesh(BodyMesh);
-	VehicleMesh->SetRelativeTransform(FTransform::Identity);
-	VehicleMesh->SetVisibility(true);
+	SimCoreVehicleVisualApplication::ReplaceBodyMesh(*VehicleMesh, *BodyMesh);
 	for (int32 Index = 0; Index < 4; ++Index)
 	{
 		WheelPivots[Index]->SetRelativeLocation(Profile.WheelOriginsCm[Index]);
@@ -410,8 +430,8 @@ bool AExternalVehiclePawn::ConfigureVehicleClass(
 	}
 	VisualTireRadiusMeters = static_cast<float>(
 		SharedWheelMesh->GetBoundingBox().GetExtent().Z * Profile.WheelScales[0].Z * 0.01);
-	TurnSignals->SetLampPositions(MakeArrayView(Profile.LampLocationsCm));
-	DriverPresentation->ConfigureVehicleClass(VehicleClass);
+	SimCoreVehicleVisualApplication::ConfigureAttachments(
+		Profile, *TurnSignals, *DriverPresentation, *SuspensionPresentation);
 	VehicleHorn->SetRelativeLocation(FVector(
 		BodyMesh->GetBoundingBox().Max.X - 18.0, 0.0,
 		FMath::Clamp(BodyMesh->GetBoundingBox().GetCenter().Z, 18.0, 80.0)));
@@ -525,15 +545,16 @@ void AExternalVehiclePawn::DrawVehicleDebug(
 		SimCoreVehicleVisualProfile::Resolve(State.RuntimeVehicleClass, Profile);
 		// The planar solver uses a vertical prism above the ground, not an OBB
 		// centred on the visual CG. Pitch/roll is handled by the chassis shell.
-		const FVector CollisionCentre = GetActorLocation() + FVector::UpVector
-			* (0.10f + State.CollisionHalfHeightMeters - Profile.CgHeightMeters) * 100.0f;
+		const FQuat CollisionRotation = FRotator(0.0, GetActorRotation().Yaw, 0.0).Quaternion();
+		const FVector CollisionCentre = GetActorLocation() + CollisionRotation.RotateVector(
+			SimCoreVehicleVisualProfile::CollisionCenterOffsetCm(Profile, State.CollisionHalfHeightMeters));
 		DrawDebugBox(
 			GetWorld(), CollisionCentre,
 			FVector(
 				State.CollisionHalfLengthMeters,
 				State.CollisionHalfWidthMeters,
 				State.CollisionHalfHeightMeters) * 100.0f,
-			FRotator(0.0, GetActorRotation().Yaw, 0.0).Quaternion(),
+			CollisionRotation,
 			FColor::Cyan, false, -1.0f, 0, 2.0f);
 	}
 
@@ -762,6 +783,7 @@ void AExternalVehiclePawn::SetSteering(float Value)
 void AExternalVehiclePawn::SetSteerLeftPressed() { bSteerLeftPressed = true; }
 void AExternalVehiclePawn::ToggleLeftIndicator()
 {
+	IndicatorAutoCancel.Reset();
 	bHazardLights = false;
 	ManualIndicator = ManualIndicator == SimCoreProtocol::ETurnIndicator::Left
 		? SimCoreProtocol::ETurnIndicator::Off : SimCoreProtocol::ETurnIndicator::Left;
@@ -776,6 +798,7 @@ void AExternalVehiclePawn::ToggleLeftIndicator()
 }
 void AExternalVehiclePawn::ToggleRightIndicator()
 {
+	IndicatorAutoCancel.Reset();
 	bHazardLights = false;
 	ManualIndicator = ManualIndicator == SimCoreProtocol::ETurnIndicator::Right
 		? SimCoreProtocol::ETurnIndicator::Off : SimCoreProtocol::ETurnIndicator::Right;
@@ -790,6 +813,7 @@ void AExternalVehiclePawn::ToggleRightIndicator()
 }
 void AExternalVehiclePawn::ToggleHazardLights()
 {
+	IndicatorAutoCancel.Reset();
 	bHazardLights = !bHazardLights;
 	ManualIndicator = SimCoreProtocol::ETurnIndicator::Off;
 	if (GEngine)

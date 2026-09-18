@@ -79,6 +79,10 @@ struct VehicleParameters {
     float collision_body_overhang_m = 0.80f;
     float collision_body_side_padding_m = 0.15f;
     float collision_body_half_height_m = 0.75f;
+    // The body mesh can be asymmetric around the physical CG. Collision shape
+    // placement must not move the axle mounts or change the integration origin.
+    float collision_body_center_forward_offset_m = 0.f;
+    float collision_body_ground_clearance_m = 0.10f;
     float chassis_shell_center_up_offset_m = 0.335f;
     float chassis_shell_half_height_m = 0.625f;
     simcore_host::SuspensionParameters suspension;

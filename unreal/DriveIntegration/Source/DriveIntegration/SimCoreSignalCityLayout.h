@@ -15,6 +15,10 @@ namespace SimCoreSignalCity
 	inline constexpr TCHAR MapId[] = TEXT("signal_city_v2");
 
 	DRIVEINTEGRATION_API SimCoreVirtualCity::FLayout BuildLayout();
+	/** North avenue and its one-way turning loop, also used by NPC authoring. */
+	DRIVEINTEGRATION_API TArray<FVector> BuildNorthLoopLane();
+	/** Exact saved generation before dashed merges and the north district. */
+	DRIVEINTEGRATION_API SimCoreVirtualCity::FLayout BuildSolidCollectorMergesV7Layout();
 	/** Shared south-to-north centerline for road, paint, curbs and traffic. */
 	DRIVEINTEGRATION_API TArray<FVector> BuildCollectorCenterline(bool bEast);
 	DRIVEINTEGRATION_API TArray<FVector> OffsetCollectorCenterline(

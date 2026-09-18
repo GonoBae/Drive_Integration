@@ -7,14 +7,43 @@
 #include "SimCorePedestrianPresentationActor.h"
 #include "SimCoreTrafficSignalActor.h"
 
+namespace
+{
+	// Visual retention only. Health/input freshness stays at 100 ms and pose
+	// prediction keeps its existing independent 50 ms default cap.
+	constexpr double RuntimeEntityRetentionSeconds = 0.5;
+}
+
 void USimCoreClientComponent::SyncRuntimeProxyActors(
 	const TArray<SimCoreProtocol::FVehicleState>& Entities,
 	double ReceiveTimeSeconds)
 {
 	// Only the accepted Hello/map/play/generation/sequence path calls this.
 	// Cache one authoritative snapshot, then predict its presentation per tick.
+	const double PreviousAge = ReceiveTimeSeconds - RuntimeEntityReceiveTimeSeconds;
+	if (!RuntimeEntityStates.IsEmpty()
+		&& (RuntimeEntitySocketGeneration != SocketGeneration
+			|| RuntimeEntityPlaySessionId != PlaySessionId
+			|| RuntimeEntityMapChecksum != MapPackageChecksum
+			|| !FMath::IsFinite(PreviousAge) || PreviousAge < 0.0
+			|| PreviousAge > RuntimeEntityRetentionSeconds))
+	{
+		// A receive callback can run before the next tick. It must not revive
+		// an expired actor or carry one across a different accepted lifecycle.
+		DestroyRuntimeProxyActors();
+	}
+	else if (!RuntimeEntityStates.IsEmpty()
+		&& PreviousAge > SimCoreTrafficSignals::SnapshotFreshnessSeconds)
+	{
+		// A hitch may deliver fresh data before a stale tick. Mark the pause
+		// before applying it so local rider flight never integrates that gap.
+		FreezeRuntimeProxyActors();
+	}
 	RuntimeEntityStates.Reset();
 	RuntimeEntityReceiveTimeSeconds = ReceiveTimeSeconds;
+	RuntimeEntitySocketGeneration = SocketGeneration;
+	RuntimeEntityPlaySessionId = PlaySessionId;
+	RuntimeEntityMapChecksum = MapPackageChecksum;
 	TSet<uint32> SeenEntityIds;
 	for (const SimCoreProtocol::FVehicleState& Entity : Entities)
 	{
@@ -61,10 +90,21 @@ void USimCoreClientComponent::TickRuntimeProxyActors(float DeltaSeconds)
 	const double Age = FPlatformTime::Seconds() - RuntimeEntityReceiveTimeSeconds;
 	if (!bShowRuntimeEntities || !World || !World->IsGameWorld() || !bHasState
 		|| !IsConnected() || !bProtocolHandshakeComplete || !bMapHandshakeComplete
+		|| RuntimeEntitySocketGeneration != SocketGeneration
+		|| RuntimeEntityPlaySessionId != PlaySessionId
+		|| RuntimeEntityMapChecksum != MapPackageChecksum
+		|| !FMath::IsFinite(DeltaSeconds) || DeltaSeconds < 0.0f
 		|| !FMath::IsFinite(Age) || Age < 0.0
-		|| Age > SimCoreTrafficSignals::SnapshotFreshnessSeconds)
+		|| Age > RuntimeEntityRetentionSeconds)
 	{
 		DestroyRuntimeProxyActors();
+		return;
+	}
+	if (Age > SimCoreTrafficSignals::SnapshotFreshnessSeconds)
+	{
+		// Retain the last displayed root/wheel/bone pose, not an age-zero
+		// rewind. Never spawn from stale cache or run prediction/effects here.
+		FreezeRuntimeProxyActors();
 		return;
 	}
 	// A stopped/unknown lease may still supply a fresh authoritative pose, but
@@ -121,6 +161,17 @@ void USimCoreClientComponent::TickRuntimeProxyActors(float DeltaSeconds)
 	}
 }
 
+void USimCoreClientComponent::FreezeRuntimeProxyActors()
+{
+	for (const auto& Pair : RuntimeEntityActors)
+	{
+		if (auto* Npc = Cast<ASimCoreNpcPresentationActor>(Pair.Value.Get()))
+			Npc->FreezePresentation();
+		else if (auto* Pedestrian = Cast<ASimCorePedestrianPresentationActor>(Pair.Value.Get()))
+			Pedestrian->FreezePresentation();
+	}
+}
+
 void USimCoreClientComponent::DestroyRuntimeProxyActors()
 {
 	for (const TPair<uint32, TWeakObjectPtr<AActor>>& Pair
@@ -135,6 +186,9 @@ void USimCoreClientComponent::DestroyRuntimeProxyActors()
 	RuntimeEntityActorKinds.Reset();
 	RuntimeEntityStates.Reset();
 	RuntimeEntityReceiveTimeSeconds = 0.0;
+	RuntimeEntitySocketGeneration = 0;
+	RuntimeEntityPlaySessionId.Reset();
+	RuntimeEntityMapChecksum.Reset();
 }
 
 void USimCoreClientComponent::DrawRuntimeEntityDebug() const

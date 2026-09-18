@@ -136,6 +136,7 @@ private:
 	friend class FSimCoreTrafficSignalLifecycleTest;
 	friend class FSimCoreSteeringPawnPresentationTest;
 	friend class FSimCoreNpcClientLifecycleTest;
+	friend class FSimCoreRuntimeEntityGraceTest;
 	friend class FSimCoreDebugHudVehicleStateTest;
 	friend class FSimCoreBinaryMessageFramingTest;
 	friend class FSimCoreBinaryMessageBoundarySafetyTest;
@@ -164,6 +165,7 @@ private:
 		const TArray<SimCoreProtocol::FVehicleState>& Entities,
 		double ReceiveTimeSeconds);
 	void TickRuntimeProxyActors(float DeltaSeconds);
+	void FreezeRuntimeProxyActors();
 	void DestroyRuntimeProxyActors();
 	void TickTrafficSignals();
 	void InvalidateTrafficSignals();
@@ -209,6 +211,9 @@ private:
 	TMap<uint32, SimCoreProtocol::EEntityKind> RuntimeEntityActorKinds;
 	TMap<uint32, SimCoreProtocol::FVehicleState> RuntimeEntityStates;
 	double RuntimeEntityReceiveTimeSeconds = 0.0;
+	uint64 RuntimeEntitySocketGeneration = 0;
+	FString RuntimeEntityPlaySessionId;
+	FString RuntimeEntityMapChecksum;
 	TMap<uint32, TWeakObjectPtr<ASimCoreTrafficSignalActor>> TrafficSignalActors;
 	TMap<FString, TWeakObjectPtr<ASimCoreStructureDamageActor>> StructureDamageActors;
 	FString PresentedStructureMapChecksum;

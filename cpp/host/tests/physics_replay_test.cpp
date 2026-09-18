@@ -74,9 +74,14 @@ std::string frame(std::uint64_t sequence, bool reset, float throttle = 0.5f,
     envelope.set_source_id("replay-test-client");
     envelope.set_session_id("connection-1");
     envelope.set_map_package_checksum("test-map");
+    // Commands are generated on the real host clock. A sequence number is not
+    // a nanosecond timestamp, even when replay physics runs at a faster rate.
+    const auto client_time_ns = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            SimulationHost::Clock::now().time_since_epoch()).count());
     if (reset) {
         envelope.mutable_simulation_reset()->set_play_session_id(play);
-        envelope.mutable_simulation_reset()->set_client_time_ns(sequence);
+        envelope.mutable_simulation_reset()->set_client_time_ns(client_time_ns);
         envelope.mutable_simulation_reset()->set_requested_vehicle_class(vehicle_class);
     } else {
         auto* command = envelope.mutable_control_command();
@@ -84,7 +89,7 @@ std::string frame(std::uint64_t sequence, bool reset, float throttle = 0.5f,
         command->set_throttle(throttle);
         command->set_steering(0.1f);
         command->set_estop(estop);
-        command->set_client_time_ns(sequence);
+        command->set_client_time_ns(client_time_ns);
     }
     return envelope.SerializeAsString();
 }

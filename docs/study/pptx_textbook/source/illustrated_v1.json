@@ -1,0 +1,426 @@
+[
+  {
+    "lessonId": "L02",
+    "imageKey": "v1_L02",
+    "title": "콜백 등록과 실행이 이어지는 시간선",
+    "path": "assets/illustrated_v3/v1_L02.png",
+    "prompt": "Use case: scientific-educational. Asset type: Korean C++ networking textbook explanatory image, raster, wide 16:9.\nPrimary request: show a SINGLE event loop with callback registration followed by a precise timeline that demonstrates why async input can wait behind a long tick callback. White background; crisp flat textbook diagram; navy typography, teal execution blocks, orange waiting; large sparse English labels. No tiny text, no extra decorations, no code screenshot.\nTop slim conceptual strip: a box \"REGISTER CALLBACK\" then arrow to \"ioc.run()\" then arrow to \"RUN READY WORK\". Registration is storage of a future action, not immediate execution.\nMain timeline occupies most of image. Exactly labeled ticks \"0 ms\", \"20 ms\", \"80 ms\" on a shared horizontal time axis. A single navy lane labeled \"ONE EVENT LOOP\". Its teal rectangle labeled \"TICK CALLBACK\" starts at 0 and ends at 80. At 80 the next separate teal rectangle begins labeled \"INPUT CALLBACK\"; do not overlap these executing rectangles.\nAt exactly the 20 ms position show an orange input-ready marker above/below and text \"INPUT READY\". Draw an orange dashed waiting arrow from 20 to 80, parallel to axis, labeled \"WAITING\". Clearly connect its right endpoint to the beginning of INPUT CALLBACK at 80.\nFooter exact small-but-readable label \"ILLUSTRATIVE TIMING\". Additional concise insight label \"ASYNC DOES NOT IMPLY PARALLEL\". No second worker thread. Keep 20 located at one quarter of the distance from 0 to 80, all timings precisely aligned. No screenshot, watermark or fabricated measured data.",
+    "kind": "scientific-educational",
+    "reading": [
+      "등록은 동작을 저장하고, run 이후 준비된 콜백이 실행됩니다.",
+      "입력이 20ms에 준비돼도 80ms의 틱 종료까지 기다립니다.",
+      "교육용 시간선이며 길이는 실제 시간 비율·측정값이 아닙니다."
+    ],
+    "afterPageId": "L02-06",
+    "sources": [
+      {
+        "path": "cpp/host/src/main.cpp",
+        "symbol": "main",
+        "start": 299,
+        "end": 311
+      },
+      {
+        "path": "cpp/host/src/main.cpp",
+        "symbol": "main",
+        "start": 409,
+        "end": 413
+      },
+      {
+        "path": "cpp/host/src/simulation_host.hpp",
+        "symbol": "queue_map_package_reload",
+        "start": 146,
+        "end": 155
+      },
+      {
+        "path": "cpp/host/src/main.cpp",
+        "symbol": "callbacks.broadcast_world_state",
+        "start": 307,
+        "end": 311
+      },
+      {
+        "path": "cpp/host/src/simulation_host.hpp",
+        "symbol": "SimulationHostCallbacks",
+        "start": 69,
+        "end": 73
+      }
+    ]
+  },
+  {
+    "lessonId": "L03",
+    "imageKey": "v1_L03",
+    "title": "원본, 내부 복사본과 값의 존재",
+    "path": "assets/illustrated_v3/v1_L03.png",
+    "prompt": "Use case: scientific-educational. Asset type: textbook raster diagram, wide16:9, white background, flat technical explanatory style, navy/teal/orange palette, large English labels only, no fine print.\nExplain three distinct C++ value contracts using a clean three-panel landscape diagram. Minimal visual syntax and strong boundaries.\nLEFT panel title \"CONST REFERENCE\". An original object box \"input\" contains \"throttle 1.2\". A label \"const &\" points to this SAME original object (an alias, not a second stored object). A separate arrow \"COPY\" leads from original to a clearly distinct stored box \"input_\" containing \"throttle 1.0\". Put \"CLAMP\" above the stored box. Label original \"READ ONLY THROUGH THIS REFERENCE\". It remains 1.2 while stored copy is clamped to1.0.\nMIDDLE panel title \"OPTIONAL OUTPUT POINTER\". Two simple branches: \"error\" pointer arrow to an existing output string box, marked \"WRITE\"; below \"nullptr\" leads to a stop/bypass symbol labeled \"SKIP\". No arrow from nullptr to an object. This depicts selecting an output destination.\nRIGHT panel title \"OPTIONAL RESULT\". Two separate result cards: teal \"VALUE\" containing \"height = 0 m\" and orange outlined \"nullopt\" containing \"NO RESULT\". The zero-height card contains a clear solid ground surface at height0; the no-result card is empty, no ground invented. Under these exact short words \"ZERO IS A VALUE\".\nAll three panels must be readable when embedded in a textbook page. Do not equate nullopt with zero, do not mutate original input through const reference, no arbitrary numeric memory addresses, no people or decorative icons, no watermark.",
+    "kind": "scientific-educational",
+    "reading": [
+      "const 참조는 원본을 읽고, 별도 복사본만 1.0으로 제한합니다.",
+      "error가 출력 문자열을 가리킬 때만 쓰고 nullptr이면 건너뜁니다.",
+      "높이 0m는 유효한 값입니다. nullopt에는 결과 자체가 없습니다."
+    ],
+    "afterPageId": "L03-07",
+    "sources": [
+      {
+        "path": "cpp/host/src/physics/vehicle_physics.cpp",
+        "symbol": "VehiclePhysics::set_input",
+        "start": 629,
+        "end": 637
+      },
+      {
+        "path": "cpp/host/src/protocol/vehicle_message_decoder.cpp",
+        "symbol": "set_error",
+        "start": 21,
+        "end": 26
+      },
+      {
+        "path": "cpp/host/src/terrain/ground_query.hpp",
+        "symbol": "GroundQuery::query_down",
+        "start": 65,
+        "end": 70
+      },
+      {
+        "path": "cpp/host/src/terrain/ground_query.hpp",
+        "symbol": "FlatGroundQuery::query_down",
+        "start": 83,
+        "end": 102
+      }
+    ]
+  },
+  {
+    "lessonId": "L07",
+    "imageKey": "v1_L07",
+    "title": "비트 조각을 연결하여 150 쓰기",
+    "path": "assets/illustrated_v3/v1_L07.png",
+    "prompt": "Use case: scientific-educational. Asset type: raster Protobuf textbook explainer, wide16:9, pure white, navy text, teal value bits, orange continuation bits, generous whitespace, large English labels and exact monospace digits.\nMain lesson: a sequence value150 in unsigned field2 becomes the educational byte fragment \"10 96 01\". Build three horizontal stages.\nTop stage titled \"TAG\". A byte bit row \"00010 | 000\" with the five field bits teal and three wire bits orange. Below the groups respectively \"FIELD 2\" and \"WIRE 0\". Beside it show \"2 × 8 + 0 = 16\" then \"0x10\".\nMiddle stage titled \"VALUE 150\". Show two byte groups in actual encoded order left-to-right. First group digits exactly \"1 | 0010110\" and second exactly \"0 | 0000001\". The first bit of each byte is orange and seven value bits teal. Below first \"0x96\" and \"22\"; below second \"0x01\" and \"1 × 128\". Label above the orange1 \"CONTINUE\"; above orange0 \"STOP\". Join the two lower contributions with exact formula \"22 + 1 × 128 = 150\". Do not reverse group order. Each group must have exactly8 bits.\nBottom stage titled \"ENCODED BYTES\". Exactly three large adjacent byte cells: \"10\", \"96\", \"01\". Under first a navy brace labeled \"TAG\"; under last two a teal brace labeled \"VALUE\". Small footer \"HEX BYTES • EDUCATIONAL FRAGMENT\".\nMust teach exact correct bit pattern for0x96 and0x01. No implication that this is a complete accepted control packet. No extra binary digits, no watermark, no art ornament.",
+    "kind": "scientific-educational",
+    "reading": [
+      "태그의 위쪽 비트는 필드 2, 아래 세 비트는 저장 방식 0입니다.",
+      "주황 계속 비트가 1이면 다음 바이트를 읽고 0이면 끝냅니다.",
+      "교육용 조각 10 96 01에서 96 01은 22＋1×128＝150입니다."
+    ],
+    "afterPageId": "L07-05",
+    "sources": [
+      {
+        "path": "unreal/DriveIntegration/Source/DriveIntegration/SimCoreProtocol.cpp",
+        "symbol": "WriteTag",
+        "start": 19,
+        "end": 22
+      },
+      {
+        "path": "protocol/vehicle.proto",
+        "symbol": "ControlCommand",
+        "start": 234,
+        "end": 242
+      },
+      {
+        "path": "protocol/vehicle.proto",
+        "symbol": "Envelope",
+        "start": 275,
+        "end": 282
+      },
+      {
+        "path": "unreal/DriveIntegration/Source/DriveIntegration/SimCoreProtocol.cpp",
+        "symbol": "FReader::ReadFixed32",
+        "start": 84,
+        "end": 109
+      },
+      {
+        "path": "unreal/DriveIntegration/Source/DriveIntegration/SimCoreProtocol.cpp",
+        "symbol": "FReader::Skip",
+        "start": 128,
+        "end": 138
+      },
+      {
+        "path": "unreal/DriveIntegration/Source/DriveIntegration/SimCoreProtocol.cpp",
+        "symbol": "WriteVarint",
+        "start": 9,
+        "end": 17
+      },
+      {
+        "path": "unreal/DriveIntegration/Source/DriveIntegration/SimCoreProtocol.cpp",
+        "symbol": "FReader::ReadVarint",
+        "start": 57,
+        "end": 71
+      }
+    ]
+  },
+  {
+    "lessonId": "L08",
+    "imageKey": "v1_L08",
+    "title": "안쪽 메시지의 범위와 문자열 바이트 수",
+    "path": "assets/illustrated_v3/v1_L08.png",
+    "prompt": "Use case: scientific-educational. Asset type: raster Protobuf textbook figure, wide16:9 white canvas, crisp flat diagram, navy text and outlines, teal data bytes, orange length boundaries. Large monospace hex bytes, minimal English labels; no screenshot.\nPrimary request: correctly visualize nested length-delimited bytes and UTF-8 byte counting. Main diagram upper two thirds is exactly seven adjacent byte cells left-to-right:\n\"5A\" | \"05\" | \"15\" | \"00\" | \"00\" | \"00\" | \"3F\".\nAbove first cell \"ENVELOPE FIELD 11\" and smaller \"WIRE 2\". Above second cell \"LENGTH 5\". Under the LAST FIVE cells only (15 00 00 00 3F), one orange enclosing bracket labeled \"CONTROL COMMAND • 5 BYTES\". The bracket must not include5A or05. Inside this scope below first internal cell15 put \"FIELD 2 • WIRE 5\". Under the final FOUR cells00 00 00 3F only, a teal bracket labeled \"FLOAT 0.5\". Add a short explanatory chain \"0x3F000000 → 00 00 00 3F\" labeled \"LOW BYTE FIRST\". Those bytes preserve float bits; do not integer-cast0.5.\nLower third separated by fine divider, title \"UTF-8 LENGTH = BYTE COUNT\". Two small equal examples with text: left \"'car'\" pointing to three byte cells \"63\" \"61\" \"72\", bottom \"3 CHARACTERS • 3 BYTES\"; right \"U+AC00\" pointing to three byte cells \"EA\" \"B0\" \"80\", bottom \"1 CHARACTER • 3 BYTES\". Each character example gets its own count; do not confuse length with code points.\nFooter \"EDUCATIONAL FRAGMENTS\". All digits exactly verbatim. Never show this fragment as a complete control packet. No fake measured output, no extra payload fields, no watermark.",
+    "kind": "scientific-educational",
+    "reading": [
+      "주황 괄호는 내부 태그와 값을 합친 5바이트입니다.",
+      "마지막 네 바이트 00 00 00 3F가 float 0.5입니다.",
+      "U+AC00은 ‘가’이며 3바이트입니다. 그림은 교육용 조각입니다."
+    ],
+    "afterPageId": "L08-08",
+    "sources": [
+      {
+        "path": "unreal/DriveIntegration/Source/DriveIntegration/SimCoreProtocol.cpp",
+        "symbol": "WriteFixed32",
+        "start": 24,
+        "end": 33
+      },
+      {
+        "path": "unreal/DriveIntegration/Source/DriveIntegration/SimCoreProtocol.cpp",
+        "symbol": "SerializeControlEnvelope",
+        "start": 934,
+        "end": 945
+      },
+      {
+        "path": "unreal/DriveIntegration/Source/DriveIntegration/SimCoreProtocol.cpp",
+        "symbol": "WriteString",
+        "start": 42,
+        "end": 48
+      },
+      {
+        "path": "protocol/vehicle.proto",
+        "symbol": "Envelope",
+        "start": 279,
+        "end": 280
+      },
+      {
+        "path": "cpp/host/src/simulation_host_session.cpp",
+        "symbol": "SimulationHost::handle_control_command",
+        "start": 321,
+        "end": 334
+      },
+      {
+        "path": "unreal/DriveIntegration/Source/DriveIntegration/SimCoreProtocol.cpp",
+        "symbol": "FReader::ReadMessage",
+        "start": 102,
+        "end": 109
+      },
+      {
+        "path": "protocol/vehicle.proto",
+        "symbol": "Envelope::payload",
+        "start": 284,
+        "end": 290
+      },
+      {
+        "path": "protocol/vehicle.proto",
+        "symbol": "ControlCommand",
+        "start": 234,
+        "end": 242
+      }
+    ]
+  },
+  {
+    "lessonId": "L09",
+    "imageKey": "v1_L09",
+    "title": "바퀴 위치 식별과 메시지 종류 선택",
+    "path": "assets/illustrated_v3/v1_L09.png",
+    "prompt": "Use case: scientific-educational. Asset type: wide16:9 raster textbook diagram. White background, navy outlines/text, teal data and selected paths, orange emphasis, high legibility, sparse English labels. Two panels with no unnecessary decoration.\nLEFT two-thirds: title \"REPEATED WHEELS\". Show a vertical list box \"EntityState • wheels = 21\" with exactly three visibly separate sample rows: \"entry 1: wheel_index = 0\", \"entry 2: wheel_index = 3\", \"entry 3: wheel_index = 1\". Emphasize second row in orange. Beside list show top-down simplified vehicle rectangle, front facing up, arrow upward labelled \"FRONT\". Four wheels at corners labeled at front-left \"0\", front-right \"1\", rear-left \"2\", rear-right \"3\". Important: top-left0, top-right1, bottom-left2, bottom-right3. A bold orange arrow routes from the SECOND sample row directly to the bottom-right wheel3, not wheel1. Include exact bottom labels \"21 = FIELD NUMBER\" and \"wheel_index = POSITION\". This is a sample subset/reordered list, not a complete four-wheel observation; add \"EXAMPLE ENTRIES\". Do not add steering arrows or physical measurements.\nRIGHT one-third: title \"ONEOF PAYLOAD\". A large box \"Envelope\" contains three alternative inset boxes stacked vertically: \"Hello\", \"ControlCommand\", \"WorldState\". Only WorldState highlighted teal with a clear selection dot; Hello and ControlCommand light grey inactive. Inside the selected WorldState inset show a small bracket and three tiny entity boxes labelled \"entities\" to demonstrate one selected kind can contain multiple items. Caption below \"ONE ACTIVE KIND\" and below that \"NONE IS ALSO POSSIBLE\". Never connect wheel entries to payload selector. This panel is a static choice, not three simultaneously active payloads. No wire bytes, no watermark.",
+    "kind": "scientific-educational",
+    "reading": [
+      "21은 목록 필드 번호이고 wheel_index는 원소의 바퀴 위치입니다.",
+      "두 번째 예시 원소의 값 3은 뒤오른쪽 바퀴로 연결됩니다.",
+      "선택된 종류는 WorldState 하나이며, 그 안에 여러 엔티티를 담습니다."
+    ],
+    "afterPageId": "L09-07",
+    "sources": [
+      {
+        "path": "protocol/vehicle.proto",
+        "symbol": "EntityState::wheels",
+        "start": 123,
+        "end": 126
+      },
+      {
+        "path": "protocol/vehicle.proto",
+        "symbol": "WheelState",
+        "start": 52,
+        "end": 64
+      },
+      {
+        "path": "cpp/host/tests/vehicle_protocol_test.cpp",
+        "symbol": "test_world_state_envelope_roundtrip",
+        "start": 400,
+        "end": 407
+      },
+      {
+        "path": "protocol/vehicle.proto",
+        "symbol": "WheelState::wheel_index",
+        "start": 52,
+        "end": 64
+      },
+      {
+        "path": "protocol/vehicle.proto",
+        "symbol": "Envelope::payload",
+        "start": 284,
+        "end": 290
+      },
+      {
+        "path": "unreal/DriveIntegration/Source/DriveIntegration/SimCoreProtocol.cpp",
+        "symbol": "ParseWorldStateEnvelope",
+        "start": 1230,
+        "end": 1241
+      }
+    ]
+  },
+  {
+    "lessonId": "L10",
+    "imageKey": "v1_L10",
+    "title": "필드 부재와 명시적 값, 건너뛰기의 한계",
+    "path": "assets/illustrated_v3/v1_L10.png",
+    "prompt": "Use case: scientific-educational. Asset type: textbook diagram, raster landscape16:9. Clean white backdrop, navy text and outlines, teal accepted values, orange branch emphasis. Large minimal English labels. Goal: distinguish field presence from0, then structure skip from feature support.\nUpper half title \"PRESENCE CHANGES THE RESULT\". Exactly two clear horizontal rows.\nRow1: dashed empty field card \"gear ABSENT\" → decision text \"has_gear = false\" → teal result \"KEEP DEFAULT DRIVE\".\nRow2: solid filled field card \"gear = 0\" → decision text \"has_gear = true\" → orange result \"SET NEUTRAL\".\nDo not show a shared0 value in row1. Add a small shared left setup label \"INITIAL: DRIVE\" so both cases start from same internal default.\nLower half title \"UNKNOWN FIELD: SKIP ITS STRUCTURE\". A horizontal byte-stream schematic has three blocks \"KNOWN A\", \"UNKNOWN LEN\", \"KNOWN B\". The unknown length-delimited block includes three subparts \"TAG\", \"LENGTH\", \"BYTES\". A curved orange forward arrow routes parser position from before the unknown block to immediately after it, labelled \"CHECK BOUNDS → SKIP\". Navy forward arrows show reading knownA then knownB. Under unknown block exact statement \"MEANING STILL UNKNOWN\". Below this main line use compact support note \"SUPPORTED WIRE TYPES: 0, 1, 2, 5\".\nBottom note \"PARSING SUCCESS ≠ COMMAND ACCEPTANCE\". Diagram is conceptual teaching, not a captured packet. Do not imply all unknown formats are supported or skipped data implements new feature. No decorative art, no watermark.",
+    "kind": "scientific-educational",
+    "reading": [
+      "gear 부재는 기본 Drive를 유지하고 명시적 0은 Neutral로 바꿉니다.",
+      "모르는 LEN 필드는 길이와 남은 범위를 확인한 뒤 건너뜁니다.",
+      "건너뛴 필드의 기능은 여전히 모르며, 파싱 성공 뒤 수락 검사가 남습니다."
+    ],
+    "afterPageId": "L10-08",
+    "sources": [
+      {
+        "path": "protocol/vehicle.proto",
+        "symbol": "ControlCommand",
+        "start": 234,
+        "end": 243
+      },
+      {
+        "path": "protocol/vehicle.proto",
+        "symbol": "VehicleGear",
+        "start": 5,
+        "end": 9
+      },
+      {
+        "path": "cpp/host/src/protocol/vehicle_message_decoder.cpp",
+        "symbol": "parse_client_message_envelope",
+        "start": 75,
+        "end": 83
+      },
+      {
+        "path": "cpp/host/src/physics/vehicle_physics.hpp",
+        "symbol": "VehicleInput::gear",
+        "start": 37,
+        "end": 37
+      },
+      {
+        "path": "cpp/host/tests/vehicle_protocol_test.cpp",
+        "symbol": "test_missing_gear_keeps_default_drive",
+        "start": 952,
+        "end": 965
+      },
+      {
+        "path": "unreal/DriveIntegration/Source/DriveIntegration/SimCoreProtocol.cpp",
+        "symbol": "FReader::Skip",
+        "start": 128,
+        "end": 138
+      },
+      {
+        "path": "unreal/DriveIntegration/Source/DriveIntegration/SimCoreProtocol.cpp",
+        "symbol": "FReader::ReadMessage",
+        "start": 102,
+        "end": 109
+      }
+    ]
+  },
+  {
+    "lessonId": "L13",
+    "imageKey": "v1_L13",
+    "title": "검증을 통과한 입력에서 화면의 상태까지",
+    "path": "assets/illustrated_v3/v1_L13.png",
+    "prompt": "Use case: scientific-educational. Asset type: wide16:9 raster diagram for a detailed networking and vehicle-simulation textbook. White background; navy typography/outlines; teal successful flow; orange validation gates and rejection branch. Clean flat technical diagram, large English text, arrows must make direction unambiguous.\nCreate a command-to-state roundtrip flow with SIX MAIN BOXES arranged as three columns and two rows. Broad top headings: first two columns \"UNREAL\", third column \"SERVER\". Use a divider before server.\nTOP ROW from left to right:\nbox1 \"CONTROL INTENT\" with three small exact data lines \"throttle 0.5\", \"steering 0\", \"gear Drive\".\narrow right to box2 \"SERIALIZE + SEND\", a small outgoing byte-strip icon, compact note \"Envelope\".\narrow right across server boundary to box3 orange outlined \"PARSE + VALIDATE\" with three compact lines \"Hello / map\", \"session / sequence\", \"time\".\nTOP RIGHT box3 connects DOWN via a thick teal arrow labeled \"ACCEPTED ONLY\" to the bottom right box6. Add a short orange SIDE branch from box3 to a small \"REJECT\" endpoint; it stops and has no path to simulation.\nBOTTOM ROW read RIGHT TO LEFT:\nbottom right box6 \"SIMULATE + SERIALIZE\" with simple vehicle state diagram and lines \"WorldState\" and \"state + Health\".\narrow LEFT across boundary labeled \"RESULT BYTES\" to bottom middle box5 \"VALIDATE WORLDSTATE\", with lines \"map / Play\", \"sequence\".\narrow LEFT to bottom left box4 \"STORE + DISPLAY\" with a small monitor showing a car silhouette and label \"LatestState\".\nInclude tiny clear reading order numbers1,2,3 then4 at simulate(bottom right),5 at validate(bottom middle),6 at store(bottom left), matching the arrows.\nSmall footer \"ILLUSTRATIVE INPUT • NO FIXED SPEED GUARANTEE\". Do not draw a direct link from throttle to a numerical speed. Do not imply Send or parsing alone guarantees acceptance. WorldState holds computed outcome, not raw request. No perfect measured behavior, no real packet dump, no watermark.",
+    "kind": "scientific-educational",
+    "reading": [
+      "위쪽은 운전 의도의 송신이며, 서버 검사를 통과해야 물리에 적용됩니다.",
+      "아래쪽은 계산된 WorldState의 귀환과 클라이언트 재검증입니다.",
+      "현재 연결·지도·Play가 정상인 예시입니다. 스로틀 0.5가 속도를 정하지 않습니다."
+    ],
+    "afterPageId": "L13-01",
+    "sources": [
+      {
+        "path": "unreal/DriveIntegration/Source/DriveIntegration/SimCoreClientComponent.cpp",
+        "symbol": "USimCoreClientComponent::SetControl",
+        "start": 124,
+        "end": 137
+      },
+      {
+        "path": "unreal/DriveIntegration/Source/DriveIntegration/SimCoreClientComponent.cpp",
+        "symbol": "USimCoreClientComponent::SendControl",
+        "start": 749,
+        "end": 765
+      },
+      {
+        "path": "cpp/host/src/websocket/ws_server.cpp",
+        "symbol": "WsSession::do_read",
+        "start": 155,
+        "end": 172
+      },
+      {
+        "path": "cpp/host/src/simulation_host_session.cpp",
+        "symbol": "SimulationHost::handle_control_command",
+        "start": 375,
+        "end": 392
+      },
+      {
+        "path": "cpp/host/src/protocol/vehicle_messages.cpp",
+        "symbol": "serialize_world_state_envelope",
+        "start": 433,
+        "end": 449
+      },
+      {
+        "path": "cpp/host/src/protocol/vehicle_messages.cpp",
+        "symbol": "serialize_world_state_envelope",
+        "start": 594,
+        "end": 599
+      },
+      {
+        "path": "protocol/vehicle.proto",
+        "symbol": "WorldState",
+        "start": 222,
+        "end": 231
+      },
+      {
+        "path": "cpp/host/src/websocket/ws_server.cpp",
+        "symbol": "WsSession::send_initial_binary",
+        "start": 70,
+        "end": 80
+      },
+      {
+        "path": "unreal/DriveIntegration/Source/DriveIntegration/SimCoreClientComponent.cpp",
+        "symbol": "USimCoreClientComponent::ApplyBinaryMessage",
+        "start": 1048,
+        "end": 1108
+      },
+      {
+        "path": "cpp/host/src/protocol/vehicle_message_decoder.cpp",
+        "symbol": "parse_client_message_envelope",
+        "start": 30,
+        "end": 52
+      },
+      {
+        "path": "cpp/host/src/simulation_host_session.cpp",
+        "symbol": "SimulationHost::handle_control_command",
+        "start": 321,
+        "end": 379
+      },
+      {
+        "path": "cpp/host/src/control/control_lease.hpp",
+        "symbol": "ControlLease::accept",
+        "start": 106,
+        "end": 149
+      },
+      {
+        "path": "cpp/host/src/simulation_host_session.cpp",
+        "symbol": "SimulationHost::handle_client_message",
+        "start": 191,
+        "end": 214
+      },
+      {
+        "path": "cpp/host/src/control/control_lease.hpp",
+        "symbol": "ControlLease::accept",
+        "start": 118,
+        "end": 132
+      },
+      {
+        "path": "unreal/DriveIntegration/Source/DriveIntegration/SimCoreClientComponent.cpp",
+        "symbol": "USimCoreClientComponent::GetLatestState",
+        "start": 139,
+        "end": 149
+      }
+    ]
+  }
+]

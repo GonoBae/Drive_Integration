@@ -26,6 +26,8 @@ namespace SimCoreTrafficSignals
 		bool bRed = true;
 		bool bYellow = false;
 		bool bGreen = false;
+		bool bHasLeft = false;
+		bool bLeftGreen = false;
 		bool IsPedestrian() const { return Kind == SimCoreProtocol::ETrafficSignalKind::Pedestrian; }
 	};
 
@@ -80,6 +82,8 @@ private:
 	TObjectPtr<UStaticMeshComponent> Head;
 	UPROPERTY(VisibleAnywhere, Category="SimCore|Traffic Signals")
 	TArray<TObjectPtr<UStaticMeshComponent>> Lamps;
+	UPROPERTY(VisibleAnywhere, Category="SimCore|Traffic Signals")
+	TArray<TObjectPtr<UStaticMeshComponent>> LeftArrow;
 	UPROPERTY(VisibleAnywhere, Category="SimCore|Traffic Signals")
 	TObjectPtr<UTextRenderComponent> StatusLabel;
 	UPROPERTY()

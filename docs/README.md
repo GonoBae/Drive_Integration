@@ -11,12 +11,13 @@
 | [03_architecture.md](./03_architecture.md) | 시스템 설계 관리 | C++·Unreal·Python 책임, 지도·충돌·통신·센서 구조 |
 | [refactoring.md](./refactoring.md) | 2026-09-02 전체 리팩터링 기록 | C++·Unreal 책임 분리, 보존 계약, 공통 서버 launcher와 검증 체크포인트 |
 | [core_validation.md](./core_validation.md) | Core 자동 통합과 측정 | 한 명령 검증, 서버 입력 기반 Ego 물리 재생, opt-in UE frame/state 측정과 수동 gate 경계 |
+| [input_latency_measurement.md](./input_latency_measurement.md) | 입력 반응 실측 | 패키지의 실제 키 입력→화면 반응 영상 측정, 오차를 포함한 50ms 판정 |
 | [windows_package.md](./windows_package.md) | Windows 배포와 설정 | 게임·서버·지도 패키지 제작, 외부 접속 INI, 이동 가능한 실행 폴더와 인수 경계 |
 | [04_environment_plan.md](./04_environment_plan.md) | 배경 제작 기준 | 가상 도심 전환 승인, 수정 가능한 코스 초안과 blockout→충돌→외형→성능 순서 |
 | [virtual_city_quickstart.md](./virtual_city_quickstart.md) | 가상 도심 실행 | 전용 서버·새 맵·주행·Bake·자동 시험과 남은 수동 확인 |
 | [signal_city_quickstart.md](./signal_city_quickstart.md) | 다중 교차로 신호 도심 실행 | 별도 v2 맵·서버, 두 controller 신호, 생성·검증 순서와 PIE 인수 경계 |
 | [vehicle_driving_refinement.md](./vehicle_driving_refinement.md) | 차량 주행 피드백 개선 | 조향 설정/선회 반경, 마우스 카메라 조작, 자체 세단 메시·재질, 검증·한계 |
-| [traffic_network_signals.md](./traffic_network_signals.md) | 차선·신호 기반 | v1 lane25/head3과 v2 lane58/head16/controller2, 좌·직·우 3차로·보행 전용 WALK·원자 WorldState·hot reload |
+| [traffic_network_signals.md](./traffic_network_signals.md) | 차선·신호 기반 | v1 lane25/head3과 v2 lane59/head16/controller2, 보호 좌회전·3차로·보행 전용 WALK·원자 WorldState·hot reload |
 | [npc_lane_following.md](./npc_lane_following.md) | NPC 주행 기반 | v1 NPC 1대 이력과 v2 NPC 10대·보행자 8명, 차선·신호·충돌 반작용 및 남은 수동 인수 경계 |
 | [traffic_crash_feedback.md](./traffic_crash_feedback.md) | 충돌·교통 피드백 8건 | 실제 dent·즉시 전도/비행·낮은 보행 충돌체·사고 회피·NPC 상호 충돌·깜빡이·3차로 수동 확인 |
 | [npc_navigation.md](./npc_navigation.md) | NPC 목적지·우회·차선 변경 | deterministic 목적지 선택, 동일 목적지 우회, 같은 방향 차선 변경·안전 가드와 legacy 호환 |
@@ -44,6 +45,10 @@
 | [2026-09-04 작업일지](./worklogs/2026-09-04.md) | 일별 실행 기록 | 충돌·운전자·보행자 표현, NPC 회피와 차종별 동작, 도로 표시 개선 |
 | [2026-09-05 작업일지](./worklogs/2026-09-05.md) | 일별 실행 기록 | 커브 차선 교차 수정, 플레이어 4차종 선택과 물리·재생·센서 초기화 통합 |
 | [2026-09-07 현황 정리](./worklogs/2026-09-07.md) | 현재 상태와 일정 점검 | 누적 구현·최신 검증 근거·남은 인수와 문서 동기화 |
+| [2026-09-08 주행 피드백](./worklogs/2026-09-08.md) | 사고·도로·표현 후속 수정 | 사고 우회·무경적, 보행 복귀·3체형, 북부 루프·보호 좌회전, 프레임·차량 소리와 연석 진단 |
+| [2026-09-09 안정화](./worklogs/2026-09-09.md) | 통신·근접 우회 | 짧은 수신 공백 표시 유지, 분할 탐색, 짧은 후진과 중앙선 침범 금지 |
+| [2026-09-17 검토 후속](./worklogs/2026-09-17.md) | 최신 작업·검증 상태 | 입력 누적 지연, 우회 중 재차 차단 복구, 부하 계측·실측 절차·배포 식별 |
+| [2026-09-18 저장소 반영](./worklogs/2026-09-18.md) | 문서·공유 범위 정리 | 누적 코드·지도·교재 포함 범위, 로컬 검사 자료 구분과 미완료 인수 유지 |
 | [UE 5.6 WebSocket 입력 지연 해결 사례](./troubleshooting/ue56-websocket-growing-input-delay.md) | 문제 해결 기록 | 60Hz producer/30Hz consumer FIFO 누적, event-loop·20Hz heartbeat 수정과 진단 기준 |
 | [UE 5.6 control lease timeout 해결 사례](./troubleshooting/ue56-control-lease-timeout-log-backpressure.md) | 문제 해결 기록 | single-thread stderr backpressure, background 파일 로그와 250ms/1초 2단계 lease |
 | [Landscape 급경사 접촉 상실 해결 사례](./troubleshooting/ue-landscape-steep-grade-contact-loss.md) | 문제 해결 기록 | stale MapPackage 판별, 절대 자세 제한·downward ray 영구 낙하 수정과 실제 bake 재시험 |
@@ -56,10 +61,10 @@
 - 개발 인원: 1명
 - 작업 시간: 하루 8시간
 - 이전 AI 기준선: 핵심 2026년 8월 27일·확장 8월 31일(미달성 이력)
-- 현재 관리 목표: Core RC 2026년 9월 7일(수정 버퍼 9월 8일), Should 확장 9월 11일(위험 버퍼 9월 14일). 9월 4일 조건부 조기 인수는 미달성했고, 9월 7일 점검 시에도 최종 인수는 미완료다.
+- 이전 관리 목표: Core RC 2026년 9월 7일(수정 버퍼 9월 8일), Should 확장 9월 11일(위험 버퍼 9월 14일). 9월 17일에도 실제 패키지 주행·성능 인수는 미완료다. 새 완료일을 임의로 정하지 않고 안정화→측정→배포 인수 순서로 진행한다.
 - 배경 범위: 작은 가상 도심 코스(8/31 승인)와 선택형 2교차로 Signal City blockout, 실제 Wall/Broad 재현 제외
 - 보행 공간: 로컬 보도·횡단보도와 차량 진입 제한 구역
-- 주행: 직선·코너·교차로·완만한 경사·정차 공간을 갖춘 반복 루프와 Signal City 58-lane graph, 차량·보행 신호 head 16개, 같은 방향 차선 변경과 근접 장애물 후진 회피 구현
+- 주행: 직선·코너·교차로·완만한 경사·정차 공간을 갖춘 반복 루프와 Signal City 59-lane graph, 차량·보행 신호 head 16개·독립 보호 좌회전, 같은 방향 차선 변경과 근접 장애물 후진 회피 구현
 - Cesium/실지리: R1 의존에서 제외하고 향후 지도 확장으로 연기; 로컬 ENU·FLU 좌표 수학은 유지
 - 물리 권한: C++ SimCore
 - 차량 물리: 외부 차량 물리 SDK 없이 C++ 서버에서 직접 개발. Unreal의 보행자 ragdoll 등 표시용 엔진 물리와 서버 차량 계산 권한은 구분한다.
@@ -98,17 +103,18 @@
 ## 문서 기준 정보
 
 - 최초 작성일: 2026-08-14
-- 문서 정리일: 2026-09-07
-- 문서 버전: 3.8
-- 현재 상태: Signal City lane58/head16/controller2, NPC10대·보행자8명, 플레이어 4차종 선택과
-  차종별 물리·CSV v2/physics replay, 커브 차선 v3를 구현했다. collision checksum은
-  `86c3103f3e2c7a5b`, traffic checksum은 `b19c15afba6936d7`다. 9/5 기록 기준 CTest34/34,
-  재생 통합 후 관련4/4, UE Automation84/84(경고 없는79개·예상 경고5개)를 통과했다.
-  9/7 초기 문서 정리에서는 빌드·시험을 실행하지 않았고 이후 구현·검증을 별도로 진행한다. 전체 스냅샷의 단일
-  통합 검증과 PIE, 패키지·성능·지연·30분 주행·촬영은 별도 인수다. 9/7 후속으로
-  카메라 3종 전환·외부 접속 INI·Windows 배포 절차를 구현했고 최신 결과는 작업일지에 기록한다.
+- 문서 정리일: 2026-09-18
+- 문서 버전: 3.9
+- 현재 상태: Signal City lane59/head16/controller2, NPC10대·보행자8명, 플레이어 4차종.
+  collision checksum은 `2232cb521030ae4f`, traffic checksum은 `f74f3fc490a002f2`다.
+  플레이어·NPC 모두 공통 차종 설정으로 실내/운전자 또는 오토바이 탑승자를 표시한다.
+  최신 수정 범위와 검사 결과는 [9/17 작업 기록](./worklogs/2026-09-17.md)을 따른다.
+  9/9 당시 CTest46/46·UE114/114와 후속 중앙선 검사9/9는 해당 버전의 검증 이력이다.
+  실제 화면·청감·목표 PC 성능·입력 반응·30분 주행·촬영은 자동 검사와 별도의 인수다.
   RGB 센서는 Should, LiDAR/radar/segmentation은 Future이며 Core 필수 인수와 구분한다.
-  [현재 현황과 일정](./worklogs/2026-09-07.md), [9/5 구현·검증](./worklogs/2026-09-05.md).
+
+현재 상태는 **구현 / 자동 검사 / 실제 플레이 인수 / 미구현·대기**로 나누어 기록한다.
+구현이나 자동 검사 통과를 실제 플레이 완료로 올려 쓰지 않는다.
 
 ### 이전 단계 이력
 

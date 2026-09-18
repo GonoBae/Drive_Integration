@@ -1,9 +1,11 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "SimCoreTurnSignals.h"
+#include "SimCoreVehicleAudio.h"
 #include "SimCoreNpcPresentationActor.h"
 #include "SimCoreDeformableBody.h"
 #include "SimCoreSedanVisualContract.h"
+#include "SimCoreSuspensionPresentation.h"
 #include "Components/PointLightComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/World.h"
@@ -67,14 +69,32 @@ bool FSimCoreAuthoredTurnSignalTest::RunTest(const FString& Parameters)
 	State.PositionEnu = FVector3d(10,20,.85);
 	State.CollisionHalfLengthMeters = 2.2f; State.CollisionHalfWidthMeters = 1;
 	State.CollisionHalfHeightMeters = .75f; State.TurnIndicator = ETurnIndicator::Left;
-	State.SimulationTimeNs = 100000000;
+	State.SimulationTimeNs = 695000000;
 	bool Ok = TestTrue(TEXT("real NPC snapshot applies"), Actor->ApplySnapshot(State,0,0,true,.15f,FVector::ZeroVector));
 	auto* SourceMaterial = FindSignalMaterial(Actor->GetBody());
 	Ok &= TestTrue(TEXT("authored source lens blinks left independently"), HasSignalValues(SourceMaterial,1,0));
 	TArray<UStaticMeshComponent*> Meshes;
 	Actor->GetComponents(Meshes);
+	int32 BodyWheelCabinMeshCount = 0;
+	int32 SuspensionMeshCount = 0;
+	for (UStaticMeshComponent* Mesh : Meshes)
+	{
+		if (Cast<USimCoreSuspensionPresentation>(Mesh->GetAttachParent()))
+		{
+			++SuspensionMeshCount;
+			Ok &= TestTrue(TEXT("added frame meshes have no collision, overlap or physics authority"),
+				Mesh->GetCollisionEnabled() == ECollisionEnabled::NoCollision
+				&& !Mesh->GetGenerateOverlapEvents() && !Mesh->IsSimulatingPhysics());
+		}
+		else
+		{
+			++BodyWheelCabinMeshCount;
+		}
+	}
 	Ok &= TestEqual(TEXT("body, wheels and the authored cabin interior exist"),
-		Meshes.Num(), 17);
+		BodyWheelCabinMeshCount, 17);
+	Ok &= TestTrue(TEXT("suspension is a separate presentation group, not an extra lamp mesh"),
+		SuspensionMeshCount > 0);
 	TArray<UPointLightComponent*> Lights;
 	Actor->GetComponents(Lights);
 	Ok &= TestEqual(TEXT("at most four actual local lamps"), Lights.Num(),4);
@@ -116,7 +136,7 @@ bool FSimCoreAuthoredTurnSignalTest::RunTest(const FString& Parameters)
 	}
 	Ok &= TestTrue(TEXT("sedan default can be restored after a vehicle model swap"),
 		Signals->SetLampPositions(SedanProfile));
-	Signals->UpdateSignal(ETurnIndicator::Left,.5,false);
+	Signals->UpdateSignal(ETurnIndicator::Left,1.195,false);
 	Ok &= TestTrue(TEXT("blink off does not leave emissive amber on"), HasSignalValues(SourceMaterial,0,0));
 	Signals->UpdateSignal(ETurnIndicator::Right,.1,false);
 	Ok &= TestTrue(TEXT("opposite selection remains independent"), HasSignalValues(SourceMaterial,0,1));
@@ -149,6 +169,179 @@ bool FSimCoreAuthoredTurnSignalTest::RunTest(const FString& Parameters)
 	Signals->UpdateSignal(ETurnIndicator::Off,.1,false);
 	Ok &= TestTrue(TEXT("reset can extinguish both visible bodies"), HasSignalValues(SourceMaterial,0,0) && HasSignalValues(DeformedMaterial,0,0));
 	for (auto* Light : Lights) Ok &= TestFalse(TEXT("reset extinguishes local light"),Light->IsVisible());
+	return Ok;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSimCoreSelectedTurnSignalPhaseTest,
+	"DriveIntegration.Presentation.TurnSignals.SelectionRelativeFullCycle",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSimCoreSelectedTurnSignalPhaseTest::RunTest(const FString& Parameters)
+{
+	using SimCoreProtocol::ETurnIndicator;
+	bool Ok = true;
+	for (double Start : {0.0, 0.43, 0.69, 17.395, 86400.719})
+	{
+		SimCoreTurnSignals::FPhaseClock Clock;
+		for (int32 Cycle = 0; Cycle < 3; ++Cycle)
+		{
+			for (double Offset : {0.0, 0.43, 0.45, 0.71})
+			{
+				const double Relative = Cycle * SimCoreTurnSignals::PeriodSeconds + Offset;
+				const double Phase = Clock.Update(ETurnIndicator::Left, Start + Relative, false);
+				Ok &= TestTrue(TEXT("phase starts at the selection, independent of absolute world time"),
+					FMath::IsNearlyEqual(Phase, Relative, 1.e-9));
+				Ok &= TestEqual(TEXT("first and later flashes have the same complete on/off intervals"),
+					USimCoreTurnSignals::IsLit(ETurnIndicator::Left, true, Phase, false), Offset < 0.44);
+			}
+		}
+	}
+	SimCoreTurnSignals::FPhaseClock Clock;
+	Clock.Update(ETurnIndicator::Left, 20.3, false);
+	Clock.Update(ETurnIndicator::Left, 20.8, false);
+	Ok &= TestEqual(TEXT("switching direction begins a full new flash"), Clock.Update(ETurnIndicator::Right, 20.8, false), 0.0);
+	Ok &= TestEqual(TEXT("entering hazards begins both lamps together"), Clock.Update(ETurnIndicator::Off, 20.9, true), 0.0);
+	Ok &= TestEqual(TEXT("paused game clock preserves its exact phase"), Clock.Update(ETurnIndicator::Off, 20.9, true), 0.0);
+	Clock.Update(ETurnIndicator::Off, 21.4, true);
+	Ok &= TestTrue(TEXT("small snapshot-time correction cannot restart a flash"),
+		FMath::IsNearlyEqual(Clock.Update(ETurnIndicator::Off, 21.39, true), 0.5, 1.e-9));
+	Clock.Update(ETurnIndicator::Off, 21.4, false);
+	Ok &= TestEqual(TEXT("cancel and reselect does not inherit the old off interval"), Clock.Update(ETurnIndicator::Left, 21.5, false), 0.0);
+	Ok &= TestEqual(TEXT("new Play clock rebases without a negative or global phase"), Clock.Update(ETurnIndicator::Left, 0.0, false), 0.0);
+	return Ok;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSimCorePlayerIndicatorAutoCancelTest,
+	"DriveIntegration.Presentation.TurnSignals.PlayerTurnThenCentreCancels",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSimCorePlayerIndicatorAutoCancelTest::RunTest(const FString& Parameters)
+{
+	using namespace SimCoreProtocol;
+	bool Ok = true;
+	for (const ETurnIndicator Direction : {ETurnIndicator::Left, ETurnIndicator::Right})
+	{
+		SimCoreTurnSignals::FAutoCancel Cancel;
+		SimCoreTurnSignals::FPhaseClock Clock;
+		SimCoreVehicleAudio::FIndicatorClicks Clicks;
+		FVehicleState State;
+		State.PlaySessionId = TEXT("auto-cancel");
+		State.LinearVelocityBody.X = 8.0;
+		const float Side = Direction == ETurnIndicator::Left ? 1.0f : -1.0f;
+		// Both directions cross compass north to exercise the 359/0 wrap.
+		State.HeadingDegrees = Side > 0 ? 2.0f : 358.0f;
+		const float StartHeading = State.HeadingDegrees;
+		Ok &= TestFalse(TEXT("selection alone does not cancel"), Cancel.Update(Direction, false, State, true));
+		Clock.Update(Direction, 17.395, false);
+		Ok &= TestTrue(TEXT("first relay edge remains selection-relative"),
+			Clicks.Update(Direction, Clock.GetElapsedSeconds(), false) == SimCoreVehicleAudio::EIndicatorClick::On);
+		for (int32 Step = 1; Step <= 3; ++Step)
+		{
+			State.SimulationTimeNs = Step * 100000000ull;
+			State.HeadingDegrees = FMath::Fmod(StartHeading - Side * Step * 3.0f + 360.0f, 360.0f);
+			State.SteeringAngleRad = Side * 0.2f;
+			Ok &= TestFalse(TEXT("actual 9-degree turn arms but does not extinguish a held rack"),
+				Cancel.Update(Direction, false, State, true));
+		}
+		State.SimulationTimeNs = 400000000;
+		State.SteeringAngleRad = Side * 0.05f;
+		Ok &= TestFalse(TEXT("returning near centre is not yet centred"), Cancel.Update(Direction, false, State, true));
+		State.SimulationTimeNs = 500000000;
+		State.SteeringAngleRad = Side * 0.02f;
+		Ok &= TestTrue(TEXT("a meaningful selected turn cancels only after rack centre return"),
+			Cancel.Update(Direction, false, State, true));
+		const double OffPhase = Clock.Update(ETurnIndicator::Off, 17.895, false);
+		Ok &= TestFalse(TEXT("automatic cancellation extinguishes the left lamp on the same frame"),
+			USimCoreTurnSignals::IsLit(ETurnIndicator::Off, true, OffPhase, false));
+		Ok &= TestFalse(TEXT("automatic cancellation extinguishes the right lamp on the same frame"),
+			USimCoreTurnSignals::IsLit(ETurnIndicator::Off, false, OffPhase, false));
+		Ok &= TestTrue(TEXT("cancelled stalk cannot leave phantom relay clicks"),
+			Clicks.Update(ETurnIndicator::Off, OffPhase, false) == SimCoreVehicleAudio::EIndicatorClick::None);
+	}
+	return Ok;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSimCorePlayerIndicatorAutoCancelGuardTest,
+	"DriveIntegration.Presentation.TurnSignals.PlayerAutoCancelMotionGuards",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSimCorePlayerIndicatorAutoCancelGuardTest::RunTest(const FString& Parameters)
+{
+	using namespace SimCoreProtocol;
+	bool Ok = true;
+	// speed, rack, total selected heading change: none completes a genuine turn.
+	for (const FVector3d Case : {FVector3d(0, .3, 20), FVector3d(-3, .3, 20),
+		FVector3d(8, .06, 20), FVector3d(8, -.3, 20), FVector3d(8, .3, 4)})
+	{
+		SimCoreTurnSignals::FAutoCancel Cancel;
+		FVehicleState State;
+		State.PlaySessionId = TEXT("guard");
+		State.LinearVelocityBody.X = Case.X;
+		for (int32 Step = 0; Step <= 5; ++Step)
+		{
+			State.SimulationTimeNs = Step * 100000000ull;
+			State.SteeringAngleRad = Step < 5 ? static_cast<float>(Case.Y) : 0.0f;
+			State.HeadingDegrees = static_cast<float>(90 - Case.Z * FMath::Min(Step, 4) / 4.0);
+			Ok &= TestFalse(TEXT("parked, reverse, light/opposite steering and tiny turns retain the stalk"),
+				Cancel.Update(ETurnIndicator::Left, false, State, true));
+		}
+	}
+	return Ok;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSimCorePlayerIndicatorAutoCancelResetTest,
+	"DriveIntegration.Presentation.TurnSignals.PlayerAutoCancelLifecycleGuards",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSimCorePlayerIndicatorAutoCancelResetTest::RunTest(const FString& Parameters)
+{
+	using namespace SimCoreProtocol;
+	bool Ok = true;
+	for (int32 Case = 0; Case < 8; ++Case)
+	{
+		SimCoreTurnSignals::FAutoCancel Cancel;
+		FVehicleState State;
+		State.PlaySessionId = TEXT("old-play");
+		State.LinearVelocityBody.X = 5;
+		State.SteeringAngleRad = .2f;
+		State.HeadingDegrees = 90;
+		Cancel.Update(ETurnIndicator::Left, false, State, true);
+		State.SimulationTimeNs = 100000000;
+		State.HeadingDegrees = 80;
+		Cancel.Update(ETurnIndicator::Left, false, State, true);
+		State.SimulationTimeNs = 200000000;
+		State.SteeringAngleRad = 0;
+		ETurnIndicator Direction = ETurnIndicator::Left;
+		bool bHazard = false, bFresh = true;
+		switch (Case)
+		{
+		case 0: bHazard = true; break;
+		case 1: Direction = ETurnIndicator::Right; break;
+		case 2: bFresh = false; break;
+		case 3: State.PlaySessionId = TEXT("new-play"); break;
+		case 4: State.SimulationTimeNs = 50000000; break;
+		case 5: State.SimulationTimeNs = 1000000000; break;
+		case 6: Cancel.Reset(); break; // off/on of the same stalk between frames
+		case 7: Direction = ETurnIndicator::Off; break;
+		}
+		Ok &= TestFalse(TEXT("hazard, reselection, stale state, new Play and clock discontinuity cannot reuse a prior turn"),
+			Cancel.Update(Direction, bHazard, State, bFresh));
+		State.SimulationTimeNs += 100000000;
+		Ok &= TestFalse(TEXT("a fresh centred rack still needs a new selected turn after reset"),
+			Cancel.Update(ETurnIndicator::Left, false, State, true));
+	}
+	SimCoreTurnSignals::FAutoCancel Cancel;
+	FVehicleState State;
+	State.PlaySessionId = TEXT("pause-stop"); State.LinearVelocityBody.X = 5;
+	State.SteeringAngleRad = .2f; State.HeadingDegrees = 90;
+	Cancel.Update(ETurnIndicator::Left, false, State, true);
+	State.SimulationTimeNs = 100000000; State.HeadingDegrees = 80;
+	Cancel.Update(ETurnIndicator::Left, false, State, true);
+	State.SteeringAngleRad = 0;
+	Ok &= TestFalse(TEXT("paused/repeated packet cannot complete a return to centre"),
+		Cancel.Update(ETurnIndicator::Left, false, State, true));
+	State.SimulationTimeNs = 200000000; State.LinearVelocityBody.X = 0;
+	Ok &= TestFalse(TEXT("stopping mid-turn does not cancel while parked"),
+		Cancel.Update(ETurnIndicator::Left, false, State, true));
+	State.SimulationTimeNs = 300000000; State.LinearVelocityBody.X = 5;
+	Ok &= TestTrue(TEXT("a previously completed turn may cancel once forward motion resumes centred"),
+		Cancel.Update(ETurnIndicator::Left, false, State, true));
 	return Ok;
 }
 #endif

@@ -11,20 +11,20 @@ Unreal `/Game/SignalCity/Maps/L_SignalCity`에서 측정한 로컬 ENU MapPackag
 
 ## 검증된 생성물
 
-2026-09-03 보호된 3차로 migration, 실제 Ground Bake와 traffic export로 생성한 값이다.
+2026-09-08 v7 원본 검사·백업 후 북부 확장 v8 저장, Ground Bake와 traffic export로 생성한 값이다.
 차량·보행자 전체 자동/PIE 인수는 해당 실행의 작업일지에서 별도로 확인한다.
 
 | 항목 | 값 |
 |---|---:|
 | map identity | `signal_city_v2` |
-| collision checksum | `fnv1a64:86c3103f3e2c7a5b` |
-| traffic network checksum | `fnv1a64:b19c15afba6936d7` |
-| 저장 scene box | 613 |
-| Ground component | 124 |
-| static OBB collider | 49 |
-| QA route checkpoint | 394 |
-| heightfield | `401 × 481`, 50cm spacing |
-| traffic lane | 58 (24개 좌/직/우 전용 접근 차로 포함) |
+| collision checksum | `fnv1a64:2232cb521030ae4f` |
+| traffic network checksum | `fnv1a64:f74f3fc490a002f2` |
+| 저장 scene box | 3262 |
+| Ground component | 1694 |
+| static OBB collider | 623(연석616·건물7) |
+| QA route checkpoint | 839 |
+| heightfield | `661 × 481`, 50cm spacing |
+| traffic lane | 59 (24개 좌/직/우 전용 접근 차로와 북부 루프 포함) |
 | runtime signal head | 16 (차량8·보행8) |
 | signal controller | 2 |
 | NPC / pedestrian | 10 / 8 |
@@ -58,8 +58,8 @@ payload 목록에 임의로 추가하지 않는다.
   검증한 뒤 collision snapshot과 traffic JSON을 생성한다.
 - C++ server만 phase plan과 simulation clock으로 authoritative aspect/countdown을 계산한다.
   Unreal의 runtime signal head는 `NoCollision` 표시 actor이며 로컬 주기를 만들지 않는다.
-- controller 1과 2는 각각 72초 cycle과 0초·14초 offset을 사용한다. 한 방향의 좌/직/우는
-  공동 보호 현시이며 다른 차량 방향은 모두 적색이다. 독립된 18초 WALK 중에는 같은
+- controller 1과 2는 각각 116초 cycle과 0초·14초 offset을 사용한다. 직진·우회전과
+  좌회전은 서로 다른 보호 그룹을 사용한다. 독립된 24초 WALK 중에는 같은
   교차로의 모든 차량이 적색이다. 동시에 허용하는 서로 다른 group은 보행자 전용뿐이다.
 - `cpp/host/config/signal_city_server.cfg`는 NPC10대를 시작 offset 19m·90m 간격으로 두 초기 loop에
   배치한다. 이후 도달 가능한 목적지를 선택하고 전용차로·합법적 인접 변경 구간을 이용한다.
@@ -67,7 +67,7 @@ payload 목록에 임의로 추가하지 않는다.
 - 횡단보도/정지선은 교차로 중심에서 각각 15m/18.5m 밖이며 controlled lane은 18m
   앞에서 끝난다. 보행자는 보도 위 대기점에서 시작한다. 양방향 offset ±0.45m와
   반경 0.35m를 포함한 전체 대기 몸체가 보도 안이며 NPC footprint와 겹치지 않아야 한다.
-  18초 WALK의 남은 시간이 23m 횡단 시간(약 17.04초)+0.2초보다 짧으면 새 출발을 막는다.
+  24초 WALK의 남은 시간이 체형별 23m 횡단 시간(약 17.04~23초)+0.2초보다 짧으면 새 출발을 막는다.
 
 ## 재생성 규칙
 

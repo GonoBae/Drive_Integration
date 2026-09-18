@@ -227,6 +227,7 @@ void fill_runtime_entity_state(simcore::EntityState& entity,
             > static_cast<unsigned>(RuntimeVehicleClass::Motorcycle)
         || (state.kind != RuntimeEntityKind::NpcVehicle
             && state.horn_event_sequence != 0)
+        || (state.kind != RuntimeEntityKind::NpcVehicle && state.npc_local_bypass_active)
         || (state.kind != RuntimeEntityKind::NpcVehicle
             && state.vehicle_class != RuntimeVehicleClass::Unspecified)
         || !std::isfinite(state.vertical_velocity_mps) || std::abs(state.vertical_velocity_mps) > 100.0
@@ -245,6 +246,7 @@ void fill_runtime_entity_state(simcore::EntityState& entity,
     entity.set_pedestrian_airborne(state.pedestrian_airborne);
     entity.set_turn_indicator(static_cast<simcore::TurnIndicator>(state.turn_indicator));
     entity.set_horn_event_sequence(state.horn_event_sequence);
+    entity.set_npc_local_bypass_active(state.npc_local_bypass_active);
     entity.set_runtime_vehicle_class(
         static_cast<simcore::RuntimeVehicleClass>(state.vehicle_class));
     if (state.kind == RuntimeEntityKind::Pedestrian && !state.dent_patches.empty())
@@ -463,14 +465,43 @@ std::string serialize_world_state_envelope(
         std::map<std::uint32_t, PermittedGroups> permitted_groups_by_controller;
         std::map<std::pair<std::uint32_t, std::uint32_t>,
                  std::pair<std::uint32_t, double>> group_states;
+        const auto register_movement = [&](const TrafficSignalSnapshot& signal,
+                                           std::uint32_t group, std::uint32_t aspect, double remaining) {
+            if (aspect == 2 || aspect == 3) {
+                auto& permitted = permitted_groups_by_controller[signal.controller_id];
+                permitted.groups.insert(group);
+                permitted.has_vehicle_head = permitted.has_vehicle_head || signal.kind == TrafficSignalKind::Vehicle;
+                if (permitted.groups.size() > 1 && permitted.has_vehicle_head) {
+                    throw std::invalid_argument("conflicting traffic groups must never proceed together");
+                }
+            }
+            const auto group_key = std::pair{signal.controller_id, group};
+            const auto existing = group_states.find(group_key);
+            if (!signal.out_of_service && existing != group_states.end()
+                && (existing->second.first != aspect || std::abs(existing->second.second - remaining) > .001)) {
+                throw std::invalid_argument("signal heads in one group must agree");
+            }
+            if (!signal.out_of_service) group_states[group_key] = {aspect, remaining};
+        };
         for (const auto& signal : traffic_signals) {
             const auto aspect = static_cast<std::uint32_t>(signal.aspect);
             const auto signal_kind = static_cast<std::uint32_t>(signal.kind);
+            const auto left_aspect = static_cast<std::uint32_t>(signal.left_aspect);
             if (signal.id == 0 || signal.group_id < 1 || signal.group_id > 4096
                 || signal.controller_id < 1 || signal.controller_id > 64
                 || aspect > 3 || signal_kind < 1 || signal_kind > 2
                 || (signal.out_of_service
                     && (signal.aspect != SignalAspect::Red || signal.remaining_seconds != 0.0))
+                || !std::isfinite(signal.left_remaining_seconds)
+                || signal.left_remaining_seconds < 0.0
+                || signal.left_remaining_seconds > kMaxTrafficSignalCountdownSeconds
+                || (signal.left_group_id == 0
+                    && (left_aspect != 0 || signal.left_remaining_seconds != 0.0))
+                || (signal.left_group_id != 0
+                    && (signal.left_group_id > 4096 || signal.left_group_id == signal.group_id
+                        || signal.kind != TrafficSignalKind::Vehicle || left_aspect < 1 || left_aspect > 3
+                        || (signal.out_of_service && (signal.left_aspect != SignalAspect::Red
+                            || signal.left_remaining_seconds != 0.0))))
                 || !std::isfinite(signal.heading_deg)
                 || signal.heading_deg < 0 || signal.heading_deg >= 360
                 || !std::isfinite(signal.remaining_seconds)
@@ -486,25 +517,9 @@ std::string serialize_world_state_envelope(
                 throw std::invalid_argument("invalid or duplicate traffic signal snapshot");
             }
             ids.push_back(signal.id);
-            if (aspect == 2 || aspect == 3) {
-                auto& permitted = permitted_groups_by_controller[signal.controller_id];
-                permitted.groups.insert(signal.group_id);
-                permitted.has_vehicle_head = permitted.has_vehicle_head || signal.kind == TrafficSignalKind::Vehicle;
-                if (permitted.groups.size() > 1 && permitted.has_vehicle_head) {
-                    throw std::invalid_argument("conflicting traffic groups must never proceed together");
-                }
-            }
-            const auto group_key = std::pair{signal.controller_id, signal.group_id};
-            const auto existing_group = group_states.find(group_key);
-            if (!signal.out_of_service && existing_group != group_states.end()
-                && (existing_group->second.first != aspect
-                    || std::abs(existing_group->second.second
-                                - signal.remaining_seconds) > .001)) {
-                throw std::invalid_argument("signal heads in one group must agree");
-            }
-            if (!signal.out_of_service) {
-                group_states[group_key] = {aspect, signal.remaining_seconds};
-            }
+            register_movement(signal, signal.group_id, aspect, signal.remaining_seconds);
+            if (signal.left_group_id != 0)
+                register_movement(signal, signal.left_group_id, left_aspect, signal.left_remaining_seconds);
             auto* target = world_state->add_traffic_signals();
             target->set_signal_id(signal.id);
             target->set_group_id(signal.group_id);
@@ -520,6 +535,9 @@ std::string serialize_world_state_envelope(
             target->set_controller_id(signal.controller_id);
             target->set_signal_kind(static_cast<simcore::TrafficSignalKind>(signal.kind));
             target->set_out_of_service(signal.out_of_service);
+            target->set_left_group_id(signal.left_group_id);
+            target->set_left_aspect(static_cast<simcore::TrafficSignalAspect>(left_aspect));
+            target->set_left_remaining_seconds(static_cast<float>(signal.left_remaining_seconds));
         }
     } else if (!traffic_network_checksum.empty()) {
         throw std::invalid_argument("traffic checksum without signal heads");

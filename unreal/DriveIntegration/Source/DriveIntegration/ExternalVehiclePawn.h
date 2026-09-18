@@ -5,6 +5,7 @@
 #include "SimCoreDamagePresentation.h"
 #include "SimCoreOrbitCamera.h"
 #include "SimCoreProtocol.h"
+#include "SimCoreTurnSignals.h"
 #include "ExternalVehiclePawn.generated.h"
 
 class UCameraComponent;
@@ -15,6 +16,7 @@ class USimCoreExhaustComponent;
 class USimCoreDriveReplayComponent;
 class USimCoreDriverPresentation;
 class USimCoreSensorRigComponent;
+class USimCoreSuspensionPresentation;
 class USimCoreVehicleAudioComponent;
 class USimCoreVehicleHornComponent;
 class USpringArmComponent;
@@ -80,13 +82,15 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Vehicle|Audio")
 	TObjectPtr<USimCoreVehicleAudioComponent> VehicleAudio;
 
-	// H plays one bounded, presentation-only positional horn pulse.
+	// H sustains the presentation-only positional horn until the key is released.
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Vehicle|Audio")
 	TObjectPtr<USimCoreVehicleHornComponent> VehicleHorn;
 
 	// Manny-based seated driver and interior; damage only changes its visible pose.
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Vehicle|Interior")
 	TObjectPtr<USimCoreDriverPresentation> DriverPresentation;
+	UPROPERTY(VisibleAnywhere, Category="Vehicle|Suspension")
+	TObjectPtr<USimCoreSuspensionPresentation> SuspensionPresentation;
 
 	// Presentation-only plume driven by authoritative engine telemetry.
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Vehicle|Effects")
@@ -158,6 +162,7 @@ private:
 	UPROPERTY(VisibleAnywhere)
 	TObjectPtr<class USimCoreTurnSignals> TurnSignals;
 	SimCoreProtocol::ETurnIndicator ManualIndicator = SimCoreProtocol::ETurnIndicator::Off;
+	SimCoreTurnSignals::FAutoCancel IndicatorAutoCancel;
 	bool bHazardLights = false;
 	void ToggleLeftIndicator();
 	void ToggleRightIndicator();

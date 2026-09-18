@@ -32,6 +32,8 @@ struct ChassisContactBox {
     double roll_inertia_kg_m2 = 0.0;
     double pitch_inertia_kg_m2 = 0.0;
     double yaw_inertia_kg_m2 = 0.0;
+    // Shape offset only; all contact moment arms remain measured from the CG.
+    double center_forward_offset_m = 0.0;
 };
 
 struct ChassisGroundContactResult {

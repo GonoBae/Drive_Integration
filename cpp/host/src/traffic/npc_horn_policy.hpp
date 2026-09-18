@@ -60,9 +60,7 @@ struct NpcHornState {
 // collision query or random source. A persistent obstruction may produce a
 // short reminder after each cooldown; one continuous imminent hazard produces
 // at most one event until its TTC leaves the hysteresis band. A nonresponsive
-// entity receives only one warning, including TTC warnings, until a different
-// nonzero entity is observed or the policy is reset. Missing observations do
-// not release that entity latch.
+// accident victim receives no warnings, including TTC warnings.
 class NpcHornPolicy {
 public:
     explicit NpcHornPolicy(NpcHornPolicyConfig config = {});
@@ -80,8 +78,6 @@ private:
     NpcHornPolicyConfig config_;
     NpcHornState state_;
     bool imminent_latched_ = false;
-    std::uint32_t nonresponsive_obstacle_id_ = 0;
-    bool nonresponsive_obstacle_warned_ = false;
 };
 
 } // namespace simcore_host

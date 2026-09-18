@@ -179,6 +179,56 @@ void test_rejected_queue_age_does_not_poison_sequence_state()
             "queue-age rejection must not advance the sequence high-water mark");
 }
 
+void test_gradually_queued_commands_do_not_refresh_the_lease()
+{
+    ControlLease lease(250ms, 100ms);
+    const auto start = ControlLease::Clock::time_point{};
+    require(lease.accept(command("manual", "slow-socket", 1, 1'000'000'000), start)
+                == ControlLeaseDecision::Accepted,
+            "initial command must acquire the lease");
+    require(lease.accept(command("manual", "slow-socket", 2, 1'010'000'000), start + 100ms)
+                == ControlLeaseDecision::Accepted,
+            "90ms of accumulated queue age remains within the limit");
+    for (std::uint64_t index = 2; index <= 10; ++index) {
+        require(lease.accept(command("manual", "slow-socket", index + 1,
+                            1'000'000'000 + index * 10'000'000),
+                            start + index * 100ms)
+                    == ControlLeaseDecision::ExcessiveQueueAge,
+                "small per-packet delays must not hide a growing backlog");
+    }
+    require(lease.update_timeout(start + 1000ms),
+            "rejected queued commands must not postpone SafeStop");
+    require(lease.accept(command("manual", "slow-socket", 12, 2'001'000'000), start + 1001ms)
+                == ControlLeaseDecision::Accepted && !lease.safe_stop_active(),
+            "a fresh same-session command must recover after backlog rejection");
+}
+
+void test_queue_age_recovers_and_resets_with_the_session()
+{
+    ControlLease lease(250ms, 100ms);
+    const auto start = ControlLease::Clock::time_point{};
+    require(lease.accept(command("manual", "a", 1, 1'000'000'000), start)
+                == ControlLeaseDecision::Accepted,
+            "queue recovery fixture must acquire control");
+    require(lease.accept(command("manual", "a", 2, 1'010'000'000), start + 110ms)
+                == ControlLeaseDecision::Accepted,
+            "queue age exactly at the limit must be accepted");
+    require(lease.accept(command("manual", "a", 3, 1'120'000'000), start + 120ms)
+                == ControlLeaseDecision::Accepted,
+            "catching up must remove accumulated queue age");
+    require(lease.accept(command("manual", "a", 4, 1'130'000'000), start + 220ms)
+                == ControlLeaseDecision::Accepted,
+            "a later independent jitter must not add already-recovered delay");
+    require(lease.reset_for_reconnect("manual", "b") == ControlLeaseResetDecision::Ready,
+            "reconnect must prepare a new timing baseline");
+    require(lease.accept(command("manual", "b", 1, 1'000), start + 230ms)
+                == ControlLeaseDecision::Accepted,
+            "a new client clock epoch must acquire immediately");
+    require(lease.accept(command("manual", "b", 2, 10'001'000), start + 330ms)
+                == ControlLeaseDecision::Accepted,
+            "new session queue age must not inherit the previous 90ms");
+}
+
 void test_new_simulation_retires_the_previous_control_session()
 {
     ControlLease lease(250ms, 100ms);
@@ -274,6 +324,8 @@ int main()
         test_new_session_can_acquire_only_after_hard_timeout();
         test_queue_age_is_rejected_before_timeout();
         test_required_identity_fields();
+        test_gradually_queued_commands_do_not_refresh_the_lease();
+        test_queue_age_recovers_and_resets_with_the_session();
         test_rejected_packet_does_not_poison_sequence_state();
         test_rejected_queue_age_does_not_poison_sequence_state();
         test_new_simulation_retires_the_previous_control_session();

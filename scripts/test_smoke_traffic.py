@@ -70,10 +70,47 @@ def world_state(expected, elapsed_ns=5 * SECOND_NS, status="active"):
                                          group_id=group, aspect=aspect,
                                          heading_deg=heading, remaining_seconds=remaining)
         head.position_enu.x, head.position_enu.y, head.position_enu.z = position
+        if identity in expected.left_groups:
+            head.left_group_id = expected.left_groups[identity]
+            head.left_aspect, head.left_remaining_seconds = expected_signal(
+                expected, controller, head.left_group_id, elapsed_ns, status == "active")
     return message
 
 
 class TrafficSmokeHelpersTest(unittest.IsolatedAsyncioTestCase):
+    def test_protected_left_phase_identity_and_safe_stop_are_independent(self):
+        source = json.loads(fixture_v2_bytes())
+        source["signals"][0]["left_group_id"] = 107
+        source["signal_plans"][0]["groups"].append(107)
+        source["signal_plans"][0]["phases"] += [
+            {"duration_ms": 2000, "green_groups": [107], "yellow_groups": []},
+            {"duration_ms": 1000, "green_groups": [], "yellow_groups": [107]},
+        ]
+        expected = network_expectations(json.dumps(source).encode())
+        self.assertIn((7, 107), expected.group_keys)
+        for time in (0, 2, 6, 8):
+            validate_world(world_state(expected, elapsed_ns=time * SECOND_NS), expected)
+        stopped = world_state(expected, elapsed_ns=6 * SECOND_NS, status="safe_stop")
+        validate_world(stopped, expected)
+        self.assertEqual(stopped.world_state.traffic_signals[0].left_aspect, pb.TRAFFIC_SIGNAL_RED)
+        self.assertEqual(stopped.world_state.traffic_signals[0].left_remaining_seconds, 0)
+        for field, value in (("left_group_id", 0), ("left_aspect", pb.TRAFFIC_SIGNAL_RED),
+                             ("left_remaining_seconds", float("nan"))):
+            message = world_state(expected, elapsed_ns=6 * SECOND_NS)
+            setattr(message.world_state.traffic_signals[0], field, value)
+            with self.assertRaisesRegex(AssertionError, "protected-left"):
+                validate_world(message, expected)
+        source["signals"][0]["kind"] = "pedestrian"
+        with self.assertRaisesRegex(AssertionError, "protected-left"):
+            network_expectations(json.dumps(source).encode())
+
+    def test_legacy_heads_must_not_invent_left_permission(self):
+        expected = network_expectations(fixture_bytes())
+        message = world_state(expected)
+        message.world_state.traffic_signals[0].left_aspect = pb.TRAFFIC_SIGNAL_GREEN
+        with self.assertRaisesRegex(AssertionError, "legacy head"):
+            validate_world(message, expected)
+
     async def test_foreign_server_receives_no_application_frames(self):
         expected = network_expectations(fixture_bytes())
         connection = FakeConnection(server_hello("foreign-server"))

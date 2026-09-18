@@ -54,6 +54,8 @@ struct TrafficSignal {
     std::uint32_t controller_id = 1;
     // Version 1 and omitted legacy values are vehicle heads.
     TrafficSignalKind kind = TrafficSignalKind::Vehicle;
+    // Optional protected-left movement on the same physical four-lens head.
+    std::uint32_t left_group_id = 0;
 };
 
 struct TrafficSignalSnapshot {
@@ -69,6 +71,9 @@ struct TrafficSignalSnapshot {
     std::uint32_t controller_id = 1;
     TrafficSignalKind kind = TrafficSignalKind::Vehicle;
     bool out_of_service = false;
+    std::uint32_t left_group_id = 0;
+    SignalAspect left_aspect = SignalAspect::Unknown;
+    double left_remaining_seconds = 0.0;
 };
 
 // format_version 2 stores phase timing in the network instead of relying on

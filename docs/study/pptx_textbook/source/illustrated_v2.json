@@ -1,0 +1,254 @@
+[
+  {
+    "lessonId": "L01",
+    "title": "시작 준비가 끝난 뒤 이벤트 루프가 틱을 호출합니다",
+    "afterPageId": "L01-02",
+    "reading": [
+      "위는 한 번 수행하는 준비이며 아직 차를 이동시키지 않습니다.",
+      "아래 틱은 입력·NPC·물리·발행을 차례로 연결합니다.",
+      "타이머와 소켓이 같은 주 이벤트 루프를 공유합니다."
+    ],
+    "sources": [
+      {
+        "path": "cpp/host/src/main.cpp",
+        "symbol": "run_simcore",
+        "start": 178,
+        "end": 413
+      },
+      {
+        "path": "cpp/host/src/simulation_host.cpp",
+        "symbol": "SimulationHost::schedule_tick",
+        "start": 607,
+        "end": 626
+      }
+    ],
+    "prompt": "Use case: scientific-educational. Create one clean 16:9 landscape raster textbook diagram on white background, navy text and outlines, teal data paths, orange key callback accents. Flat technical illustration with large legible English labels, generous whitespace. No title, no decorative elements, no branding. Explain a C++ simulation server from one-time startup to repeated tick. Top band labeled \"STARTUP\": three boxes \"main\" -> \"run_simcore\" -> \"ioc.run\"; under main small label \"Options\"; under run_simcore \"Files + objects\". Bottom major rounded container labeled \"MAIN EVENT LOOP\" shows two kinds of callback sharing a single loop: a small socket/packet icon labeled \"Socket callback\" and a timer icon labeled \"Timer callback\". Timer callback arrow enters a four-step horizontal sequence inside a light teal container labeled \"run_tick\": \"Validate input\" -> \"Prepare NPCs\" -> \"Vehicle physics\" -> \"Publish state\". Publish state ends in a small outgoing snapshot packet. Thin return arrow from completed run_tick to Timer callback labeled \"Schedule next\". Arrow from ioc.run down to the loop boundary means loop execution. Illustrate callbacks as sequential opportunities, never parallel execution threads. Do not connect Socket callback directly to physics or imply ioc.run runs once per tick. Only use listed English labels. All text large enough for slide reading.\nFinal accuracy edits:\nKeep the entire image, palette, all text, and layout unchanged except DELETE the teal right-pointing arrow immediately to the right of 'Socket callback' (the arrow at about x=450,y=495 pointing into run_tick). Leave white background in its place. Socket callback must NOT have an arrow into run_tick. Keep the Timer callback arrow to run_tick and every other arrow unchanged.",
+    "imageKey": "v2_L01",
+    "path": "assets/illustrated_v3/v2_L01.png",
+    "kind": "scientific-educational"
+  },
+  {
+    "lessonId": "L02",
+    "title": "물리 틱 한 번의 시간과 실제 기다린 시간은 다릅니다",
+    "afterPageId": "L02-01",
+    "reading": [
+      "60Hz의 한 틱은 물리 시간 약 16.67ms입니다.",
+      "아래 30ms는 한 틱 계산에 걸린 실제 시간의 교육용 예입니다.",
+      "놓친 마감을 건너뛰어도 완료한 물리 틱은 하나입니다."
+    ],
+    "sources": [
+      {
+        "path": "cpp/host/src/simulation_clock.hpp",
+        "symbol": "SimulationClock",
+        "start": 12,
+        "end": 77
+      },
+      {
+        "path": "cpp/host/src/simulation_host.cpp",
+        "symbol": "SimulationHost::run_tick",
+        "start": 628,
+        "end": 742
+      }
+    ],
+    "prompt": "Use case: scientific-educational. One accurate 16:9 landscape raster textbook diagram, white background, navy typography, teal simulation, orange wall-time delay. Flat technical illustration, spacious, no title or decoration. Compare two time quantities using separate clearly non-shared scales. Upper half labeled \"SIMULATION TIME\" has one large teal tile labeled \"One completed tick\" with a small car moving one short step; next to it the exact equation \"60 Hz: dt = 1/60 s\" and below \"16.67 ms\". Lower half labeled \"WALL TIME\" shows an orange task-duration bar from \"Start\" to \"Finish\", with label \"30 ms\" centered inside the bar and \"Illustrative example\" nearby. At the end of the bar, arrow to a clock icon labeled \"Next future deadline\". Gray dashed ticks inside the wall-time bar are crossed out lightly, with large label \"Skip missed deadlines\". A brace with text \"Still one physics tick\" connects the single upper tile conceptually to the full lower duration. Do not add catch-up ticks, extra physics tiles, numerical wall deadline positions or imply dt becomes 30 ms. Clear distinction: actual compute time can exceed fixed dt without adding completed physics ticks. Only listed labels and equations; no tiny text.\nFinal accuracy edits:\nKeep entire image, all large text, palette, layout unchanged except correct missed deadline marks inside the orange 30 ms wall-time bar. Remove ALL FOUR gray dashed tick marks and X marks. Add exactly ONE gray dashed mark with X at the midpoint of the bar. This is a schematic indicator of a missed deadline, not four separate deadlines. Do not alter any other part.",
+    "imageKey": "v2_L02",
+    "path": "assets/illustrated_v3/v2_L02.png",
+    "kind": "scientific-educational"
+  },
+  {
+    "lessonId": "L03",
+    "title": "새 입력의 검증과 입력 부재의 만료를 따로 읽습니다",
+    "afterPageId": "L03-02",
+    "reading": [
+      "위 명령은 세션·순서·시계·추가 지연을 모두 검사합니다.",
+      "유효 입력 부재가 250ms를 초과하면 안전 정지하고 권한은 남습니다.",
+      "같은 기준에서 1000ms를 초과하면 기존 권한을 폐기합니다."
+    ],
+    "sources": [
+      {
+        "path": "cpp/host/src/control/control_lease.hpp",
+        "symbol": "ControlLease",
+        "start": 51,
+        "end": 181
+      },
+      {
+        "path": "cpp/host/src/simulation_host_session.cpp",
+        "symbol": "SimulationHost::handle_simulation_reset",
+        "start": 412,
+        "end": 575
+      }
+    ],
+    "prompt": "Use case: scientific-educational. Create one 16:9 landscape raster textbook diagram, clean white background, navy large text, teal valid path, orange safety state. Flat precise diagram with generous whitespace. Upper band is a left-to-right chain labeled \"ARRIVING COMMAND\": packet -> four gates \"Session\" -> \"Sequence\" -> \"Client clock\" -> \"Extra delay\" -> green box \"Accept\". One shared downward red branch from gates labeled \"Reject\" clearly means failing any gate; no numerical values in upper band. Lower band labeled \"NO NEW VALID INPUT\" is a three-state horizontal timeline: \"Active\" -> \"SafeStop\" -> \"Retired\". Arrow Active to SafeStop labeled \"> 250 ms\". Arrow SafeStop to Retired labeled \"> 1000 ms\". A long bracket underneath both arrows labeled \"Wall time since last valid input\" makes clear both thresholds share the same origin, not cumulative durations. SafeStop box subtitle \"Keep session\"; Retired box subtitle \"Remove session\". Thin teal arrow from upper Accept to Active labeled \"Valid current session\" shows recovery only before retirement; do not connect Retired back to Active. Include small exact bottom label \"Transitions occur when checked\". Threshold comparison must be strictly greater than, never greater-or-equal. No extra icons except command packet and small clock. No watermarks or decorative objects.\nFinal accuracy edits:\nKeep entire image, all text, palette and layout unchanged except fix ONE arrow: the teal line from 'Accept' currently incorrectly ends at the top of 'SafeStop'. Extend its horizontal segment farther left and place its downward arrowhead at the TOP CENTER of the 'Active' box instead. The Accept arrow must end at Active, not SafeStop. Label 'Valid current session' stays. Do not add any arrow from Retired. Leave timeout arrows exactly as they are.\nEdit only the bottom bracket-like teal line UNDER the three state boxes. Completely DELETE that entire U-shaped teal line from beneath Active all the way to beneath Retired, including the erroneous upward arrowhead at Active. Leave white empty space in place. Keep the text 'Wall time since last valid input' unchanged. Preserve all other arrows and text unchanged, especially Accept to Active, Active to SafeStop and SafeStop to Retired. There must be no bottom line connecting Retired to Active.",
+    "imageKey": "v2_L03",
+    "path": "assets/illustrated_v3/v2_L03.png",
+    "kind": "scientific-educational"
+  },
+  {
+    "lessonId": "L04",
+    "title": "최신 대기는 교체해도 전송 중인 버퍼는 보존합니다",
+    "afterPageId": "L04-02",
+    "reading": [
+      "A가 전송 중일 때 대기 B는 C, D로 교체됩니다.",
+      "A 바이트는 쓰기 완료까지 보존하며 그 뒤 최신 D를 보냅니다.",
+      "오른쪽 message와 self 캡처가 완료까지 객체 수명을 잇습니다."
+    ],
+    "sources": [
+      {
+        "path": "cpp/host/src/websocket/ws_server.cpp",
+        "symbol": "WsSession::send_binary",
+        "start": 66,
+        "end": 90
+      },
+      {
+        "path": "cpp/host/src/websocket/ws_server.cpp",
+        "symbol": "WsSession::do_write",
+        "start": 177,
+        "end": 220
+      }
+    ],
+    "prompt": "Use case: scientific-educational. One 16:9 landscape raster educational diagram, white background, navy outlines, teal active data, orange replacement arrows, large sans-serif English labels. No title or decoration. Explain latest-wins state queue and async buffer lifetime. Left two-thirds show three sequential rows with columns labeled \"IN FLIGHT\" and \"WAITING\": first row teal packet \"A\" and pale orange packet \"B\"; second row same A and \"C\"; third row same A and \"D\". Vertical orange replacement arrow between B/C and C/D labeled once \"Replace waiting\". All A packets are within one long teal outline labeled \"Keep A unchanged\". Beneath rows a right-pointing arrow reads \"A completes\" leading to a new in-flight teal packet \"D\". The right third is a simple lifetime strip headed \"ASYNC LIFETIME\": line beginning \"async_write\", midpoint marker \"Function returns\", endpoint \"Callback completes\". Two solid horizontal ownership bands labeled \"message\" and \"self\" both span from start through callback completion, with caption \"Captured until completion\". Use no pointer syntax or tiny text. Do not suggest copying three A messages or modifying A; row arrangement is a progression over time, with small downward label \"Time\". Accurate queue policy is for driving state only, so put exact small label \"Driving state messages\" at top. No additional text.",
+    "imageKey": "v2_L04",
+    "path": "assets/illustrated_v3/v2_L04.png",
+    "kind": "scientific-educational"
+  },
+  {
+    "lessonId": "L07",
+    "title": "바퀴가 뜨면 구동 토크는 어떻게 달라질까요?",
+    "afterPageId": "L07-04",
+    "reading": [
+      "무하중 바퀴가 개방형 차동의 양쪽 토크를 제한합니다.",
+      "주황색 제동 반력은 접지·제동 한도 안에서 전달을 돕습니다.",
+      "D·R은 요구 방향을 바꾸며 공중에 접지력을 만들지 않습니다."
+    ],
+    "sources": [
+      {
+        "path": "cpp/host/src/physics/vehicle_physics.cpp",
+        "symbol": "VehiclePhysics::update",
+        "start": 1044,
+        "end": 1109
+      },
+      {
+        "path": "cpp/host/tests/signal_city_course_test.cpp",
+        "symbol": "test_reported_diagonal_curb_restart",
+        "start": 550,
+        "end": 614
+      }
+    ],
+    "prompt": "Use case: scientific-educational. Create one technically accurate wide 16:9 raster textbook diagram on white, navy outlines, teal drive torque paths, orange brake reaction. Large English labels, no title, no numerical values. Two equal side-by-side panels display a schematic rear axle viewed from behind, with central differential, two half-shafts, and two tires. In BOTH panels left tire is slightly above ground with clear gap, labeled \"Unloaded\"; right tire rests on a raised curb platform and is labeled \"Supported\". Upper input arrow into differential labeled \"Drive torque\". Left panel heading \"OPEN DIFFERENTIAL\": both half-shaft torque arrows tiny and equal, annotation \"Weak side limits both\". Right panel heading \"BRAKE ASSIST\": orange brake pad touches LEFT unloaded tire and curved orange torque arrow labeled \"Brake reaction\"; equal medium teal torque arrows on both half-shafts, annotation \"Limited shared torque\". RIGHT supported tire alone shows a ground contact patch; unloaded tire has NO contact patch or ground force arrow. Show a simple separate bottom strip with gear selector \"D / R\" and opposed horizontal arrows labeled \"Demand direction\", teaching forward/reverse demand, without implying lateral car force. Under right panel include \"Within tire grip + brake capacity\". No force arrows from air, no shafts connecting wheels across panels, no unlimited force, no mass values, no decorative details.",
+    "imageKey": "v2_L07",
+    "path": "assets/illustrated_v3/v2_L07.png",
+    "kind": "scientific-educational"
+  },
+  {
+    "lessonId": "L09",
+    "title": "차종 선택은 외형과 물리 자료를 함께 연결합니다",
+    "afterPageId": "L09-01",
+    "reading": [
+      "하나의 차종에서 시각 모델과 물리 프로필이 갈라집니다.",
+      "주황색 점은 자동차 네 접점과 오토바이 중심선 두 접점입니다.",
+      "휠베이스는 앞뒤 축 사이, 반지름은 휠 중심부터 잽니다."
+    ],
+    "sources": [
+      {
+        "path": "cpp/host/src/player_vehicle_profile.cpp",
+        "symbol": "make_player_vehicle_parameters",
+        "start": 29,
+        "end": 165
+      }
+    ],
+    "prompt": "Use case: scientific-educational. One clean 16:9 raster textbook diagram, white background, navy labels, teal arrows, orange contact points. A large centered top box \"Vehicle class\" branches downward into two clearly separated equal columns. Left heading \"VISUAL MODEL\": small clean side-view silhouettes of sedan, compact car, truck, motorcycle; no specific brand or logos. Right heading \"PHYSICS PROFILE\": four large labeled parameter cards \"Mass\", \"Wheelbase\", \"Tire radius\", \"Yaw inertia\" with meaningful minimal pictograms: balance weight; distance between front/rear axle center lines; wheel with radius line from center to rim not diameter; circular angular response arrow. Lower right shows two top-down schematic contact layouts with labels \"Car: four contacts\" and \"Motorcycle: centerline contacts\": car has four orange points forming a rectangle; motorcycle exactly two orange points in one fore-aft centerline, no duplicate side points. A wide subtle linking brace under the two columns labeled \"Consistent dimensions and class\". No numerical data, no performance claims, no wheel count confusion. Generous white space, all labels large, simple flat engineering illustration, no decorative elements or title.\nFinal accuracy edits:\nMake one localized technical correction. ONLY replace the pictogram inside the small 'Wheelbase' parameter card. It currently looks like two tires joined across an axle, misleadingly showing track width. Replace it with a tiny unmistakable SIDE VIEW outline of a car, with two CIRCULAR wheel profiles at front and rear, and a horizontal double-ended distance arrow below measuring from the front wheel CENTER vertical dashed line to the rear wheel CENTER vertical dashed line. Keep the word Wheelbase, its card boundaries, all other cards, diagrams, silhouettes, labels, colors, and composition unchanged. Do not depict tire treads viewed from the front. Wheelbase must unambiguously be fore-aft axle spacing in side view.",
+    "imageKey": "v2_L09",
+    "path": "assets/illustrated_v3/v2_L09.png",
+    "kind": "scientific-educational"
+  },
+  {
+    "lessonId": "L11",
+    "title": "경로 선택과 신호 앞 감속은 서로 다른 판단입니다",
+    "afterPageId": "L11-04",
+    "reading": [
+      "교육용 그래프는 길이 합이 작은 A→B→D의 80m를 고릅니다.",
+      "오른쪽 추종 제어는 경로가 있어도 빨간 신호 앞에서 감속합니다.",
+      "Turn intent는 예정한 교차로 회전이며 일반 곡률과 다릅니다."
+    ],
+    "sources": [
+      {
+        "path": "cpp/host/src/traffic/npc_route_planner.cpp",
+        "symbol": "NpcRoutePlanner::shortest_route",
+        "start": 70,
+        "end": 117
+      },
+      {
+        "path": "cpp/host/src/traffic/npc_lane_follower.cpp",
+        "symbol": "NpcLaneFollower::step",
+        "start": 551,
+        "end": 628
+      }
+    ],
+    "prompt": "Use case: scientific-educational. One clear wide 16:9 raster textbook diagram, white background, navy outlines/text, teal selected route, orange controls. Left half labeled \"ROUTE PLANNER\" and subtitle \"Illustrative lane graph\". Four circular lane nodes in diamond graph: A at left labeled \"A: 20 m\", B at upper middle \"B: 35 m\", C at lower middle \"C: 50 m\", D at right \"D: 25 m\". Directed links only A->B, A->C, B->D, C->D. Teal highlights exactly A->B->D; gray alternate A->C->D. Below graph two clean lines \"A → B → D = 80 m\" and \"A → C → D = 95 m\". Weights are node lengths, never edge weights. Arrow across center labeled \"Lane sequence\" leads to right half \"LANE FOLLOWER\". Right half is top-down T junction with small teal car approaching from bottom; the selected route bends left at junction. Car clearly stops BEFORE a transverse stop line below the junction. A traffic signal beside stop line has red lamp lit, labeled \"Stop line\". Orange directional turn icon near car labeled \"Turn intent\"; it indicates the planned left turn, not current yaw. Include one label \"Brake before red signal\". Do not portray car already crossing red signal, no spurious nodes/edges, no traffic timing claims. Large labels and whitespace, no title or decorative city.",
+    "imageKey": "v2_L11",
+    "path": "assets/illustrated_v3/v2_L11.png",
+    "kind": "scientific-educational"
+  },
+  {
+    "lessonId": "L13",
+    "title": "저장 상태를 보여 주는 재생과 물리를 다시 푸는 검증",
+    "afterPageId": "L13-02",
+    "reading": [
+      "위 ghost는 저장 snapshot으로 당시 경로를 표시합니다.",
+      "아래는 입력·외부 proxy·고정 조건으로 ego 물리를 다시 풉니다.",
+      "계산 결과와 기록 결과를 비교하며 전체 NPC 판단 재현은 아닙니다."
+    ],
+    "sources": [
+      {
+        "path": "cpp/host/src/replay/physics_replay.cpp",
+        "symbol": "PhysicsReplayRecorder::tick",
+        "start": 348,
+        "end": 370
+      },
+      {
+        "path": "cpp/host/src/replay/physics_replay.cpp",
+        "symbol": "verify_physics_replay",
+        "start": 392,
+        "end": 430
+      },
+      {
+        "path": "unreal/DriveIntegration/Source/DriveIntegration/SimCoreDriveReplay.h",
+        "symbol": "USimCoreDriveReplayComponent",
+        "start": 52,
+        "end": 75
+      }
+    ],
+    "prompt": "Use case: scientific-educational. Create one accurate 16:9 raster textbook comparison diagram, white background, navy large labels, teal dataflow, orange validation. Two horizontal lanes with generous whitespace. Top lane heading \"GHOST PLAYBACK\": archive icon \"Saved snapshots\" -> simple translucent car at three past positions \"Display saved path\". No physics engine in upper lane. Bottom lane heading \"EGO PHYSICS RERUN\": two input boxes stacked \"Recorded inputs\" and \"External proxies\" plus third compact box \"Same identity + fixed dt\", all three arrows feed one large box \"Vehicle physics\". Vehicle physics arrow to box \"Recomputed state\". That box and separate archive box \"Recorded result\" both have arrows entering a final orange comparison box \"Compare error\". Crucial: Recorded result must go ONLY to Compare error, never into Vehicle physics. Small schematic of ego car and one outlined obstacle car in the external proxies input clarifies recorded collision surroundings. Bottom footnote exact \"Ego under recorded external conditions\" in readable medium text. No numbers, no claim of whole-city determinism, no extra labels, no decorative gear cogs or title.",
+    "imageKey": "v2_L13",
+    "path": "assets/illustrated_v3/v2_L13.png",
+    "kind": "scientific-educational"
+  },
+  {
+    "lessonId": "L14",
+    "title": "같은 시점의 증거에서 검증 가능한 진단으로 이어 갑니다",
+    "afterPageId": "L14-02",
+    "reading": [
+      "같은 시점의 입력·health·접촉·Fz·Fx를 모읍니다.",
+      "가설을 구별할 검사를 고르고 같은 시작 상태에서 반복합니다.",
+      "첫 틱 힘과 이후 이동을 확인하고 결과와 한계를 남깁니다."
+    ],
+    "sources": [
+      {
+        "path": "cpp/host/src/simulation_host.cpp",
+        "symbol": "SimulationHost::run_tick",
+        "start": 679,
+        "end": 700
+      },
+      {
+        "path": "cpp/host/tests/signal_city_course_test.cpp",
+        "symbol": "test_reported_diagonal_curb_restart",
+        "start": 550,
+        "end": 614
+      }
+    ],
+    "prompt": "Use case: scientific-educational. One 16:9 clean raster textbook diagram on white, navy text, teal evidence and tests, orange hypotheses. No title, decorative filler or invented numeric measurements. Four large panels left-to-right joined by arrows, with clear headings \"OBSERVE\", \"HYPOTHESIZE\", \"TEST\", \"REPORT\". OBSERVE shows a small car stopped on curb next to a single aligned log card labeled \"Same instant\"; readable log field names only \"Input\", \"Health\", \"Contact\", \"Fz / Fx\" and explicit \"Unknown ≠ zero\". HYPOTHESIZE shows three candidate cards \"Expired input\", \"Wall contact\", \"Torque limit\"; connect observation arrow to all three rather than asserting one is true. TEST shows a compact two-stage sequence \"First-tick forces\" -> \"Motion + contact\" inside one panel and a loop arrow with label \"Same initial state\". REPORT shows a simple notebook card containing exactly \"Evidence\", \"Result\", \"Limits\". One thin teal feedback arrow from TEST back to HYPOTHESIZE beneath panels labeled \"Revise\". Distinguish facts from possible causes visually. Do not imply a passed distance check alone proves a physical fix, no success check mark on an untested hypothesis, all four headings and field text large and readable.",
+    "imageKey": "v2_L14",
+    "path": "assets/illustrated_v3/v2_L14.png",
+    "kind": "scientific-educational"
+  }
+]

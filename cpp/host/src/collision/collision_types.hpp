@@ -100,6 +100,9 @@ struct PlanarRigidBody {
     double heading_rate_rad_s = 0.0;
     double mass_kg = 0.0;
     double yaw_inertia_kg_m2 = 0.0;
+    // Local-forward distance from the OBB centre to the centre of mass.
+    // Linear velocity and yaw inertia refer to that centre of mass.
+    double center_of_mass_forward_offset_m = 0.0;
 };
 
 struct CollisionManifold {

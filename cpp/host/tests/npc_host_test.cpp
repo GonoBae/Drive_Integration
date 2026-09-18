@@ -426,7 +426,7 @@ void test_uncontacted_polyline_turn_does_not_create_impact_yaw(const CityFixture
     double previous_heading = 90.0;
     double previous_error = 150.0;
     bool passed_corner = false;
-    for (int tick = 0; tick < 90; ++tick) {
+    for (int tick = 0; tick < 300; ++tick) {
         if (tick % 30 == 0) client.control();
         const auto& expected = reference.step(1.0/60.0,{});
         harness.tick();
@@ -454,6 +454,134 @@ void test_uncontacted_polyline_turn_does_not_create_impact_yaw(const CityFixture
             "the healthy collision body must settle onto its actual route tangent after a sharp authored corner; error_deg="
                 + std::to_string(previous_error));
     }
+}
+
+void test_stationary_npc_does_not_finish_a_route_yaw_correction(const CityFixture& city,
+    bool crawling=false)
+{
+    auto config=city_config(city);
+    config.physics_frequency_hz=60.0;
+    config.ground_query=std::make_shared<const simcore_host::FlatGroundQuery>();
+    config.collision_world=std::make_shared<const simcore_host::CollisionWorld>();
+    auto network=std::make_shared<simcore_host::TrafficNetwork>();
+    network->source_map_checksum=config.map_package_checksum;
+    network->checksum="fnv1a64:123456789abcdef0";
+    const double heading=240.0*std::numbers::pi/180.0;
+    const double corner_offset=0.1;
+    network->lanes={{10,3.0,crawling ? 0.015 : 6.0,0,true,
+        {{100,100,0},{100+corner_offset,100,0},
+         {100+corner_offset+3.0*std::sin(heading),100+3.0*std::cos(heading),0}}, {}}};
+    config.traffic_network=network;
+    config.npc_route={10};
+    config.npc_route_loop=false;
+    config.npc_start_offset_m=crawling ? 0.09 : 0.0;
+    Harness harness(std::move(config));
+    Client client{harness,"npc-stationary-yaw",1};
+    client.open("npc-stationary-yaw-play");
+    client.control();
+    const auto body=[&] {
+        for (const auto& entity:harness.host.runtime_entities())
+            if (entity.entity_id==npc_id) return std::get<simcore_host::ObbPrism>(entity.collision_proxy.shape);
+        throw std::runtime_error("stationary-yaw NPC must retain its authoritative collision body");
+    };
+    auto previous=npc(harness.snapshot());
+    auto previous_body=body();
+    double stationary_yaw_step=0.0;
+    double maximum_crawl_curvature=0.0;
+    int stationary_frames=0,ordinary_curve_indicator_frames=0,crawl_frames=0;
+    for (int tick=0;tick<180;++tick) {
+        if (tick%30==0) client.control();
+        harness.tick();
+        const auto current=npc(harness.snapshot());
+        const auto current_body=body();
+        const double moved=std::hypot(current_body.center_enu.east_m-previous_body.center_enu.east_m,
+            current_body.center_enu.north_m-previous_body.center_enu.north_m);
+        const double yaw_step_rad=std::abs(std::remainder(current_body.heading_rad-previous_body.heading_rad,
+            2.0*std::numbers::pi));
+        if (crawling && moved>1.e-6 && moved<1.e-3) {
+            ++crawl_frames;
+            maximum_crawl_curvature=std::max(maximum_crawl_curvature,yaw_step_rad/moved);
+            require(yaw_step_rad<=moved/4.8+1.e-10,
+                "a crawling NPC may steer only as far as its travelled distance and turning radius permit");
+        }
+        if (tick>10 && moved<1.e-10) {
+            ++stationary_frames;
+            stationary_yaw_step=std::max(stationary_yaw_step,
+                std::abs(std::remainder(current.heading()-previous.heading(),360.0)));
+        }
+        ordinary_curve_indicator_frames+=current.turn_indicator()!=0;
+        require(current.collision_event_sequence()==0,
+            "the stationary-yaw fixture must not suppress a real collision impulse");
+        previous=current;
+        previous_body=current_body;
+    }
+    std::cout << "[NPC regression] stationary_frames=" << stationary_frames
+              << " max_stationary_yaw_step_deg=" << stationary_yaw_step
+              << " ordinary_curve_indicator_frames=" << ordinary_curve_indicator_frames
+              << " crawl_frames=" << crawl_frames << " maximum_crawl_curvature=" << maximum_crawl_curvature << "\n";
+    require(crawling ? crawl_frames>=100 : stationary_frames>=30 && stationary_yaw_step<1.e-8,
+        "a stopped NPC must not rotate in place to catch up with its route tangent");
+    require(ordinary_curve_indicator_frames==0,
+        "following a curve inside the same ordinary road is not a turn-signal intention");
+}
+
+void test_npc_keeps_turning_between_curve_vertices(const CityFixture& city)
+{
+    auto config = city_config(city);
+    config.physics_frequency_hz = 60.0;
+    config.ground_query = std::make_shared<const simcore_host::FlatGroundQuery>();
+    config.collision_world = std::make_shared<const simcore_host::CollisionWorld>();
+    auto network = std::make_shared<simcore_host::TrafficNetwork>();
+    network->source_map_checksum = config.map_package_checksum;
+    network->checksum = "fnv1a64:123456789abcdef0";
+    simcore_host::TrafficLane lane;
+    lane.id = 10;
+    lane.width_m = 4.0;
+    lane.speed_limit_mps = 6.0;
+    lane.terminal = true;
+    constexpr double radius_m = 20.0;
+    for (int point = 0; point <= 60; ++point) {
+        const double angle = point * std::numbers::pi / 60.0;
+        lane.points.push_back({100.0 + radius_m * (1.0 - std::cos(angle)),
+            100.0 + radius_m * std::sin(angle), 0.0});
+    }
+    network->lanes.push_back(std::move(lane));
+    config.traffic_network = network;
+    config.npc_route = {10};
+    config.npc_route_loop = false;
+    config.npc_start_offset_m = 5.0;
+    Harness harness(std::move(config));
+    Client client{harness, "npc-continuous-curve", 1};
+    client.open("npc-continuous-curve-play");
+    client.control();
+    auto previous = npc(harness.snapshot());
+    double minimum_rate = 100.0, maximum_rate = 0.0;
+    int steady_frames = 0, stopped_rotation_frames = 0;
+    for (int tick = 0; tick < 540; ++tick) {
+        if (tick % 20 == 0) client.control();
+        harness.tick();
+        const auto current = npc(harness.snapshot());
+        if (tick >= 300) {
+            const double yaw_rate = std::remainder(current.heading() - previous.heading(), 360.0)
+                * std::numbers::pi / 180.0 * 60.0;
+            ++steady_frames;
+            stopped_rotation_frames += std::abs(yaw_rate) < 1.e-4;
+            minimum_rate = std::min(minimum_rate, yaw_rate);
+            maximum_rate = std::max(maximum_rate, yaw_rate);
+            require(current.speed() > 5.9f && current.collision_event_sequence() == 0,
+                "continuous turn fixture must remain driving without a contact or stop");
+            require(current.turn_indicator() == 0,
+                "an ordinary curve must not become a junction/merge indication");
+        }
+        previous = current;
+    }
+    std::cout << "[NPC regression] continuous_curve_frames=" << steady_frames
+              << " stopped_rotation_frames=" << stopped_rotation_frames
+              << " yaw_rate_min_rad_s=" << minimum_rate
+              << " yaw_rate_max_rad_s=" << maximum_rate << "\n";
+    require(steady_frames == 240 && stopped_rotation_frames == 0
+            && minimum_rate > 0.20 && maximum_rate < 0.40,
+        "a moving NPC on a 20m curve must keep turning near v/r, not pulse at each vertex");
 }
 
 void test_new_play_resets_but_same_play_reconnect_keeps_progress(const CityFixture& city)
@@ -1755,6 +1883,15 @@ int main(int argc, char** argv)
             return 0;
         }
         const CityFixture city;
+        if (argc == 2 && std::string_view(argv[1]) == "--continuous-yaw") {
+            test_npc_keeps_turning_between_curve_vertices(city);
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--stationary-yaw") {
+            test_stationary_npc_does_not_finish_a_route_yaw_correction(city);
+            test_stationary_npc_does_not_finish_a_route_yaw_correction(city,true);
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--pedestrian-walk") {
             test_pedestrian_pair_waits_for_and_moves_on_walk(city);
             return 0;
@@ -1776,6 +1913,7 @@ int main(int argc, char** argv)
             return 0;
         }
         test_real_city_spawn_and_exactly_one_npc_advance(city);
+        test_npc_keeps_turning_between_curve_vertices(city);
         test_uncontacted_polyline_turn_does_not_create_impact_yaw(city);
         test_new_play_resets_but_same_play_reconnect_keeps_progress(city);
         test_soft_timeout_freezes_and_fresh_control_resumes(city);

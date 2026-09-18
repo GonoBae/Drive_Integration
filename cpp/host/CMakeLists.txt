@@ -93,6 +93,7 @@ add_library(simcore_traffic
     src/traffic/npc_horn_policy.cpp
     src/traffic/npc_route_planner.cpp
     src/traffic/npc_lane_change.cpp
+    src/traffic/npc_local_bypass.cpp
     src/traffic/impact_recovery.cpp
     src/traffic/pedestrian_impact.cpp
     src/traffic/impact_tumble.cpp
@@ -202,6 +203,9 @@ if(BUILD_TESTING)
     )
     add_test(NAME npc_host_tests COMMAND npc_host_tests)
     add_test(NAME npc_return_curve_tests COMMAND npc_host_tests --return-curve)
+    add_test(NAME npc_stopped_yaw_tests COMMAND npc_host_tests --stationary-yaw)
+    add_test(NAME npc_continuous_yaw_tests COMMAND npc_host_tests --continuous-yaw)
+    set_tests_properties(npc_continuous_yaw_tests PROPERTIES TIMEOUT 30)
     add_test(NAME npc_lateral_recovery_tests COMMAND npc_host_tests --lateral-recovery)
     set_tests_properties(npc_lateral_recovery_tests PROPERTIES TIMEOUT 40)
     add_executable(npc_navigation_host_tests tests/npc_navigation_host_test.cpp)
@@ -210,7 +214,15 @@ if(BUILD_TESTING)
         SIMCORE_TEST_SIGNAL_CITY_MAP_PACKAGE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../map_packages/signal_city_v2"
     )
     add_test(NAME npc_navigation_host_tests COMMAND npc_navigation_host_tests)
+    add_executable(npc_search_budget_tests tests/npc_search_budget_test.cpp)
+    target_link_libraries(npc_search_budget_tests PRIVATE simcore_host_core)
+    add_test(NAME npc_search_budget_tests COMMAND npc_search_budget_tests)
+    set_tests_properties(npc_search_budget_tests PROPERTIES TIMEOUT 15)
     set_tests_properties(npc_navigation_host_tests PROPERTIES TIMEOUT 45)
+    add_test(NAME npc_interrupted_maneuver_tests COMMAND npc_navigation_host_tests --interrupted-maneuver)
+    set_tests_properties(npc_interrupted_maneuver_tests PROPERTIES TIMEOUT 90)
+    add_test(NAME npc_interrupted_local_bypass_tests COMMAND npc_navigation_host_tests --interrupted-local-bypass)
+    set_tests_properties(npc_interrupted_local_bypass_tests PROPERTIES TIMEOUT 60)
     add_test(NAME npc_delayed_crash_bypass_tests COMMAND npc_navigation_host_tests --delayed-crash)
     set_tests_properties(npc_delayed_crash_bypass_tests PROPERTIES TIMEOUT 30)
     add_test(NAME npc_mixed_fleet_tests COMMAND npc_navigation_host_tests --mixed-fleet)
@@ -223,6 +235,12 @@ if(BUILD_TESTING)
     set_tests_properties(npc_downed_stopline_escape_tests PROPERTIES TIMEOUT 60)
     add_test(NAME npc_downed_rear_blocked_tests COMMAND npc_navigation_host_tests --downed-rear-blocked)
     set_tests_properties(npc_downed_rear_blocked_tests PROPERTIES TIMEOUT 30)
+    add_test(NAME npc_crashed_stopline_escape_tests COMMAND npc_navigation_host_tests --crashed-stopline)
+    add_test(NAME npc_local_curve_truck_tests COMMAND npc_navigation_host_tests --local-bypass)
+    add_test(NAME npc_close_curve_truck_tests COMMAND npc_navigation_host_tests --close-curve-truck)
+    set_tests_properties(npc_close_curve_truck_tests PROPERTIES TIMEOUT 90)
+    set_tests_properties(npc_local_curve_truck_tests PROPERTIES TIMEOUT 90)
+    set_tests_properties(npc_crashed_stopline_escape_tests PROPERTIES TIMEOUT 60)
     add_executable(motorcycle_physics_tests tests/motorcycle_physics_test.cpp)
     target_link_libraries(motorcycle_physics_tests PRIVATE simcore_host_core)
     add_test(NAME motorcycle_physics_tests COMMAND motorcycle_physics_tests)
@@ -238,6 +256,9 @@ if(BUILD_TESTING)
     add_executable(npc_lane_change_tests tests/npc_lane_change_test.cpp)
     target_link_libraries(npc_lane_change_tests PRIVATE simcore_traffic)
     add_test(NAME npc_lane_change_tests COMMAND npc_lane_change_tests)
+    add_executable(npc_local_bypass_tests tests/npc_local_bypass_test.cpp)
+    target_link_libraries(npc_local_bypass_tests PRIVATE simcore_traffic)
+    add_test(NAME npc_local_bypass_tests COMMAND npc_local_bypass_tests)
     add_executable(impact_recovery_tests tests/impact_recovery_test.cpp)
     target_link_libraries(impact_recovery_tests PRIVATE simcore_traffic)
     add_test(NAME impact_recovery_tests COMMAND impact_recovery_tests)
@@ -311,6 +332,7 @@ if(BUILD_TESTING)
 
     add_executable(signal_city_course_tests
         tests/signal_city_course_test.cpp
+        src/player_vehicle_profile.cpp
     )
 
     target_link_libraries(signal_city_course_tests PRIVATE

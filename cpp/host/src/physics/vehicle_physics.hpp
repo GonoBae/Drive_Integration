@@ -130,6 +130,9 @@ public:
         double dt,
         std::vector<simcore_host::KinematicCollisionProxy> dynamic_proxies);
     VehicleState get_state() const;
+    [[nodiscard]] bool ground_coverage_limited() const noexcept {
+        return ground_coverage_limited_;
+    }
     const std::vector<simcore_host::KinematicCollisionProxy>&
         get_last_resolved_dynamic_proxies() const noexcept
     {
@@ -146,6 +149,24 @@ public:
         get_wheel_contact_support_diagnostics() const;
 
 private:
+    struct SupportedPoseSnapshot;
+    struct DriveForceStep {
+        float force_n;
+        bool suppressed;
+    };
+    SupportedPoseSnapshot capture_supported_pose() const;
+    bool has_supported_ground_coverage() const;
+    void restore_supported_pose_and_stop(
+        const SupportedPoseSnapshot& snapshot,
+        double timestamp,
+        VehicleGear gear,
+        float solver_steering_angle,
+        const std::array<float, 4>& solver_wheel_steering_angles);
+    DriveForceStep advance_drive_force(const VehicleInput& input, float gear_sign, float dt_seconds);
+    float advance_steering(const VehicleInput& input, float dt_seconds);
+    void update_powertrain_telemetry(const VehicleInput& input, float dt_seconds);
+    void commit_wheel_support_feedback(
+        const std::array<double, 4>& tick_hard_stop_impulses, double dt);
     void refresh_runtime_tire_supports(
         const std::vector<simcore_host::KinematicCollisionProxy>& proxies);
     bool update_wheel_contacts(float dt_seconds, bool update_suspension,
@@ -201,6 +222,7 @@ private:
     // contact sample. This is distinct from suspension contact so map coverage
     // loss is not confused with a wheel that is merely above full droop.
     std::size_t ground_query_hit_count_ = 0;
+    bool ground_coverage_limited_ = false;
     // Per-corner authored-surface coverage from the same final contact sample.
     // A complete axle or side leaving the finite MapPackage is terminal for
     // this ground-bound reduced model, not an airborne state that may continue

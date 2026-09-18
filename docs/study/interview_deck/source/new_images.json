@@ -1,0 +1,183 @@
+{
+  "new_cover": {
+    "prompt": "Use case: stylized-concept\nAsset type: original cover raster illustration for an Unreal client interview-prep PowerPoint.\nPrimary request: an illustrative cutaway blue sedan with exactly four wheels, shown at three-quarter angle on a quiet stylized miniature city road. Suggest engineering contacts at all four wheels using restrained teal highlights, and a graceful trail of a few packet-like blocks connecting the car to a small server device.\nComposition: wide 16:9, the car and city occupy the RIGHT half and right two-thirds. Keep the LEFT third mostly empty pure white for a separately authored Korean title. No literal diagrams or dense overlay. The wheels and some suspension should be understandable without looking like a disassembled car.\nStyle: polished light editorial 3D illustration, matte navy-blue car, white city buildings, restrained teal and orange details, calm lighting, generous whitespace. Not a photo, not an actual Unreal screenshot, not product evidence.\nText: absolutely no text, numbers, logos or watermarks.",
+    "readingHints": [
+      "설명용 일러스트이며 프로젝트의 실제 화면이 아니다.",
+      "오른쪽 차량의 네 바퀴 접점과 서버로 이어지는 상태 패킷을 본다.",
+      "왼쪽 빈 공간은 별도 작성한 제목 영역이다."
+    ],
+    "path": "assets/new_cover.png",
+    "kind": "교육용 개념도",
+    "edits": [],
+    "tool": "built-in imagegen",
+    "generatedOriginal": "C:\\Users\\PC\\.codex\\generated_images\\01a07fba-7ce1-71d3-8bdc-c3b83969304d\\exec-fc964dc2-6f39-4570-ad58-13bbe7b133ed.png",
+    "visualReview": {
+      "status": "reviewed",
+      "scope": "생성 이미지의 라벨·구성·핵심 개념 관계를 시각 검토했다. 실제 프로젝트 화면 또는 실행 증거가 아니다."
+    }
+  },
+  "new_map": {
+    "prompt": "Use case: scientific-educational\nAsset type: original raster illustration for a Korean Unreal client interview study PowerPoint. Image occupies about 70% of a slide.\nStyle: polished editorial engineering illustration with clean forms and subtle isometric depth, not a screenshot or photograph. Pure white background, navy typography and outlines, teal primary accents, restrained orange for problems or limits. Wide 16:9 landscape composition, generous margin, very large readable short English labels only. Do not add a slide title, tiny captions, watermarks, logos, fabricated benchmarks, or dense boxes.\nPrimary request: an illustrated learning path with exactly FIVE large stations in left-to-right order, linked by a gentle path with five numbered stepping stones 1 to 5. The station icons are (1) books and memory blocks, (2) packet blocks crossing a simple connection, (3) a game controller with a small blue car, (4) a wheel touching ground with force arrows, (5) a magnifier over a bug and a short evidence sheet. No dense boxes or small text.\nText (verbatim), placed once each beneath the corresponding station in very large sans-serif type: \"1 Foundations\", \"2 Data contract\", \"3 Unreal client\", \"4 Simulation\", \"5 Evidence\".\nConstraints: exactly five stations, numbers in correct order; no invented course duration, credentials, ratings or pass marks. All icons receive similar visual weight. Explain a learning sequence, not actual project architecture.",
+    "readingHints": [
+      "왼쪽 1번부터 오른쪽 5번까지 학습 순서를 읽는다.",
+      "기초→데이터 계약→Unreal 표시·입력→시뮬레이션→증거의 순서다."
+    ],
+    "path": "assets/new_map.png",
+    "kind": "교육용 개념도",
+    "edits": [],
+    "tool": "built-in imagegen",
+    "generatedOriginal": "C:\\Users\\PC\\.codex\\generated_images\\01a07fba-7ce1-71d3-8bdc-c3b83969304d\\exec-884c05da-0590-4da2-95b0-5d9c115c2e89.png",
+    "visualReview": {
+      "status": "reviewed",
+      "scope": "생성 이미지의 라벨·구성·핵심 개념 관계를 시각 검토했다. 실제 프로젝트 화면 또는 실행 증거가 아니다."
+    }
+  },
+  "new_gc": {
+    "prompt": "Use case: scientific-educational\nAsset type: original raster illustration for a Korean Unreal client interview study PowerPoint. Image occupies about 70% of a slide.\nStyle: polished editorial engineering illustration with clean forms and subtle isometric depth, not a screenshot or photograph. Pure white background, navy typography and outlines, teal primary accents, restrained orange for problems or limits. Wide 16:9 landscape composition, generous margin, very large readable short English labels only. Do not add a slide title, tiny captions, watermarks, logos, fabricated benchmarks, or dense boxes.\nPrimary request: explain Unreal UObject strong and weak references accurately in TWO clearly separated horizontal panels. TOP panel: a navy owner block visibly anchored to a small root symbol and large label \"ROOTED OWNER\" on the left. One thick solid teal tracked-reference arrow labeled \"UPROPERTY / TObjectPtr\" connects the rooted owner to ONE teal object labeled \"UObject\" on the right. A smaller gray observer below the owner has one dashed gray arrow labeled \"TWeakObjectPtr\" to the SAME UObject; label the observer \"Weak observer\". Label above top panel \"Tracked reference\".\nLOWER panel: show the solid owner-to-object arrow disconnected by a visible small gap, with label \"Last strong reference removed\". The SAME object remains drawn intact but pale, labeled \"Eligible for GC\". Keep a dashed weak-observer arrow that does not restore a strong connection. To the right, a clock is labeled \"Next GC\". Include the large concise sentence \"Weak does not keep alive\". The time arrow leads from the intact eligible object toward the Next GC clock; do not make the object instantly explode, vanish, or be destroyed at the removal step.\nOne small but readable label \"Conceptual\" in a corner. Constraints: TObjectPtr strong reachability here is explicitly a reflected UPROPERTY on a rooted owner; do not imply every raw pointer or every arbitrary TObjectPtr variable is a GC root. Use large labels, very few objects, generous whitespace.",
+    "readingHints": [
+      "위쪽에서는 루트에 연결된 소유자의 추적 참조가 UObject를 도달 가능하게 한다.",
+      "점선 TWeakObjectPtr는 관찰용이며 객체 수명을 연장하지 않는다.",
+      "마지막 강한 참조가 끊어진 직후 파괴된다는 뜻이 아니다. 아래쪽 시계는 이후 GC 시점을 뜻한다."
+    ],
+    "path": "assets/new_gc.png",
+    "kind": "교육용 개념도",
+    "edits": [],
+    "tool": "built-in imagegen",
+    "generatedOriginal": "C:\\Users\\PC\\.codex\\generated_images\\01a07fba-7ce1-71d3-8bdc-c3b83969304d\\exec-fdec38df-06c0-47b6-b5e6-956bf4a334c4.png",
+    "visualReview": {
+      "status": "reviewed",
+      "scope": "생성 이미지의 라벨·구성·핵심 개념 관계를 시각 검토했다. 실제 프로젝트 화면 또는 실행 증거가 아니다."
+    }
+  },
+  "new_interp": {
+    "prompt": "Use case: scientific-educational\nAsset type: original raster illustration for a Korean Unreal client interview study PowerPoint. Image occupies about 70% of a slide.\nStyle: polished editorial engineering illustration with clean forms and subtle isometric depth, not a screenshot or photograph. Pure white background, navy typography and outlines, teal primary accents, restrained orange for problems or limits. Wide 16:9 landscape composition, generous margin, very large readable short English labels only. Do not add a slide title, tiny captions, watermarks, logos, fabricated benchmarks, or dense boxes.\nPrimary request: a precise conceptual comparison of interpolation and capped extrapolation, in two separate spacious horizontal time-versus-position diagram rows. Each row uses a minimalist navy horizontal time axis, with no measured numeric values.\nTOP row labeled \"Interpolation\": show two filled teal KNOWN snapshot points at t0 and t1; t0 is to the left, t1 to the right. A thinner teal straight segment joins them. A single orange displayed estimate sits clearly BETWEEN the two known points and WITHIN the interval. Large labels \"t0\", \"t1\", \"Known\", \"Between snapshots\". No part of the interpolation estimate is past t1.\nBOTTOM row labeled \"Extrapolation\": show filled teal known t0 then t1, with a short solid known segment ending at t1. From t1 extend an ORANGE DASHED estimate into the future to a bold vertical stop bar labeled \"Cap\". The dashed estimate STOPS exactly at the Cap; there is no continuation beyond it. Label dashed part \"Estimated future\". The region past t1 represents an unknown actual future: use only a small question mark and label \"Actual future unknown\", not a solid measured future path.\nConstraints: both time axes flow right; interpolation uses known endpoints while extrapolation extends after the latest known endpoint. Do not add timestamps in milliseconds, speed values, fake measurement curves, spline overshoot, or performance claims. Large labels with clear separation.",
+    "readingHints": [
+      "위쪽 주황 점은 이미 알고 있는 t0와 t1 사이에 놓인다.",
+      "아래쪽 점선은 마지막 수신 이후의 추정이며 Cap에서 멈춘다.",
+      "미래의 실제 위치는 관측된 것처럼 그리지 않았다."
+    ],
+    "path": "assets/new_interp.png",
+    "kind": "교육용 개념도",
+    "edits": [
+      {
+        "prompt": "Use case: precise-object-edit\nInput image: edit target, the interpolation/extrapolation educational diagram.\nChange ONLY the faint gray DASHED LINE to the RIGHT of the orange Cap stop bar in the lower Extrapolation panel: erase that entire gray line, leaving pure white whitespace between the Cap and the question mark. Keep the question mark and the exact label 'Actual future unknown'. The orange dashed estimate must end at the orange Cap; absolutely no estimate line may continue past Cap.\nPreserve everything else exactly: both panels, axes, known points, t0/t1 placement, colors, large labels, upper interpolation point between snapshots, dimensions and typography. Do not create any new lines, text, decoration or future measured points.",
+        "input": "C:\\Users\\PC\\.codex\\generated_images\\01a07fba-7ce1-71d3-8bdc-c3b83969304d\\exec-34a3cbdd-ddaa-46b0-a6d5-c228e7936ccc.png"
+      }
+    ],
+    "tool": "built-in imagegen",
+    "generatedOriginal": "C:\\Users\\PC\\.codex\\generated_images\\01a07fba-7ce1-71d3-8bdc-c3b83969304d\\exec-a2df77d7-2762-4988-826f-e5a2bc010ff2.png",
+    "visualReview": {
+      "status": "reviewed",
+      "scope": "생성 이미지의 라벨·구성·핵심 개념 관계를 시각 검토했다. 실제 프로젝트 화면 또는 실행 증거가 아니다."
+    }
+  },
+  "new_replay": {
+    "prompt": "Use case: scientific-educational\nAsset type: original raster illustration for a Korean Unreal client interview study PowerPoint. Image occupies about 70% of a slide.\nStyle: polished editorial engineering illustration with clean forms and subtle isometric depth, not a screenshot or photograph. Pure white background, navy typography and outlines, teal primary accents, restrained orange for problems or limits. Wide 16:9 landscape composition, generous margin, very large readable short English labels only. Do not add a slide title, tiny captions, watermarks, logos, fabricated benchmarks, or dense boxes.\nPrimary request: side-by-side schematic cutaway views of the SAME recorded sedan pose on flat ground, illustrating a coordinate-semantics replay bug and its fix. LEFT titled \"Wrong: NPC center\"; RIGHT titled \"Correct: Player CG\". Both panels have an identical horizontal ground line at the same vertical height and the SAME CYAN crosshair world marker at exactly 0.55 m ABOVE the ground, labeled \"Recorded CG: 0.55 m\" in each panel. This marker must not move between panels.\nLEFT: the recorded player center-of-mass coordinate has incorrectly been interpreted as NPC collision-box center, lowering the rendered sedan; show the lower vehicle partially below a cutaway ground surface. A short orange vertical dimension points from the ground line to the buried lowest model extent, labeled \"Model bottom: -0.30 m\". RIGHT: the same blue sedan is rendered using the recorded player center-of-mass semantics and the player's own model origin, so the tires contact flat ground naturally. In each car draw a small orange square for MODEL ORIGIN, visually DISTINCT from the cyan crosshair for RECORDED CG. Add only these two legend labels: \"CG\" (cyan crosshair) and \"Model origin\" (orange square).\nLarge lower label: \"Flat-ground example\". A small readable label \"Conceptual\".\nConstraints: the FIX is a change of coordinate interpretation, NOT adding a constant height and NOT snapping a replay to today's terrain. Do not draw upward corrective movement arrows, +0.30 m correction text or a ground raycast. Keep identical recorded CG and ground coordinates between panels. Representative schematic, not an actual screenshot.",
+    "readingHints": [
+      "두 패널의 청록색 기록 CG와 지면 높이는 같다.",
+      "왼쪽은 CG 값을 NPC 충돌 중심으로 해석해 모델을 내린 경우다.",
+      "오른쪽은 플레이어 CG와 모델 원점 의미를 보존한 결과이며 고정 높이 보정이 아니다.",
+      "0.55m와 −0.30m는 문서에 기록된 세단 평지 예시다."
+    ],
+    "path": "assets/new_replay.png",
+    "kind": "교육용 개념도",
+    "edits": [
+      {
+        "prompt": "Use case: precise-object-edit\nInput image: edit target, the two-panel sedan replay-coordinate diagram.\nFix ONLY the vertical position of the CYAN RECORDED CG CROSSHAIR in the LEFT panel. Move this one cyan crosshair UP to EXACTLY the same horizontal level as the cyan CG crosshair in the RIGHT panel. In this image the right marker is around y=436, while the left is around y=475; raise the left to the right marker's level. Shorten the left cyan dashed leader accordingly. Both recorded CG markers must have exactly equal distance above their identical ground lines because the recorded world CG is unchanged.\nPreserve the left car's buried position, right car's tires on ground, both ground lines, orange Model origin squares, all text including both 'Recorded CG: 0.55 m' labels and 'Model bottom: -0.30 m', cars, colors, layout and typography. Do not move either car, either orange model-origin square or the right cyan marker. Do not add corrective arrows or imply a constant height fix. A CG world marker need not remain attached to the wrongly positioned car model.",
+        "input": "C:\\Users\\PC\\.codex\\generated_images\\01a07fba-7ce1-71d3-8bdc-c3b83969304d\\exec-702dbbb0-0fd0-4122-823c-6b19f787bcfe.png"
+      },
+      {
+        "prompt": "Use case: precise-object-edit\nEdit target: the current two-panel sedan replay illustration.\nThe two cyan CG crosshairs are incorrectly floating above both roofs. Move BOTH cyan crosshair symbols DOWN INSIDE the passenger cabins, to the exact same horizontal line across panels. Place the RIGHT crosshair over the middle of the driver seat, about halfway vertically between the right car roof and the orange Model origin square. Place the LEFT crosshair at EXACTLY the same height above its ground line as that right crosshair: it will appear in the upper half of the driver's window because the left car model is lowered. Each cyan crosshair must be BELOW the roof, ABOVE its orange square, and visibly OVER the car cabin. Keep the long cyan dashed leader from each 'Recorded CG: 0.55 m' text label down to that cabin crosshair. The text labels stay above the cars; the crosshair symbols must no longer appear immediately beneath the text labels or outside the roofs.\nPreserve both car positions and sizes, flat ground at the same height, left car burial, right tires contact, both orange model-origin squares, exact same CG height across panels, all other labels and colors. No movement arrows, added heights or other changes.",
+        "input": "C:\\Users\\PC\\.codex\\generated_images\\01a07fba-7ce1-71d3-8bdc-c3b83969304d\\exec-2a3ce930-7568-49ee-a358-901e16e9a62d.png"
+      },
+      {
+        "prompt": "Use case: precise-object-edit\nEdit target: this two-panel sedan diagram. Make a small precision edit to establish one COMMON WORLD CG HEIGHT. Draw ONE thin cyan HORIZONTAL DASHED REFERENCE LINE through the existing LEFT cyan CG crosshair center and continuing perfectly straight through BOTH panels at that exact height. The line must be horizontal and parallel to the shared flat ground. Keep the LEFT cyan CG crosshair exactly where it is. Move the RIGHT cyan CG crosshair DOWN onto this shared cyan horizontal line so both crosshair centers lie ON the SAME line. Keep both vertical leaders from the 'Recorded CG: 0.55 m' labels. Add the short cyan label 'Same recorded CG' to the horizontal line in the center gap, if readable. Both markers are inside the cabins, not above the roofs.\nAlso restore the removed LEFT-panel orange annotation 'Model bottom: -0.30 m' with a short vertical dimension from the ground to the bottom of its buried tire. Do not move the left buried car, right grounded car, orange model origins, ground lines, existing text, legend or any other geometry. The only moved object is the RIGHT CYAN CROSSHAIR, which moves down to the fixed horizontal line through the left cyan crosshair. No upward vehicle correction arrows, no constant-height-fix claim. Preserve wide 16:9 and clean white/navy/teal/orange style.",
+        "input": "C:\\Users\\PC\\.codex\\generated_images\\01a07fba-7ce1-71d3-8bdc-c3b83969304d\\exec-bb569b07-2ae9-46eb-b5cd-6012248df755.png"
+      }
+    ],
+    "tool": "built-in imagegen",
+    "generatedOriginal": "C:\\Users\\PC\\.codex\\generated_images\\01a07fba-7ce1-71d3-8bdc-c3b83969304d\\exec-34f7673a-db25-4a4c-a97b-787186aebacc.png",
+    "visualReview": {
+      "status": "reviewed",
+      "scope": "생성 이미지의 라벨·구성·핵심 개념 관계를 시각 검토했다. 실제 프로젝트 화면 또는 실행 증거가 아니다.",
+      "note": "공통 수평 CG 기준선으로 두 패널의 기록 높이를 일치시켰고 −0.30m 매몰 예시를 복구했다."
+    }
+  },
+  "new_truck": {
+    "prompt": "Use case: scientific-educational\nAsset type: original raster illustration for a Korean Unreal client interview study PowerPoint. Image occupies about 70% of a slide.\nStyle: polished editorial engineering illustration with clean forms and subtle isometric depth, not a screenshot or photograph. Pure white background, navy typography and outlines, teal primary accents, restrained orange for problems or limits. Wide 16:9 landscape composition, generous margin, very large readable short English labels only. Do not add a slide title, tiny captions, watermarks, logos, fabricated benchmarks, or dense boxes.\nPrimary request: side-by-side schematic comparisons of one identical blue delivery truck and its collision box, before and after box-to-model alignment. Left title \"Before\" and right title \"After\". Identical scale, three-quarter view, identical truck geometry and position relative to ground. LEFT: show a visibly OVERSIZED translucent orange wireframe rectangular collision box. RIGHT: show a teal wireframe rectangular collision box fitting the truck body's overall outer envelope, not individual concave details. These are conceptual illustrations, not screenshots.\nVery large text below each panel: left \"7.30 × 2.44 × 2.50 m\", right \"6.20 × 2.10 × 1.93 m\". Use these numbers exactly. In both panels mark the vehicle's center of mass with the same cyan crosshair labeled \"CG\". In the RIGHT panel mark the aligned box/model center with a clearly distinct orange square labeled \"Box center\"; the aligned box center is 15 cm rearward and 70.5 cm above the player's CG. Use a single spacious lower explanatory callout \"Center offset matters\" with subtle directional arrows, and optional large \"15 cm rear / 70.5 cm up\" if it fits without crowding.\nConstraints: resizing alone is not the whole fix, so make CG and Box center unmistakably different. Do not shift the truck's CG or imply vehicle mass, steering, axles, mesh asset, or collision torque integration origin changed. Do not depict a sophisticated concave collider. Keep all wheels recognizable and ground contact plausible. Label \"Conceptual\".",
+    "readingHints": [
+      "왼쪽 주황 상자는 이전 충돌 범위, 오른쪽 청록 상자는 모델 외곽에 맞춘 범위다.",
+      "하단 별도 좌표 개념도의 CG와 충돌 상자 중심은 서로 다른 점이다. 트럭 위의 실제 좌표를 계측한 그림은 아니다.",
+      "크기 축소와 중심 이동을 함께 다뤘으며 무게중심 자체를 옮긴 것은 아니다."
+    ],
+    "path": "assets/new_truck.png",
+    "kind": "교육용 개념도",
+    "edits": [
+      {
+        "prompt": "Use case: precise-object-edit\nInput image: edit target, the two-panel truck collision-box alignment diagram.\nFix ONLY the explanatory markers drawn over the trucks, so the orange Box center is geometrically at the CENTER of the teal rectangular collision box, not high near its roof. Place the orange square approximately at the visible center of the right teal box (around x=1275,y=369). Move the right cyan CG crosshair to a LOWER point near the central chassis (around x=1245,y=486). The orange box-center is slightly REARWARD (screen-right because the truck faces left) and above the cyan CG. Move the LEFT cyan CG to the identical corresponding point on the left truck, near its central chassis (around x=417,y=486), preserving the SAME CG location between before and after. Move their CG labels alongside the markers. Redraw the thin dashed orange vertical/horizontal explanatory offset arrows only between the new distinct CG and box-center positions, with existing labels '70.5 cm' and '15 cm' if they fit. The point labeled Box center must actually lie at the projected center of the teal box.\nPreserve both truck meshes, their poses and ground positions, both box wireframes, sizes, all titles, dimension text, the lower 'Center offset matters' callout, the '15 cm rear / 70.5 cm up' sentence, white/navy/teal/orange style. Do not change truck CG physically; these are corrected drawing markers. Do not add new numbers or alter the box or truck silhouette.",
+        "input": "C:\\Users\\PC\\.codex\\generated_images\\01a07fba-7ce1-71d3-8bdc-c3b83969304d\\exec-dedec18a-cc78-45a7-b5d3-1dc9cb86fdca.png"
+      },
+      {
+        "prompt": "Use case: precise-object-edit\nEdit target: the truck collision-box comparison.\nThe CG/box-center markers over the trucks are misleadingly positioned. Remove ALL cyan CG crosshairs, CG labels, orange Box center square/text and 15 cm/70.5 cm arrows currently over either truck. Keep both trucks and their wireframe boxes completely unchanged. Instead, revise ONLY the BOTTOM callout panel: use a simple separate coordinate-inset on its LEFT, a cyan crosshair labeled 'CG' at the inset lower-left and an orange square labeled 'Box center' slightly to its right and ABOVE it. Thin gray arrows show rightward 'Rear' and upward 'Up'. These inset marks are schematic reference points NOT drawn on a truck. On the RIGHT side of the bottom callout use the large exact text 'Center offset matters' and below it '15 cm rear / 70.5 cm up'. This clean inset conveys distinct reference centers without falsely locating them on the illustrative truck.\nPreserve titles Before/After, all truck shapes, positions and shadows, orange/teal wireframe boxes, exact dimensions '7.30 × 2.44 × 2.50 m' and '6.20 × 2.10 × 1.93 m', conceptual label, pure white background and overall wide layout. Do not add numbers, axes in physical units, or change collision dimensions.",
+        "input": "C:\\Users\\PC\\.codex\\generated_images\\01a07fba-7ce1-71d3-8bdc-c3b83969304d\\exec-ffb2f4d2-1b99-486e-8388-dd65181de230.png"
+      }
+    ],
+    "tool": "built-in imagegen",
+    "generatedOriginal": "C:\\Users\\PC\\.codex\\generated_images\\01a07fba-7ce1-71d3-8bdc-c3b83969304d\\exec-ac577dde-c9d1-4bd4-8062-f2c82765eae6.png",
+    "visualReview": {
+      "status": "reviewed",
+      "scope": "생성 이미지의 라벨·구성·핵심 개념 관계를 시각 검토했다. 실제 프로젝트 화면 또는 실행 증거가 아니다.",
+      "note": "CG와 상자 중심의 관계는 하단 별도 좌표 개념도로 표시한다."
+    }
+  },
+  "new_yaw": {
+    "prompt": "Use case: scientific-educational\nAsset type: original raster illustration for a Korean Unreal client interview study PowerPoint. Image occupies about 70% of a slide.\nStyle: polished editorial engineering illustration with clean forms and subtle isometric depth, not a screenshot or photograph. Pure white background, navy typography and outlines, teal primary accents, restrained orange for problems or limits. Wide 16:9 landscape composition, generous margin, very large readable short English labels only. Do not add a slide title, tiny captions, watermarks, logos, fabricated benchmarks, or dense boxes.\nPrimary request: two vertically separated TOP-DOWN diagrams comparing vehicle orientation along the EXACT SAME polyline driving path. Top row title \"Before: segment heading\"; bottom row title \"After: tangent blend\". Each row must have the identical navy path made of a long horizontal segment, one clearly visible diagonal segment forming a corner, then a long horizontal segment. Both paths have SHARP geometric vertices; never smooth or round the drawn path itself. Show four small blue top-down cars at the SAME corresponding MOVING positions along both copies of the path, spread before, near, and after a corner. Every car has a clear forward arrow on its roof. TOP: orientations match the active segment direction and therefore change abruptly at the vertex. BOTTOM: orientations blend neighboring tangents only in a short teal-highlighted neighborhood near the vertex; cars far along the straight segments retain the original straight orientation. Add one callout \"Same path, smoother heading\" and a bracket labeled \"Near corner only\" over the localized blended neighborhood.\nConstraints: geometric path and car positions must match across panels. Do not draw a new curved trajectory, detour, circular arrows around a stationary car, in-place spin, extra roads, changed signal logic, or numeric angular-acceleration claims. The vehicle keeps moving along its existing path. At most four cars per row, same sizes and colors. Label \"Conceptual\".",
+    "readingHints": [
+      "두 줄의 경로와 대응하는 차량 위치는 같다.",
+      "변경한 것은 꼭짓점 주변의 목표 방향이며 경로 위치 자체는 바꾸지 않았다.",
+      "차량은 이동 중이며 정지 상태의 제자리 회전을 설명하는 그림이 아니다."
+    ],
+    "path": "assets/new_yaw.png",
+    "kind": "교육용 개념도",
+    "edits": [],
+    "tool": "built-in imagegen",
+    "generatedOriginal": "C:\\Users\\PC\\.codex\\generated_images\\01a07fba-7ce1-71d3-8bdc-c3b83969304d\\exec-f9e2e597-c865-482a-9f76-c1020368523d.png",
+    "visualReview": {
+      "status": "reviewed",
+      "scope": "생성 이미지의 라벨·구성·핵심 개념 관계를 시각 검토했다. 실제 프로젝트 화면 또는 실행 증거가 아니다."
+    }
+  },
+  "new_profile": {
+    "prompt": "Use case: scientific-educational\nAsset type: original raster illustration for a Korean Unreal client interview study PowerPoint. Image occupies about 70% of a slide.\nStyle: polished editorial engineering illustration with clean forms and subtle isometric depth, not a screenshot or photograph. Pure white background, navy typography and outlines, teal primary accents, restrained orange for problems or limits. Wide 16:9 landscape composition, generous margin, very large readable short English labels only. Do not add a slide title, tiny captions, watermarks, logos, fabricated benchmarks, or dense boxes.\nPrimary request: explain three DISTINCT timing measurements without pretending to be recorded profiler evidence. On the left, a minimal illustrative desktop monitor containing a tiny blue car scene, plus a keyboard/input icon. Across the main center-right area draw two conceptual parallel horizontal timelines with large labels \"CPU\" and \"GPU\" and a few unnumbered blocks of different lengths. One orange extended frame region spanning the appropriate top timeline area is highlighted with the large label \"Frame time\". Below, a visually SEPARATE small server tower with a clock and its OWN isolated tick marks, labeled \"Server tick\"; do not merge its ticks into client CPU/GPU frame timings. A broad thin teal arrow connects the keyboard/input event to a visible update on the monitor, labeled \"Input to display\".\nComposition: enough whitespace that client frame time, server tick, and input-to-display latency read as three separate concepts. Include large concise label \"Measurement concept\".\nConstraints: no numerical timing values, no FPS counters, no percentages, no fabricated benchmark trace, no application logos, no fake native Unreal Insights UI, no pass/fail or performance claims. Timelines are illustrative only, not data. Do not imply frame time equals server tick or input latency.",
+    "readingHints": [
+      "CPU·GPU 프레임 비용, 별도 서버 틱, 입력부터 표시까지의 지연을 구분한다.",
+      "주황색 긴 구간은 긴 프레임의 개념 예시이며 측정 결과가 아니다.",
+      "실제 성능 숫자나 앱 화면을 재현한 도표가 아니다."
+    ],
+    "path": "assets/new_profile.png",
+    "kind": "교육용 개념도",
+    "edits": [],
+    "tool": "built-in imagegen",
+    "generatedOriginal": "C:\\Users\\PC\\.codex\\generated_images\\01a07fba-7ce1-71d3-8bdc-c3b83969304d\\exec-90f3e6a2-25f1-4885-9232-9094318298e0.png",
+    "visualReview": {
+      "status": "reviewed",
+      "scope": "생성 이미지의 라벨·구성·핵심 개념 관계를 시각 검토했다. 실제 프로젝트 화면 또는 실행 증거가 아니다."
+    }
+  },
+  "new_answer": {
+    "prompt": "Use case: scientific-educational\nAsset type: original raster illustration for a Korean Unreal client interview study PowerPoint. Image occupies about 70% of a slide.\nStyle: polished editorial engineering illustration with clean forms and subtle isometric depth, not a screenshot or photograph. Pure white background, navy typography and outlines, teal primary accents, restrained orange for problems or limits. Wide 16:9 landscape composition, generous margin, very large readable short English labels only. Do not add a slide title, tiny captions, watermarks, logos, fabricated benchmarks, or dense boxes.\nPrimary request: a clean five-stage left-to-right interview reasoning storyboard with exactly five large illustrated stations, connected by a thin unambiguous arrow. Station 1: a small blue car with one orange visible alignment problem and an observation note. Station 2: magnifying glass examining two distinct origin markers. Station 3: a minimal code sheet showing only a small highlighted line change, no real code text. Station 4: a short looping sequence of test cards and a magnifier, representing repeated targeted verification without universal success badges. Station 5: an open boundary frame and a small clock representing known limits and remaining checks. Exact large labels beneath stations: \"Symptom\", \"Cause\", \"Change\", \"Verification\", \"Limits\".\nConstraints: the story is observation to causal explanation to scoped change to evidence to honest limitations. No invented statistics, no all-green checkmark parade, no ALL PASS statement, no trophies, no proof that every test passed. Avoid dense boxes and tiny type. Include a small readable \"Conceptual\" label.",
+    "readingHints": [
+      "증상→원인→수정→검증→한계의 순서로 면접 답변을 구성한다.",
+      "검증 아이콘은 전체 무결점이나 모든 검사 통과를 주장하지 않는다."
+    ],
+    "path": "assets/new_answer.png",
+    "kind": "교육용 개념도",
+    "edits": [],
+    "tool": "built-in imagegen",
+    "generatedOriginal": "C:\\Users\\PC\\.codex\\generated_images\\01a07fba-7ce1-71d3-8bdc-c3b83969304d\\exec-7784a762-5205-44b3-846c-37dd7de2a238.png",
+    "visualReview": {
+      "status": "reviewed",
+      "scope": "생성 이미지의 라벨·구성·핵심 개념 관계를 시각 검토했다. 실제 프로젝트 화면 또는 실행 증거가 아니다."
+    }
+  }
+}

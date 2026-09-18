@@ -9,6 +9,44 @@
 class UMeshComponent;
 class UPointLightComponent;
 
+namespace SimCoreTurnSignals
+{
+	inline constexpr double PeriodSeconds = 0.72;
+	inline constexpr double OnSeconds = 0.44;
+
+	/** One selection-relative clock shared by the rendered lenses and relay sound. */
+	struct DRIVEINTEGRATION_API FPhaseClock
+	{
+		double Update(SimCoreProtocol::ETurnIndicator Direction, double TimeSeconds, bool bHazard);
+		void Reset();
+		double GetElapsedSeconds() const { return ElapsedSeconds; }
+	private:
+		SimCoreProtocol::ETurnIndicator SelectedDirection = SimCoreProtocol::ETurnIndicator::Off;
+		bool bSelectedHazard = false;
+		double SelectionTimeSeconds = -1.0;
+		double LastTimeSeconds = -1.0;
+		double ElapsedSeconds = 0.0;
+	};
+
+	/** Player stalk latch: a real turn must precede a return-to-centre cancel. */
+	struct DRIVEINTEGRATION_API FAutoCancel
+	{
+		bool Update(SimCoreProtocol::ETurnIndicator Direction, bool bHazard,
+			const SimCoreProtocol::FVehicleState& State, bool bFresh);
+		void Reset();
+	private:
+		enum class EPhase : uint8 { WaitingForTurn, WaitingForCentre };
+		EPhase Phase = EPhase::WaitingForTurn;
+		SimCoreProtocol::ETurnIndicator SelectedDirection = SimCoreProtocol::ETurnIndicator::Off;
+		FString PlaySessionId;
+		uint64 LastSimulationTimeNs = 0;
+		double LastHeadingDegrees = 0.0;
+		double SelectedTurnDegrees = 0.0;
+		bool bHasSample = false;
+		bool bSteeringSeen = false;
+	};
+}
+
 /** Cosmetic lights only; NPC direction comes from the authoritative route intent. */
 UCLASS()
 class DRIVEINTEGRATION_API USimCoreTurnSignals : public USceneComponent
@@ -24,7 +62,9 @@ public:
 	 */
 	bool SetLampPositions(TConstArrayView<FVector> PositionsCm);
 	void UpdateSignal(SimCoreProtocol::ETurnIndicator Direction, double TimeSeconds, bool bHazard = false);
+	double GetPhaseTimeSeconds() const { return PhaseClock.GetElapsedSeconds(); }
 	void SetBodyDamage(const SimCoreDamagePresentation::FZoneWeights& Weights);
+	/** TimeSeconds is elapsed time since selection, never an absolute world clock. */
 	static bool IsLit(SimCoreProtocol::ETurnIndicator Direction, bool bLeft, double TimeSeconds, bool bHazard);
 	TConstArrayView<FVector> GetRestLampPositions() const { return RestLampPositions; }
 protected:
@@ -37,4 +77,5 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<UMeshComponent> DeformedBody;
 	TArray<FVector> RestLampPositions;
+	SimCoreTurnSignals::FPhaseClock PhaseClock;
 };

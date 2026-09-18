@@ -1,9 +1,8 @@
 #include "SimCoreVehicleAudio.h"
+#include "SimCoreTurnSignals.h"
 
 namespace
 {
-constexpr float TireRadiusMeters = 0.32f;
-
 float Range01(float Value, float Start, float End)
 {
 	return FMath::Clamp((Value - Start) / FMath::Max(End - Start, KINDA_SMALL_NUMBER), 0.0f, 1.0f);
@@ -35,44 +34,163 @@ FParameters BuildParameters(
 	Result.EngineFrequencyHz = SafeRpm / 30.0f;
 	Result.EngineAmplitude = 0.075f + 0.13f * FMath::Sqrt(Rpm01);
 
-	float MaximumSlip = 0.0f;
-	float MaximumWheelSurfaceSpeed = 0.0f;
-	int32 ContactCount = 0;
+	float MaximumScrub = 0.0f;
+	const float RoadSpeed = FMath::Abs(State.SpeedMps);
+	const float CornerSpeedGate = Range01(RoadSpeed, 8.0f, 14.0f);
 	for (const SimCoreProtocol::FVehicleState::FWheelState& Wheel : State.Wheels)
 	{
 		if (!Wheel.bInContact
-			|| !FMath::IsFinite(Wheel.LongitudinalSlip)
 			|| !FMath::IsFinite(Wheel.SlipAngleRad)
-			|| !FMath::IsFinite(Wheel.AngularSpeedRad)
-			|| !FMath::IsFinite(Wheel.NormalLoadN))
+			|| !FMath::IsFinite(Wheel.NormalLoadN) || Wheel.NormalLoadN <= 50.0f
+			|| Wheel.WheelIndex >= 4)
 		{
 			continue;
 		}
-		++ContactCount;
-		const float LoadWeight = FMath::Clamp(Wheel.NormalLoadN / 3500.0f, 0.15f, 1.0f);
-		const float LongitudinalSlip = Range01(FMath::Abs(Wheel.LongitudinalSlip), 0.05f, 0.35f);
-		const float LateralSlip = Range01(FMath::Abs(Wheel.SlipAngleRad), 0.035f, 0.22f);
-		MaximumSlip = FMath::Max(MaximumSlip, FMath::Max(LongitudinalSlip, LateralSlip) * LoadWeight);
-		MaximumWheelSurfaceSpeed = FMath::Max(
-			MaximumWheelSurfaceSpeed,
-			FMath::Abs(Wheel.AngularSpeedRad) * TireRadiusMeters);
+		const float LoadWeight = FMath::Sqrt(FMath::Clamp(Wheel.NormalLoadN / 3500.0f, 0.0f, 1.0f));
+		const float SlipAngle = FMath::Min(FMath::Abs(Wheel.SlipAngleRad), 1.5f);
+		const float LateralSlipSpeed = RoadSpeed * FMath::Sin(SlipAngle);
+		// This layer is an exceptional cornering skid, not constant road hiss.
+		// Require speed, a substantial slip angle AND sideways scrub together.
+		// Straight acceleration/wheelspin and ordinary steering do not trigger it.
+		const float Scrub = CornerSpeedGate * Range01(SlipAngle, 0.17f, 0.30f)
+			* Range01(LateralSlipSpeed, 2.2f, 4.5f) * LoadWeight;
+		MaximumScrub = FMath::Max(MaximumScrub, Scrub);
 	}
 
-	if (ContactCount == 0)
+	if (MaximumScrub <= 0.0f)
 	{
 		return Result;
 	}
-	const float ExcitationSpeed = FMath::Max(FMath::Abs(State.SpeedMps), MaximumWheelSurfaceSpeed);
-	const float Motion01 = Range01(ExcitationSpeed, 0.35f, 18.0f);
-	if (Motion01 <= 0.0f)
-	{
-		return Result;
-	}
-	Result.TireSlipIntensity = MaximumSlip;
-	Result.TireAmplitude = Motion01 * (0.018f + 0.075f * Motion01 + 0.22f * MaximumSlip);
-	Result.TireNoiseCutoffHz = 450.0f + 45.0f * FMath::Min(ExcitationSpeed, 35.0f)
-		+ 900.0f * MaximumSlip;
+	Result.TireSlipIntensity = MaximumScrub;
+	Result.TireAmplitude = 0.025f * MaximumScrub;
+	Result.TireNoiseCutoffHz = 500.0f + 400.0f * MaximumScrub;
+	Result.TireSquealAmplitude = 0.22f * MaximumScrub;
+	Result.TireSquealFrequencyHz = 650.0f + 350.0f * MaximumScrub + 80.0f * CornerSpeedGate;
 	return Result;
+}
+
+EIndicatorClick FIndicatorClicks::Update(SimCoreProtocol::ETurnIndicator Direction,
+	double TimeSeconds, bool bHazard)
+{
+	if (bHazard) Direction = SimCoreProtocol::ETurnIndicator::Off;
+	const bool bNowSelected = bHazard || Direction == SimCoreProtocol::ETurnIndicator::Left
+		|| Direction == SimCoreProtocol::ETurnIndicator::Right;
+	if (!FMath::IsFinite(TimeSeconds) || TimeSeconds < 0.0 || !bNowSelected)
+	{
+		Reset();
+		return EIndicatorClick::None;
+	}
+	const bool bNowLit = USimCoreTurnSignals::IsLit(Direction, true, TimeSeconds, bHazard)
+		|| USimCoreTurnSignals::IsLit(Direction, false, TimeSeconds, bHazard);
+	const bool bSelectionChanged = bSelected && (Direction != LastDirection || bHazard != bLastHazard);
+	LastDirection = Direction;
+	bLastHazard = bHazard;
+	if (!bSelectionChanged && LastTime >= 0.0 && (TimeSeconds < LastTime || TimeSeconds - LastTime > 1.0))
+	{
+		// A pause/reset does not represent a physical relay transition.
+		bSelected = true; bLit = bNowLit; LastTime = TimeSeconds;
+		return EIndicatorClick::None;
+	}
+	const EIndicatorClick Edge = !bSelected || bSelectionChanged ? (bNowLit ? EIndicatorClick::On : EIndicatorClick::None)
+		: bNowLit != bLit ? (bNowLit ? EIndicatorClick::On : EIndicatorClick::Off) : EIndicatorClick::None;
+	bSelected = true; bLit = bNowLit; LastTime = TimeSeconds;
+	return Edge;
+}
+
+void FIndicatorClicks::Reset()
+{
+	bSelected = false; bLit = false; LastTime = -1.0;
+	LastDirection = SimCoreProtocol::ETurnIndicator::Off;
+	bLastHazard = false;
+}
+
+void FRenderer::SetTargets(const FParameters& Parameters)
+{
+	Target = Parameters;
+	auto Bound = [](float Value, float Maximum)
+	{
+		return FMath::IsFinite(Value) ? FMath::Clamp(Value, 0.0f, Maximum) : 0.0f;
+	};
+	Target.EngineFrequencyHz = Bound(Target.EngineFrequencyHz, 300.0f);
+	Target.EngineAmplitude = Bound(Target.EngineAmplitude, 0.3f);
+	Target.TireNoiseCutoffHz = Bound(Target.TireNoiseCutoffHz, 4000.0f);
+	Target.TireAmplitude = Bound(Target.TireAmplitude, 0.15f);
+	Target.TireSquealFrequencyHz = Bound(Target.TireSquealFrequencyHz, 2500.0f);
+	Target.TireSquealAmplitude = Bound(Target.TireSquealAmplitude, 0.3f);
+}
+
+void FRenderer::Click(EIndicatorClick Edge)
+{
+	if (Edge == EIndicatorClick::None) return;
+	ClickAge = 0.0f;
+	bClickOn = Edge == EIndicatorClick::On;
+}
+
+int32 FRenderer::Render(float* OutAudio, int32 NumSamples, int32 SampleRate)
+{
+	if (!OutAudio || NumSamples <= 0) return 0;
+	const float Rate = FMath::Clamp(SampleRate, 8000, 192000);
+	const float Fast = 1.0f - FMath::Exp(-1.0f / (0.035f * Rate));
+	const float Slow = 1.0f - FMath::Exp(-1.0f / (0.12f * Rate));
+	const float Release = 1.0f - FMath::Exp(-1.0f / (0.055f * Rate));
+	const float LowAlpha = 1.0f - FMath::Exp(-2.0f * PI * 650.0f / Rate);
+	const float HighAlpha = 1.0f - FMath::Exp(-2.0f * PI * FMath::Min(4500.0f, Rate * 0.4f) / Rate);
+	const float FlutterAlpha = 1.0f - FMath::Exp(-2.0f * PI * 18.0f / Rate);
+	const float TireNoiseGain = FMath::Sqrt(Rate / 48000.0f);
+	// Noise-excited rubber resonances, not a free-running whistle. These TPT
+	// band-pass filters remain stable across the supported output sample rates.
+	auto TireResonance = [Rate](float Noise, float Frequency, float Damping, float* Memory)
+	{
+		const float G = FMath::Tan(PI * FMath::Clamp(Frequency, 100.0f, Rate * 0.35f) / Rate);
+		const float Band = (Memory[0] + G * (Noise - Memory[1])) / (1.0f + G * (G + Damping));
+		const float Low = Memory[1] + G * Band;
+		Memory[0] = 2.0f * Band - Memory[0];
+		Memory[1] = 2.0f * Low - Memory[1];
+		return Damping * Band;
+	};
+	for (int32 Index = 0; Index < NumSamples; Index += 2)
+	{
+		Current.EngineFrequencyHz += (Target.EngineFrequencyHz - Current.EngineFrequencyHz) * Fast;
+		Current.EngineAmplitude += (Target.EngineAmplitude - Current.EngineAmplitude) * Slow;
+		Current.TireNoiseCutoffHz += (Target.TireNoiseCutoffHz - Current.TireNoiseCutoffHz) * Fast;
+		Current.TireAmplitude += (Target.TireAmplitude - Current.TireAmplitude) * Slow;
+		Current.TireSquealFrequencyHz += (Target.TireSquealFrequencyHz - Current.TireSquealFrequencyHz) * Fast;
+		Current.TireSquealAmplitude += (Target.TireSquealAmplitude - Current.TireSquealAmplitude)
+			* (Target.TireSquealAmplitude < Current.TireSquealAmplitude ? Release : Fast);
+
+		EnginePhase = FMath::Fmod(EnginePhase + 2.0 * PI * Current.EngineFrequencyHz / Rate, 2.0 * PI);
+		const float Engine = Current.EngineAmplitude * (0.52f * FMath::Sin(EnginePhase)
+			+ 0.28f * FMath::Sin(EnginePhase * 2.0) + 0.12f * FMath::Sin(EnginePhase * 4.0));
+		NoiseState ^= NoiseState << 13; NoiseState ^= NoiseState >> 17; NoiseState ^= NoiseState << 5;
+		const float Noise = static_cast<float>(NoiseState & 0xffffu) / 32767.5f - 1.0f;
+		const float Cutoff = FMath::Clamp(Current.TireNoiseCutoffHz, 100.0f, Rate * 0.4f);
+		RollingNoise += (1.0f - FMath::Exp(-2.0f * PI * Cutoff / Rate)) * (Noise - RollingNoise);
+		SquealNoiseLow += LowAlpha * (Noise - SquealNoiseLow);
+		SquealNoiseHigh += HighAlpha * (Noise - SquealNoiseHigh);
+		const float ScrubNoise = SquealNoiseHigh - SquealNoiseLow;
+		TireFlutter += FlutterAlpha * (Noise - TireFlutter);
+		const float Irregularity = FMath::Clamp(TireFlutter * 8.0f, -1.0f, 1.0f);
+		const float ResonanceHz = Current.TireSquealFrequencyHz * (1.0f + 0.045f * Irregularity);
+		const float RubberLow = TireResonance(Noise, ResonanceHz, 0.25f, TireResonanceLow);
+		const float RubberHigh = TireResonance(Noise, ResonanceHz * 1.63f, 0.45f, TireResonanceHigh);
+		// Broad, inharmonic resonance and uneven abrasion avoid the old fixed
+		// sine + exact octave's alarm-like tone. The slip envelope still owns
+		// onset/release; no periodic tremolo or looping sample is introduced.
+		const float Squeal = Current.TireSquealAmplitude * TireNoiseGain * (1.0f + 0.18f * Irregularity)
+			* (1.65f * RubberLow + 0.85f * RubberHigh + 0.32f * ScrubNoise);
+		float Relay = 0.0f;
+		if (ClickAge < 0.025f)
+		{
+			const float Frequency = bClickOn ? 1750.0f : 1150.0f;
+			const float Envelope = FMath::Exp(-ClickAge / 0.0045f) * Range01(ClickAge, 0.0f, 0.0007f);
+			Relay = 0.32f * Envelope * (0.65f * FMath::Sin(2.0f * PI * Frequency * ClickAge) + 0.35f * ScrubNoise);
+			ClickAge += 1.0f / Rate;
+		}
+		const float Mixed = FMath::Clamp(Engine + Current.TireAmplitude * RollingNoise + Squeal + Relay, -0.92f, 0.92f);
+		OutAudio[Index] = Mixed;
+		if (Index + 1 < NumSamples) OutAudio[Index + 1] = Mixed;
+	}
+	return NumSamples;
 }
 }
 
@@ -93,13 +211,28 @@ void USimCoreVehicleAudioComponent::SetAuthoritativeState(
 	float StateAgeSeconds,
 	float StateStaleTimeoutSeconds)
 {
-	SetTargetParameters(SimCoreVehicleAudio::BuildParameters(
-		State, StateAgeSeconds, StateStaleTimeoutSeconds));
+	const auto Parameters = SimCoreVehicleAudio::BuildParameters(State, StateAgeSeconds, StateStaleTimeoutSeconds);
+	bHasFreshState = Parameters.EngineAmplitude > 0.0f;
+	if (!bHasFreshState) { Silence(); return; }
+	SetTargetParameters(Parameters);
 }
 
 void USimCoreVehicleAudioComponent::Silence()
 {
-	SetTargetParameters(SimCoreVehicleAudio::FParameters{});
+	IndicatorClicks.Reset();
+	bHasFreshState = false;
+	SynthCommand([this]() { Renderer = {}; });
+}
+
+void USimCoreVehicleAudioComponent::UpdateIndicator(SimCoreProtocol::ETurnIndicator Direction,
+	double TimeSeconds, bool bHazard)
+{
+	const auto Edge = IndicatorClicks.Update(Direction, TimeSeconds, bHazard);
+	// Keep a silent baseline while disconnected. Reconnection must not click
+	// halfway through an already lit lamp or replay the missed relay edges.
+	if (!bHasFreshState) return;
+	if (Edge != SimCoreVehicleAudio::EIndicatorClick::None)
+		SynthCommand([this, Edge]() { Renderer.Click(Edge); });
 }
 
 void USimCoreVehicleAudioComponent::SetTargetParameters(
@@ -107,10 +240,7 @@ void USimCoreVehicleAudioComponent::SetTargetParameters(
 {
 	SynthCommand([this, Parameters]()
 	{
-		TargetEngineFrequencyHz = Parameters.EngineFrequencyHz;
-		TargetEngineAmplitude = Parameters.EngineAmplitude;
-		TargetTireNoiseCutoffHz = Parameters.TireNoiseCutoffHz;
-		TargetTireAmplitude = Parameters.TireAmplitude;
+		Renderer.SetTargets(Parameters);
 	});
 }
 
@@ -123,43 +253,5 @@ bool USimCoreVehicleAudioComponent::Init(int32& SampleRate)
 
 int32 USimCoreVehicleAudioComponent::OnGenerateAudio(float* OutAudio, int32 NumSamples)
 {
-	if (!OutAudio || NumSamples <= 0)
-	{
-		return 0;
-	}
-	const float SampleRate = static_cast<float>(RenderSampleRate);
-	const float FastSmoothing = 1.0f - FMath::Exp(-1.0f / (0.035f * SampleRate));
-	const float SlowSmoothing = 1.0f - FMath::Exp(-1.0f / (0.12f * SampleRate));
-	for (int32 SampleIndex = 0; SampleIndex < NumSamples; SampleIndex += NumChannels)
-	{
-		CurrentEngineFrequencyHz += (TargetEngineFrequencyHz - CurrentEngineFrequencyHz) * FastSmoothing;
-		CurrentEngineAmplitude += (TargetEngineAmplitude - CurrentEngineAmplitude) * SlowSmoothing;
-		CurrentTireNoiseCutoffHz += (TargetTireNoiseCutoffHz - CurrentTireNoiseCutoffHz) * FastSmoothing;
-		CurrentTireAmplitude += (TargetTireAmplitude - CurrentTireAmplitude) * SlowSmoothing;
-
-		EnginePhase += 2.0 * PI * static_cast<double>(CurrentEngineFrequencyHz) / SampleRate;
-		if (EnginePhase >= 2.0 * PI)
-		{
-			EnginePhase = FMath::Fmod(EnginePhase, 2.0 * PI);
-		}
-		const float Engine = CurrentEngineAmplitude * (
-			0.52f * FMath::Sin(EnginePhase)
-			+ 0.28f * FMath::Sin(EnginePhase * 2.0)
-			+ 0.12f * FMath::Sin(EnginePhase * 4.0));
-
-		NoiseState ^= NoiseState << 13;
-		NoiseState ^= NoiseState >> 17;
-		NoiseState ^= NoiseState << 5;
-		const float WhiteNoise = static_cast<float>(NoiseState & 0xffffu) / 32767.5f - 1.0f;
-		const float Cutoff = FMath::Clamp(CurrentTireNoiseCutoffHz, 100.0f, SampleRate * 0.45f);
-		const float NoiseAlpha = 1.0f - FMath::Exp(-2.0f * PI * Cutoff / SampleRate);
-		FilteredTireNoise += NoiseAlpha * (WhiteNoise - FilteredTireNoise);
-		const float Tire = CurrentTireAmplitude * FilteredTireNoise;
-		const float Mixed = FMath::Clamp(Engine + Tire, -0.92f, 0.92f);
-		for (int32 Channel = 0; Channel < NumChannels && SampleIndex + Channel < NumSamples; ++Channel)
-		{
-			OutAudio[SampleIndex + Channel] = Mixed;
-		}
-	}
-	return NumSamples;
+	return Renderer.Render(OutAudio, NumSamples, RenderSampleRate);
 }

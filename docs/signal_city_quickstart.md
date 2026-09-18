@@ -14,22 +14,25 @@
 | MapPackage | `map_packages/signal_city_v2` |
 | traffic schema | `traffic_network.json` format version 2 |
 | map checksum | `map_packages/signal_city_v2/manifest.cfg`의 `collision_checksum` |
-| traffic checksum | 서버 시작 로그의 traffic checksum, 최신 값은 [9/7 작업일지](./worklogs/2026-09-07.md) |
+| traffic checksum | 서버 시작 로그의 traffic checksum, 최신 값은 [9/8 작업일지](./worklogs/2026-09-08.md) |
 | host config | `cpp/host/config/signal_city_server.cfg` |
 | launcher | `scripts/run_signal_city_server.ps1` |
 
 ## 현재 생성물과 검증 기준
 
-8개 접근도로에 좌회전·직진·우회전 전용 3차로가 있다. 9월 7일에는 곡선 연결도로의
-아스팔트·표시·보도·NPC 경로를 같은 중심곡선으로 맞췄다. 현재 생성물의 checksum과
-검증 결과·백업 위치는 [9/7 작업일지](./worklogs/2026-09-07.md)에서 관리한다.
+8개 접근도로에 좌회전·직진·우회전 전용 3차로가 있다. 곡선 연결도로의 아스팔트·표시·
+보도·NPC 경로는 같은 중심곡선을 사용한다. 9월 8일에는 합류 전 화살표·점선 안내와
+북쪽 연결 루프, 독립된 보호 좌회전 신호를 추가했다. 현재 checksum과 검증 결과·백업은
+[9/8 작업일지](./worklogs/2026-09-08.md)에서 관리한다.
 
 | 항목 | 값 |
 |---|---:|
-| static collider | 453(연석 446·건물 벽 7) |
+| static collider | 623(연석 616·건물 벽 7) |
 | heightfield spacing | 50cm |
-| QA route checkpoint | 453 |
-| traffic lane / runtime head / controller | 58 / 16(차량 8·보행 8) / 2 |
+| QA route checkpoint | 839 (`drive_route.csv`) |
+| traffic lane / runtime head / controller | 59 / 16(차량 8·보행 8) / 2 |
+| 차량 신호 | 가로 4등식, 차량 head 8개에 보호 좌회전 그룹 각각 추가 |
+| 지면 범위 | 동서 240m·남북 330m, 북쪽 루프 주행 경로 N292m까지 |
 | server-authoritative NPC / pedestrian | 10 / 8 |
 | 접근도로 | 왕복 20m, 방향별 3개 차로(각 3.2m) |
 
@@ -42,7 +45,7 @@
 PID는 일시 상태이므로 시험 때마다 listener와 로그의 map identity를 다시 확인한다.
 사용자 PIE는 아직 대기다.
 
-Unreal 기본 시작 맵은 계속 `L_VirtualCity`다. `signal_city_v2`를 시험할 때는 Content Browser에서
+Unreal 기본 시작 맵은 `L_SignalCity`다. 다른 레벨이 열리면 Content Browser에서
 `L_SignalCity`를 직접 연다. 일반 `ExternalVehiclePawn`이나 다른 맵의 exporter를 추가 배치하지
 않는다. map-local Pawn이 `signal_city_v2`와 `unreal-signal-city` identity를 자동 사용한다.
 
@@ -69,11 +72,11 @@ checksum gate가 조작을 거부하는 것이 정상이다.
    하나라도 없으면 서버를 시작하지 않는다. 2026-09-02 실제 전환 중 발견한 PowerShell
    multiline `if` parse 오류는 중첩 `if`로 수정했으며, 수정된 launcher로 PID 23880의 bind를
    확인했다.
-3. launcher가 출력한 stdout에서 `[Map] ... id=signal_city_v2`, collision checksum
-   `fnv1a64:86c3103f3e2c7a5b`, traffic checksum `fnv1a64:b19c15afba6936d7`,
-   `lanes=58 signal_heads=16`을 확인한다. 같은 `[Traffic]` 줄의 controller 진단은
-   `id=1,cycle_seconds=72,offset_seconds=0`과
-   `id=2,cycle_seconds=72,offset_seconds=14`여야 한다.
+3. launcher가 출력한 stdout에서 `[Map] ... id=signal_city_v2`, manifest와 일치하는
+   collision checksum, 최신 작업일지와 일치하는 traffic checksum,
+   `lanes=59 signal_heads=16`을 확인한다. 같은 `[Traffic]` 줄의 controller 진단은
+   `id=1,cycle_seconds=116,offset_seconds=0`과
+   `id=2,cycle_seconds=116,offset_seconds=14`여야 한다.
    `virtual_city_v1`, lanes25 또는 heads3가 보이면 이전 서버이므로 Play하지 않는다.
 4. Unreal Editor에서 `/Game/SignalCity/Maps/L_SignalCity`를 직접 열고 Play한다.
 5. HUD의 연결·map 승인과 `Active`를 확인한다. 차량은 중앙 avenue의 ENU `(0,0)`에서
@@ -103,21 +106,22 @@ PowerShell execution policy 때문에 launcher를 사용할 수 없으면 전역
 3. Unreal에서 `/Game/VirtualCity/Maps/L_VirtualCity`를 열고 Play한다.
 4. 시작 로그의 map ID가 `virtual_city_v1`, HUD의 map 승인이 정상인지 확인한다.
 
-두 서버를 동시에 실행하거나 한 서버를 둔 채 map만 바꾸지 않는다. Unreal의 기본 시작 맵과
-`run_virtual_city_server.ps1`은 계속 v1 경로이며 signal city가 새 기본값이 된 것이 아니다.
+두 서버를 동시에 실행하거나 한 서버를 둔 채 map만 바꾸지 않는다.
+`run_virtual_city_server.ps1`은 v1용이며 현재 기본 맵 `L_SignalCity`에는 사용하지 않는다.
 
 ## 신호체계 확인
 
-- 남쪽 교차로는 controller 1, 북쪽 교차로는 controller 2가 담당한다. 각 진입방향의
-  좌/직/우 전용 차로는 그 방향의 공통 보호 녹색을 사용한다. 다른 세 방향은 적색이다.
-  좌회전 화살표 신호만 별도 허용하는 체계는 아니며, `L/S/R` 공동 보호 표시를 사용한다.
+- 남쪽 교차로는 controller 1, 북쪽 교차로는 controller 2가 담당한다. 직진·우회전 차로와
+  좌회전 전용 차로의 신호 그룹을 분리했다. 좌회전은 자기 방향의 화살표가 켜졌을 때만
+  허용하고 다른 방향·보행 신호는 적색으로 유지한다. 국내 우회전 예외 규정 전체는 구현하지 않았다.
 - controller 2에는 cycle 내부 offset이 있으므로 두 교차로의 색이 항상 같아서는 안 된다.
   서로 다른 controller는 같은 순간에 녹색일 수 있다. 같은 controller 안에서는 서로 다른
   차량 group이 동시에 녹색/황색 permissive 상태가 되면 안 된다. 전부 보행자 group인
   독립 WALK 현시만 동시에 허용하며 이때 같은 교차로의 모든 차량 신호는 적색이다.
-- 현재 package의 controller 1·2 cycle은 모두 72초이고 offset은 각각 0초·14초다. 이 값은
+- 현재 package의 controller 1·2 cycle은 모두 116초이고 offset은 각각 0초·14초다. 이 값은
   canonical v2 JSON과 최신 publisher 시작 진단 양쪽에서 일치해야 한다.
-- 서버가 보내는 `controller_id`, `group_id`, aspect와 countdown이 권한 상태다. Unreal은
+- 서버가 보내는 `controller_id`, `group_id`, aspect와 countdown 및 독립된 `left_group_id`,
+  `left_aspect`, `left_remaining_seconds`가 권한 상태다. Unreal은
   로컬 신호 주기를 추측하지 않고 표시만 한다. 연결 해제, stale, 잘못된 snapshot 또는
   안전 정지 상태에서는 녹색을 보존하지 않는다.
 - runtime 신호 head는 차량 8개·보행 8개이며 `NoCollision` 표시 actor다.
@@ -126,8 +130,9 @@ PowerShell execution policy 때문에 launcher를 사용할 수 없으면 전역
 - 횡단보도는 교차로 중심에서 15m 밖, 정지선은 18.5m 밖에 있다. 서버의 controlled
   endpoint도 18m 앞이므로 NPC가 횡단보도 위에 정차하지 않는다. 보행 대기점은 실제
   보도 위이며, 왕복 offset ±0.45m와 몸 반경 0.35m까지 보도 안에 있어야 한다.
-  23m 횡단에는 약 17.04초가 필요하다. WALK 잔여 시간이 전체 횡단+0.2초보다 짧으면
-  새 출발하지 않으며, 이미 시작한 횡단만 완주한다.
+  23m 횡단에는 체형별 속도 1.0·1.1·1.35m/s에 따라 약 17.04~23초가 필요하다.
+  보행 전용 WALK는 24초이며 잔여 시간이 전체 횡단+0.2초보다 짧으면 새 출발하지 않는다.
+  이미 시작한 횡단만 완주한다.
 - server-authoritative NPC 10대는 `npc_autonomous=true`에서 목적지를 선택하고 합법적인
   successor 경로·같은 방향 차선 변경 구간을 사용한다. 막힌 미래 lane은 같은 목적지로
   우회하며 신호 대기열을 폐쇄 도로로 취급하지 않는다. 보행자 8명은 지정 횡단보도·보행

@@ -100,6 +100,12 @@ TArray<uint8> SignalBytes(const FTrafficSignalState& State)
 	Integer(Out, 7, State.ControllerId);
 	Integer(Out, 8, static_cast<uint8>(State.Kind));
 	Integer(Out, 9, State.bOutOfService ? 1 : 0);
+	if(State.LeftGroupId || State.LeftAspect!=ETrafficSignalAspect::Unknown || State.LeftRemainingSeconds!=0)
+	{
+		Integer(Out,10,State.LeftGroupId);
+		Integer(Out,11,static_cast<uint8>(State.LeftAspect));
+		Number(Out,12,State.LeftRemainingSeconds);
+	}
 	return Out;
 }
 
@@ -362,7 +368,7 @@ bool FSimCoreTrafficSignalActorTest::RunTest(const FString& Parameters)
 	Ok &= TestTrue(TEXT("initial state is unverified red"), Actor->GetDisplayState().bRed && !Actor->GetDisplayState().bVerified);
 	Ok &= TestTrue(TEXT("presentation actor is transient and noncolliding"), Actor->HasAnyFlags(RF_Transient) && !Actor->GetActorEnableCollision());
 	TArray<UStaticMeshComponent*> Meshes; Actor->GetComponents(Meshes);
-	Ok &= TestEqual(TEXT("pole, head and three lamps only"), Meshes.Num(), 5);
+	Ok &= TestEqual(TEXT("pole, four-lens head and three arrow strokes"), Meshes.Num(), 9);
 	for (UStaticMeshComponent* Mesh : Meshes)
 	{
 		Ok &= TestTrue(TEXT("no physical or navigation participation"), Mesh->GetCollisionEnabled() == ECollisionEnabled::NoCollision
@@ -418,6 +424,57 @@ bool FSimCoreTrafficSignalActorTest::RunTest(const FString& Parameters)
 		else Ok = false;
 	}
 	else Ok = false;
+	return Ok;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSimCoreProtectedLeftSignalTest,
+	"DriveIntegration.TrafficSignals.ProtectedLeftFourLens",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSimCoreProtectedLeftSignalTest::RunTest(const FString& Parameters)
+{
+	bool Ok=true;
+	auto Head=Signal(1,101,ETrafficSignalAspect::Red);
+	Head.LeftGroupId=107;
+	Head.LeftAspect=ETrafficSignalAspect::Green;
+	Head.LeftRemainingSeconds=6;
+	FVehicleState State;
+	FString Error;
+	Ok &= TestTrue(TEXT("independent left green parses while straight is red"),
+		ParseWorldStateEnvelope(WorldEnvelope({SignalBytes(Head)}),1,State,Error)
+		&& State.TrafficSignals[0].LeftGroupId==107 && State.TrafficSignals[0].LeftRemainingSeconds==6);
+	const auto Display=SimCoreTrafficSignals::EvaluateDisplay(Head,true,true,0.01);
+	Ok &= TestTrue(TEXT("arrow permission never enables the straight green lens"),
+		Display.bRed && Display.bLeftGreen && !Display.bGreen && !Display.bYellow);
+	Ok &= TestFalse(TEXT("stale authority turns the left arrow off"),
+		SimCoreTrafficSignals::EvaluateDisplay(Head,true,true,0.11).bLeftGreen);
+	for(int32 Case=0;Case<6;++Case)
+	{
+		auto Invalid=Head;
+		if(Case==0) Invalid.LeftGroupId=Invalid.GroupId;
+		if(Case==1) Invalid.LeftGroupId=0;
+		if(Case==2) Invalid.LeftRemainingSeconds=-1;
+		if(Case==3) Invalid.LeftAspect=ETrafficSignalAspect::Unknown;
+		if(Case==4) Invalid.Kind=ETrafficSignalKind::Pedestrian;
+		if(Case==5) Invalid.Aspect=ETrafficSignalAspect::Green;
+		Ok &= TestFalse(TEXT("invalid or conflicting protected left state fails closed"),
+			ParseWorldStateEnvelope(WorldEnvelope({SignalBytes(Invalid)}),1,State,Error));
+	}
+	auto Conflicting=Signal(2,103,ETrafficSignalAspect::Green);
+	Ok &= TestFalse(TEXT("left green conflicts with another approach in the same controller"),
+		ParseWorldStateEnvelope(WorldEnvelope({SignalBytes(Head),SignalBytes(Conflicting)}),1,State,Error));
+	auto Duplicate=SignalBytes(Head); Integer(Duplicate,10,107);
+	Ok &= TestFalse(TEXT("duplicate additive fields are rejected"),
+		ParseWorldStateEnvelope(WorldEnvelope({Duplicate}),1,State,Error));
+	FTrafficQaWorld Scene;
+	if(!Scene.World) return false;
+	auto* Actor=Scene.World->SpawnActor<ASimCoreTrafficSignalActor>();
+	if(!Actor) return false;
+	Actor->ApplyAuthoritativeSignal(Head,true,true,0.01);
+	Ok &= TestTrue(TEXT("driver sees red, yellow, left arrow, green in left-to-right order"),
+		Actor->GetLamp(0)->GetRelativeLocation().Y<Actor->GetLamp(1)->GetRelativeLocation().Y
+		&& Actor->GetLamp(1)->GetRelativeLocation().Y<Actor->GetLamp(3)->GetRelativeLocation().Y
+		&& Actor->GetLamp(3)->GetRelativeLocation().Y<Actor->GetLamp(2)->GetRelativeLocation().Y);
+	Actor->Destroy();
 	return Ok;
 }
 

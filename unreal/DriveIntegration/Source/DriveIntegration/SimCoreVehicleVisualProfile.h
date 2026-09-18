@@ -16,9 +16,13 @@ struct FProfile
 	FTransform DriverTransform = FTransform::Identity;
 	float HalfHeightMeters = 0.75f;
 	float CgHeightMeters = 0.55f;
+	float CollisionBodyForwardOffsetMeters = 0.0f;
+	float CollisionGroundClearanceMeters = 0.10f;
+	float NpcCollisionGroundClearanceMeters = 0.10f;
 
 	bool IsWheelVisible(int32 Index) const;
 };
 
 bool Resolve(SimCoreProtocol::ERuntimeVehicleClass VehicleClass, FProfile& OutProfile);
+FVector CollisionCenterOffsetCm(const FProfile& Profile, float CollisionHalfHeightMeters);
 }

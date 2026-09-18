@@ -18,7 +18,8 @@ Assert-PackageCondition ($plan.Destination.StartsWith($packageParent, [StringCom
 Assert-PackageCondition ($plan.Destination -ne $secondPlan.Destination) 'each run must have an independent destination'
 Assert-PackageCondition (-not (Test-Path -LiteralPath $plan.Destination)) 'planning must not create output'
 foreach ($argument in @('-platform=Win64', '-clientconfig=Development', '-build', '-cook',
-    '-noxge', '-AdditionalCookerOptions=-noxgeshadercompile',
+    '-noxge', '-AdditionalCookerOptions=-noxgeshadercompile -ShaderWorkingDir=Intermediate/Shaders/PackageWorkingDirectory',
+    '-ddc=InstalledNoZenLocalFallback',
     '-map=/Game/SignalCity/Maps/L_SignalCity', '-stage', '-package', '-archive', '-prereqs')) {
     Assert-PackageCondition ($plan.UatArguments -contains $argument) "missing UAT argument $argument"
 }
@@ -37,6 +38,8 @@ foreach ($name in @('StartServer.ps1', 'StartClient.ps1')) {
     Assert-PackageCondition (-not $files[$name].Contains($repository)) "$name must not embed checkout path"
 }
 Assert-PackageCondition ($files['StartClient.ps1'].Contains('-SimCoreClientConfig="')) 'INI path must be quoted explicitly'
+Assert-PackageCondition ($files['StartClient.ps1'].Contains('[switch]$PerformanceCapture')) 'packaged capture must be opt-in'
+Assert-PackageCondition ($files['StartClient.ps1'].Contains('$CaptureSeconds = 1800')) 'acceptance capture must default to thirty minutes'
 Assert-PackageCondition ($files['StartServer.ps1'].Contains('Push-Location $PSScriptRoot')) 'server relative output must stay in distribution'
 Assert-PackageCondition ($files['READ_ME.txt'].Contains('not acceptance-tested')) 'package preparation must not claim runtime acceptance'
 
@@ -52,4 +55,45 @@ $sensorHash = Get-SimCorePackageFileHash -LiteralPath $sensorConfig
 Assert-PackageCondition ($sensorHash -match '^[0-9A-F]{64}$') 'file verification must produce SHA-256'
 Assert-PackageCondition ($sensorHash -eq (Get-SimCorePackageFileHash -LiteralPath $sensorConfig)) 'same source must hash identically'
 Assert-PackageCondition ($sensorHash -ne (Get-SimCorePackageFileHash -LiteralPath $PSCommandPath)) 'different files must not match'
+$inventory = @(Get-SimCorePackageInventory -PackageRoot (Join-Path $repository 'cpp\host\config'))
+Assert-PackageCondition ($inventory.Count -ge 2) 'inventory must contain runtime config files'
+foreach ($entry in $inventory) {
+    Assert-PackageCondition (-not [IO.Path]::IsPathRooted($entry.path)) 'inventory must be relocatable'
+    Assert-PackageCondition ($entry.sha256 -match '^[0-9A-F]{64}$') 'each inventory entry must be hashed'
+    Assert-PackageCondition ($entry.bytes -gt 0) 'runtime config inventory must record file size'
+    Assert-PackageCondition ($entry.sha256 -eq (Get-SimCorePackageFileHash -LiteralPath `
+        (Join-Path (Join-Path $repository 'cpp\host\config') $entry.path))) 'inventory hash mismatch'
+}
+$packagingScript = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'package_windows.ps1') -Raw
+foreach ($field in @('source_revision', 'source_dirty', 'source_snapshot_sha256', 'validation_reports',
+    'prepackage_reference_not_packaged_acceptance', '--cached --others --exclude-standard')) {
+    Assert-PackageCondition ($packagingScript.Contains($field)) "candidate provenance missing $field"
+}
+$testParent = [IO.Path]::GetFullPath((Join-Path $repository 'runtime_tmp')) + '\'
+$testDirectory = Join-Path $testParent ('package-manifest-test-' + [Guid]::NewGuid().ToString('N'))
+[void](New-Item -ItemType Directory -Path $testDirectory)
+try {
+    $fixtureFile = Join-Path $testDirectory 'fixture.txt'
+    $fixtureManifest = Join-Path $testDirectory 'package_manifest.json'
+    Set-Content -LiteralPath $fixtureFile -Value 'synthetic package fixture' -Encoding UTF8
+    $fixtureInventory = @(Get-SimCorePackageInventory -PackageRoot $testDirectory)
+    $fixture = @{ format_version = 2; files = $fixtureInventory }
+    $fixture | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $fixtureManifest -Encoding UTF8
+    Assert-PackageCondition ((Test-SimCorePackageIntegrity -PackageRoot $testDirectory) -eq 1) 'valid manifest must pass'
+    Set-Content -LiteralPath $fixtureFile -Value 'changed synthetic fixture' -Encoding UTF8
+    $rejected = $false
+    try { Test-SimCorePackageIntegrity -PackageRoot $testDirectory | Out-Null } catch { $rejected = $true }
+    Assert-PackageCondition $rejected 'changed content must fail integrity verification'
+    $fixture.files[0].path = '../outside.txt'
+    $fixture | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $fixtureManifest -Encoding UTF8
+    $rejected = $false
+    try { Test-SimCorePackageIntegrity -PackageRoot $testDirectory | Out-Null } catch { $rejected = $true }
+    Assert-PackageCondition $rejected 'inventory traversal must be rejected'
+} finally {
+    $resolvedTestDirectory = [IO.Path]::GetFullPath($testDirectory)
+    if (-not $resolvedTestDirectory.StartsWith($testParent, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Refusing fixture cleanup outside runtime_tmp.'
+    }
+    Remove-Item -LiteralPath $resolvedTestDirectory -Recurse -Force
+}
 Write-Host 'Windows package plan/template self-test passed. No build, cook or game/server process was started.'

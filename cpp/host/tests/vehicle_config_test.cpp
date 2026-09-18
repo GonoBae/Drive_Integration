@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -291,6 +292,40 @@ void test_legacy_format_version_is_rejected()
     }
 }
 
+void test_runtime_collision_body_offsets_are_validated()
+{
+    const VehicleParameters baseline;
+    auto parameters = baseline;
+    parameters.collision_body_center_forward_offset_m = -0.15f;
+    parameters.collision_body_ground_clearance_m = 0.49f;
+    require(valid_vehicle_parameters(parameters),
+        "a body centre behind the CG and positive clearance must be valid");
+    parameters.collision_body_ground_clearance_m = 0.f;
+    require(valid_vehicle_parameters(parameters),
+        "an explicitly ground-level body bottom must remain a valid profile");
+    parameters.collision_body_ground_clearance_m = -0.01f;
+    require(!valid_vehicle_parameters(parameters),
+        "negative body ground clearance must be rejected");
+    for (const float nonfinite : {std::numeric_limits<float>::infinity(),
+                                 std::numeric_limits<float>::quiet_NaN()}) {
+        parameters = baseline;
+        parameters.collision_body_center_forward_offset_m = nonfinite;
+        require(!valid_vehicle_parameters(parameters),
+            "nonfinite collision centre offsets must be rejected");
+        parameters = baseline;
+        parameters.collision_body_ground_clearance_m = nonfinite;
+        require(!valid_vehicle_parameters(parameters),
+            "nonfinite collision clearances must be rejected");
+    }
+    for (const float direction : {-1.f, 1.f}) {
+        parameters = baseline;
+        parameters.collision_body_center_forward_offset_m = direction
+            * (baseline.wheelbase_m * 0.5f + baseline.collision_body_overhang_m + 0.01f);
+        require(!valid_vehicle_parameters(parameters),
+            "a collision centre offset that puts the CG outside the body must be rejected");
+    }
+}
+
 void test_removed_steering_assist_key_is_rejected()
 {
     const auto rejection = configuration_rejection(
@@ -398,6 +433,7 @@ int main()
         test_invalid_physical_value_is_rejected();
         test_invalid_fraction_values_are_rejected();
         test_invalid_driver_response_values_are_rejected();
+        test_runtime_collision_body_offsets_are_validated();
         test_legacy_format_version_is_rejected();
         test_removed_steering_assist_key_is_rejected();
         test_schema_version_validation_remains_strict();

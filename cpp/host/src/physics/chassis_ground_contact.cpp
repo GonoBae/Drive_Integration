@@ -117,6 +117,7 @@ struct ContactConstraint {
 [[nodiscard]] bool valid_box(const ChassisContactBox& box)
 {
     return std::isfinite(box.center_up_offset_m)
+        && std::isfinite(box.center_forward_offset_m)
         && std::isfinite(box.half_length_m)
         && std::isfinite(box.half_width_m)
         && std::isfinite(box.half_height_m)
@@ -153,6 +154,7 @@ struct ContactConstraint {
         {0.0, 0.0, box.center_up_offset_m - box.half_height_m});
     samples.push_back(
         {0.0, 0.0, box.center_up_offset_m + box.half_height_m});
+    for (auto& sample : samples) sample[0] += box.center_forward_offset_m;
     return samples;
 }
 

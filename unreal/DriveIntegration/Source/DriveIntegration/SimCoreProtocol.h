@@ -88,6 +88,9 @@ namespace SimCoreProtocol
 		float HeadingDegrees = 0.0f;
 		float RemainingSeconds = 0.0f;
 		bool bOutOfService = false;
+		uint32 LeftGroupId = 0;
+		ETrafficSignalAspect LeftAspect = ETrafficSignalAspect::Unknown;
+		float LeftRemainingSeconds = 0.0f;
 	};
 
 	enum class EStructureKind : uint8

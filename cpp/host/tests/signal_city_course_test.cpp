@@ -1,6 +1,7 @@
 #include "collision/collision_world.hpp"
 #include "physics/vehicle_config.hpp"
 #include "physics/vehicle_physics.hpp"
+#include "player_vehicle_profile.hpp"
 #include "terrain/map_package_manifest.hpp"
 #include "terrain/map_package_runtime.hpp"
 
@@ -23,7 +24,7 @@ namespace {
 constexpr double kRadians = std::numbers::pi_v<double> / 180.0;
 constexpr double kDt = 1.0 / 60.0;
 constexpr char kExpectedCollisionChecksum[] =
-    "fnv1a64:7d7812b84f728ac7";
+    "fnv1a64:2232cb521030ae4f";
 
 void require(bool condition, const std::string& message)
 {
@@ -88,8 +89,8 @@ std::vector<RoutePoint> load_route(const std::filesystem::path& directory)
         route.push_back(point);
     }
     require(saw_header, "drive_route.csv is missing its header");
-    require(route.size() == 453,
-            "curved signal city must retain exactly 453 QA route checkpoints");
+    require(route.size() == 839,
+            "extended signal city must retain exactly 839 QA route checkpoints");
     require(std::hypot(route.front().east + 80.0,
                        route.front().north - 40.0) < 0.01
                 && std::abs(route.front().up) < 0.01
@@ -98,8 +99,8 @@ std::vector<RoutePoint> load_route(const std::filesystem::path& directory)
     require(std::hypot(route.back().east - route.front().east,
                        route.back().north - route.front().north) < 0.01,
             "signal-city route must close at its first checkpoint");
-    require(std::abs(route.back().distance - 549.155) < 0.02,
-            "curved drive_route.csv must remain 549.155 m long");
+    require(std::abs(route.back().distance - 929.62) < 0.02,
+            "extended drive_route.csv must remain 929.62 m long");
     return route;
 }
 
@@ -168,9 +169,9 @@ void test_package_contract(
             break;
         }
     }
-    require(package.collision_world->static_collider_count() == 453,
-            "curved Signal City must retain exactly 453 static colliders");
-    require(curb_count == 446, "curved Signal City must retain all 446 semantic curbs");
+    require(package.collision_world->static_collider_count() == 623,
+            "extended Signal City must retain exactly 623 static colliders");
+    require(curb_count == 616, "extended Signal City must retain all 616 semantic curbs");
     require(wall_count == 7 && building_ids.size() == 7,
             "Signal City must retain exactly seven Building_* walls");
     for (int index = 0; index < 7; ++index) {
@@ -315,8 +316,8 @@ void test_every_curb_has_near_and_far_support(
             ++support_samples;
         }
     }
-    require(curb_count == 446,
-            "near/far support test must exercise every one of the 446 curbs");
+    require(curb_count == 616,
+            "near/far support test must exercise every one of the 616 curbs");
     std::cout << "signal-city curb support: curbs=" << curb_count
               << " perpendicular_samples=" << support_samples << '\n';
 }
@@ -526,6 +527,153 @@ void test_representative_24cm_curb_climb(
             "curb climb teleported the chassis vertically");
 }
 
+class ShiftedGround final : public simcore_host::GroundQuery {
+    public:
+        ShiftedGround(const simcore_host::GroundQuery& query, double east, double north)
+            : source(query), east(east), north(north) {}
+        std::optional<simcore_host::GroundHit> query_down(
+            const simcore_host::GroundQueryRequest& input) const override {
+            auto request = input;
+            request.origin_enu.east_m += east;
+            request.origin_enu.north_m += north;
+            auto hit = source.query_down(request);
+            if (hit) {
+                hit->point_enu.east_m -= east;
+                hit->point_enu.north_m -= north;
+            }
+            return hit;
+        }
+        const simcore_host::GroundQuery& source;
+        double east, north;
+};
+
+void test_reported_diagonal_curb_restart(
+    const simcore_host::RuntimeMapPackage& package,
+    const VehicleParameters& parameters)
+{
+    // Captured from the user's stopped, undamaged car. A continuous approach
+    // misses this condition: suspension twist almost completely unloads RL.
+    constexpr double east = -13.7926;
+    constexpr double north = 24.1864;
+    constexpr float heading = 129.512f;
+    for (const auto gear : {VehicleGear::Drive, VehicleGear::Reverse}) {
+        auto colliders = package.collision_world->static_colliders();
+        for (auto& collider : colliders) {
+            collider.shape.center_enu.east_m -= east;
+            collider.shape.center_enu.north_m -= north;
+        }
+        VehiclePhysics vehicle(0, 0, 0, heading, parameters,
+            std::make_shared<ShiftedGround>(*package.ground_query, east, north),
+            std::make_shared<simcore_host::CollisionWorld>(std::move(colliders)));
+        VehicleInput input;
+        input.brake = 1.f;
+        vehicle.set_input(input);
+        for (int tick = 0; tick < 600; ++tick) vehicle.update(kDt);
+        const auto settled = vehicle.get_state();
+        require(settled.wheels[2].normal_load < 1.f
+                    && settled.wheels[3].normal_load > 4000.f,
+                "reported pose must reproduce the almost unloaded left rear tire");
+        require(vehicle.get_last_collision_contacts().empty(),
+                "reported stall is a driveline problem, not a wall contact");
+        std::cout << "reported curb restart gear=" << static_cast<int>(gear)
+                  << " initial_up=" << settled.position_enu.z << " loads=";
+        for (const auto& wheel : settled.wheels) std::cout << wheel.normal_load << ',';
+        input.brake = 0.f;
+        input.throttle = 1.f;
+        input.gear = gear;
+        vehicle.set_input(input);
+        double maximum_speed = 0.0;
+        double maximum_driven_force = 0.0;
+        double maximum_vertical_step = 0.0;
+        auto state = settled;
+        for (int tick = 0; tick < 240; ++tick) {
+            const auto previous = state;
+            state = vehicle.update(kDt);
+            if (tick == 0) {
+                require(std::abs(state.wheels[3].longitudinal_force) > 100.f,
+                        "loaded rear tire must receive drive before the car leaves the stalled pose");
+                require(std::abs(state.wheels[2].longitudinal_force) < 1.f,
+                        "traction brake must not invent ground force on the unloaded rear tire");
+            }
+            maximum_speed = std::max(maximum_speed, std::abs(static_cast<double>(state.speed)));
+            maximum_driven_force = std::max(maximum_driven_force,
+                std::abs(static_cast<double>(state.wheels[2].longitudinal_force
+                    + state.wheels[3].longitudinal_force)));
+            maximum_vertical_step = std::max(maximum_vertical_step,
+                std::abs(static_cast<double>(state.position_enu.z - previous.position_enu.z)));
+            require(!vehicle.ground_coverage_limited(), "reported curb has complete ground coverage");
+        }
+        const double distance = std::hypot(state.east - settled.east, state.north - settled.north);
+        std::cout << " moved=" << distance << " max_speed=" << maximum_speed
+                  << " max_drive_force=" << maximum_driven_force
+                  << " max_vertical_step=" << maximum_vertical_step << '\n';
+        require(distance > 0.75, "a loaded driven tire must restart the reported diagonal curb straddle");
+        require(maximum_vertical_step < 0.08, "restart must not teleport the chassis over the curb");
+    }
+}
+
+void test_sidewalk_straddle_keeps_drive_authority(
+    const simcore_host::RuntimeMapPackage& package,
+    const VehicleParameters& parameters, double heading_offset)
+{
+    std::size_t failures = 0, checked = 0;
+    for (const auto& curb : package.collision_world->static_colliders()) {
+        if (curb.semantic != simcore_host::StaticColliderSemantic::Curb) continue;
+        if (curb.collider_id != "CentralSouth_Curb_R") continue;
+        const double sine = std::sin(curb.shape.heading_rad);
+        const double cosine = std::cos(curb.shape.heading_rad);
+        const auto positive = query_surface(*package.ground_query,
+            curb.shape.center_enu.east_m + cosine,
+            curb.shape.center_enu.north_m - sine, "straddle side");
+        const auto negative = query_surface(*package.ground_query,
+            curb.shape.center_enu.east_m - cosine,
+            curb.shape.center_enu.north_m + sine, "straddle side");
+        const double raised_side = positive.point_enu.up_m > negative.point_enu.up_m ? 1.0 : -1.0;
+        const double east = curb.shape.center_enu.east_m - raised_side * cosine * 0.35;
+        const double north = curb.shape.center_enu.north_m + raised_side * sine * 0.35;
+        auto shifted_colliders = package.collision_world->static_colliders();
+        for (auto& collider : shifted_colliders) {
+            collider.shape.center_enu.east_m -= east;
+            collider.shape.center_enu.north_m -= north;
+        }
+        VehiclePhysics vehicle(0,0,0,
+            static_cast<float>(curb.shape.heading_rad / kRadians + heading_offset),parameters,
+            std::make_shared<ShiftedGround>(*package.ground_query,east,north),
+            std::make_shared<simcore_host::CollisionWorld>(std::move(shifted_colliders)));
+        VehicleInput input;
+        input.brake = 1.0f;
+        vehicle.set_input(input);
+        for (int tick = 0; tick < 120; ++tick) vehicle.update(kDt);
+        input.brake = 0.0f;
+        input.throttle = 1.0f;
+        input.gear = raised_side * std::sin(heading_offset*kRadians) > 0.01
+            ? VehicleGear::Reverse : VehicleGear::Drive;
+        input.steering = std::abs(std::sin(heading_offset*kRadians)) < 0.01
+            ? static_cast<float>(raised_side * std::cos(heading_offset*kRadians) * 0.2) : 0.0f;
+        vehicle.set_input(input);
+        auto state = vehicle.get_state();
+        const auto settled = state;
+        double maximum_speed = 0;
+        for (int tick = 0; tick < 180; ++tick) {
+            state = vehicle.update(kDt);
+            maximum_speed = std::max(maximum_speed, std::abs(static_cast<double>(state.speed)));
+        }
+        ++checked;
+        const double drive_distance = std::hypot(state.east-settled.east,state.north-settled.north);
+        std::cout << "straddle angle=" << heading_offset << " moved=" << drive_distance
+            << " maximum_speed=" << maximum_speed << "\n";
+        if (drive_distance < 0.75) {
+            ++failures;
+            std::cout << "straddle stuck curb=" << curb.collider_id
+                << " move=" << std::hypot(state.east,state.north)
+                << " max_speed=" << maximum_speed << " z=" << state.position_enu.z
+                << " roll=" << state.roll << " contacts=" << vehicle.get_last_collision_contacts().size()
+                << "\n";
+        }
+    }
+    std::cout << "curb straddle checked=" << checked << " failures=" << failures << "\n";
+    require(failures == 0, "a supported road/sidewalk split must retain forward drive and steering");
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -559,11 +707,23 @@ int main(int argc, char** argv)
         run("package/checksum/static contract", [&] {
             test_package_contract(directory, package);
         });
-        run("453-point curved route and four-tire support", [&] {
+        run("839-point extended route and four-tire support", [&] {
             test_route_ground_and_tire_support(package, route, parameters);
         });
         run("all-curb near/far support", [&] {
             test_every_curb_has_near_and_far_support(package, parameters);
+        });
+        run("sidewalk straddle drive authority", [&] {
+            for (const auto vehicle_class : {simcore_host::RuntimeVehicleClass::Sedan,
+                    simcore_host::RuntimeVehicleClass::Compact,simcore_host::RuntimeVehicleClass::Truck}) {
+                std::cout << "straddle profile=" << simcore_host::runtime_vehicle_class_name(vehicle_class) << "\n";
+                for (const double angle : {0.0,30.0,60.0,90.0,120.0,150.0,180.0,-30.0,-60.0,-90.0})
+                    test_sidewalk_straddle_keeps_drive_authority(package,
+                        simcore_host::make_player_vehicle_parameters(parameters,vehicle_class),angle);
+            }
+        });
+        run("reported diagonal curb restart", [&] {
+            test_reported_diagonal_curb_restart(package, parameters);
         });
         run("seven Building wall probes", [&] {
             test_all_building_walls_block_motion(package);

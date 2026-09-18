@@ -1,4 +1,5 @@
 #include "traffic/traffic_network.hpp"
+#include "traffic/signal_approach.hpp"
 
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
@@ -379,7 +380,7 @@ void validate_topology(const TrafficNetwork& network)
         const bool signal_near_stopline = std::any_of(network.signals.begin(), network.signals.end(),
             [&](const TrafficSignal& signal) {
                 return signal.kind == TrafficSignalKind::Vehicle
-                    && signal.group_id == lane.signal_group_id
+                    && (signal.group_id == lane.signal_group_id || signal.left_group_id == lane.signal_group_id)
                     && std::hypot(signal.position_enu.east_m - lane.points.back().east_m,
                                   signal.position_enu.north_m - lane.points.back().north_m) <= 15.0;
             });
@@ -394,6 +395,11 @@ void validate_topology(const TrafficNetwork& network)
                                   signal.position_enu.north_m - lane.points.back().north_m) <= 15.0;
             });
         if (!controlled_stopline) { fail("signal has no matching nearby controlled stopline"); }
+        if (signal.left_group_id != 0 && !std::any_of(network.lanes.begin(), network.lanes.end(),
+            [&](const TrafficLane& lane) {
+                return lane.signal_group_id == signal.left_group_id
+                    && distance(signal.position_enu, lane.points.back()) <= 15.0;
+            })) fail("protected left signal has no matching nearby stopline");
     }
 }
 
@@ -460,7 +466,7 @@ void validate_lane_changes(const TrafficNetwork& network, const GroundQuery& gro
                 || change.target_end_m > lane_length(target) - 5.0
                 || source_span < 8.0 || target_span < 8.0
                 || std::abs(source_span - target_span) > 0.5
-                || lane.signal_group_id != target.signal_group_id) {
+                || !same_signal_approach(network,lane.signal_group_id,target.signal_group_id)) {
                 fail("lane change window must be aligned, at least 8m and clear of junctions");
             }
             const auto steps = static_cast<std::size_t>(std::ceil(source_span));
@@ -525,6 +531,17 @@ void validate_signal_plans(const TrafficNetwork& network)
         if (owner == group_controllers.end() || owner->second != signal.controller_id) {
             fail("signal controller/group must identify one owning signal plan");
         }
+        if (signal.left_group_id != 0) {
+            const auto left_owner=group_controllers.find(signal.left_group_id);
+            if(signal.kind!=TrafficSignalKind::Vehicle || signal.left_group_id==signal.group_id
+                || left_owner==group_controllers.end() || left_owner->second!=signal.controller_id)
+                fail("protected left must name a distinct vehicle movement on the same controller");
+            for(const auto& other:network.signals) {
+                if(other.group_id==signal.left_group_id
+                    || (other.id!=signal.id && other.left_group_id==signal.left_group_id))
+                    fail("protected left movement belongs to exactly one physical head");
+            }
+        }
     }
     std::map<std::pair<std::uint32_t, std::uint32_t>,
              std::vector<const TrafficSignal*>> pedestrian_heads;
@@ -560,9 +577,28 @@ void validate_signal_plans(const TrafficNetwork& network)
                 if (!active(identity.second)) continue;
                 for (const auto& signal : network.signals) {
                     if (signal.controller_id == identity.first && signal.kind == TrafficSignalKind::Vehicle
-                        && active(signal.group_id)) fail("exclusive pedestrian WALK requires all vehicle approaches red");
+                        && (active(signal.group_id) || (signal.left_group_id && active(signal.left_group_id))))
+                        fail("exclusive pedestrian WALK requires all vehicle movements red");
                 }
             }
+        }
+    }
+    for(const auto& plan:network.signal_plans) {
+        const bool protected_left=std::any_of(network.signals.begin(),network.signals.end(),
+            [&](const auto& head){return head.controller_id==plan.id && head.left_group_id!=0;});
+        if(!protected_left) continue;
+        for(const auto& phase:plan.phases) {
+            std::set<std::uint32_t> active_vehicles;
+            const auto active=[&](std::uint32_t group) {
+                return group && (std::find(phase.green_groups.begin(),phase.green_groups.end(),group)!=phase.green_groups.end()
+                    || std::find(phase.yellow_groups.begin(),phase.yellow_groups.end(),group)!=phase.yellow_groups.end());
+            };
+            for(const auto& head:network.signals) {
+                if(head.controller_id!=plan.id || head.kind!=TrafficSignalKind::Vehicle) continue;
+                if(active(head.group_id)) active_vehicles.insert(head.group_id);
+                if(active(head.left_group_id)) active_vehicles.insert(head.left_group_id);
+            }
+            if(active_vehicles.size()>1) fail("protected-left controller permits conflicting vehicle movements");
         }
     }
 }
@@ -691,7 +727,10 @@ TrafficNetwork load_traffic_network(const std::filesystem::path& path,
         if (result.format_version == 1) {
             object_fields(node, kinds, {"id", "group_id", "position_enu", "heading_deg"});
         } else {
-            if (node.get_child_optional("kind")) {
+            if(node.get_child_optional("left_group_id")) {
+                object_fields(node,kinds,{"id","group_id","controller_id","kind","left_group_id",
+                    "position_enu","heading_deg"});
+            } else if (node.get_child_optional("kind")) {
                 object_fields(node, kinds, {"id", "group_id", "controller_id", "kind",
                                             "position_enu", "heading_deg"});
             } else {
@@ -706,6 +745,11 @@ TrafficNetwork load_traffic_network(const std::filesystem::path& path,
         signal.group_id = unsigned_number(node.get_child("group_id"), kinds);
         signal.controller_id = result.format_version == 1
             ? 1U : unsigned_number(node.get_child("controller_id"), kinds);
+        if(const auto left=node.get_child_optional("left_group_id")) {
+            signal.left_group_id=unsigned_number(*left,kinds);
+            if(signal.left_group_id==0 || signal.left_group_id>max_signal_group_id)
+                fail("protected left group is zero or unsupported");
+        }
         if (const auto signal_kind = node.get_child_optional("kind")) {
             kind(*signal_kind, JsonKind::String, kinds);
             if (signal_kind->data() == "vehicle") {
@@ -822,6 +866,8 @@ std::vector<TrafficSignalSnapshot> TrafficNetwork::signals_at(
         sample.position_enu = signal.position_enu;
         sample.heading_deg = signal.heading_deg;
         sample.aspect = SignalAspect::Red;
+        sample.left_group_id=signal.left_group_id;
+        sample.left_aspect=signal.left_group_id ? SignalAspect::Red : SignalAspect::Unknown;
         std::uint64_t remaining_ns = 0;
         if (enabled && format_version == 1) {
             // Reduce in integer nanoseconds before converting to double: uptime
@@ -870,27 +916,30 @@ std::vector<TrafficSignalSnapshot> TrafficNetwork::signals_at(
                     if (position_ns < end) { break; }
                     phase_start_ns = end;
                 }
-                const auto aspect_for = [&](std::size_t index) {
+                const auto aspect_for = [&](std::size_t index,std::uint32_t group) {
                     const auto& phase = plan->phases[index];
                     if (std::binary_search(phase.green_groups.begin(), phase.green_groups.end(),
-                                           signal.group_id)) return SignalAspect::Green;
+                                           group)) return SignalAspect::Green;
                     if (std::binary_search(phase.yellow_groups.begin(), phase.yellow_groups.end(),
-                                           signal.group_id)) return SignalAspect::Yellow;
+                                           group)) return SignalAspect::Yellow;
                     return SignalAspect::Red;
                 };
-                sample.aspect = aspect_for(phase_index);
-                remaining_ns = static_cast<std::uint64_t>(plan->phases[phase_index].duration_ms)
-                    * millisecond_ns - (position_ns - phase_start_ns);
-                std::size_t next = (phase_index + 1) % plan->phases.size();
-                while (next != phase_index && aspect_for(next) == sample.aspect) {
-                    remaining_ns += static_cast<std::uint64_t>(plan->phases[next].duration_ms)
-                        * millisecond_ns;
-                    next = (next + 1) % plan->phases.size();
-                }
-                // A permanently unchanged group has no meaningful finite change
-                // countdown, matching disabled all-red's zero convention.
-                if (next == phase_index && aspect_for(next) == sample.aspect) {
-                    remaining_ns = 0;
+                const auto countdown_for=[&](std::uint32_t group,SignalAspect aspect) {
+                    std::uint64_t remaining=static_cast<std::uint64_t>(plan->phases[phase_index].duration_ms)
+                        *millisecond_ns-(position_ns-phase_start_ns);
+                    std::size_t next=(phase_index+1)%plan->phases.size();
+                    while(next!=phase_index && aspect_for(next,group)==aspect) {
+                        remaining+=static_cast<std::uint64_t>(plan->phases[next].duration_ms)*millisecond_ns;
+                        next=(next+1)%plan->phases.size();
+                    }
+                    return next==phase_index && aspect_for(next,group)==aspect ? std::uint64_t{0}:remaining;
+                };
+                sample.aspect=aspect_for(phase_index,signal.group_id);
+                remaining_ns=countdown_for(signal.group_id,sample.aspect);
+                if(signal.left_group_id) {
+                    sample.left_aspect=aspect_for(phase_index,signal.left_group_id);
+                    sample.left_remaining_seconds=static_cast<double>(countdown_for(signal.left_group_id,
+                        sample.left_aspect))/static_cast<double>(second_ns);
                 }
             }
         }

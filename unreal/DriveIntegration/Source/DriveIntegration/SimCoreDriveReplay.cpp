@@ -108,7 +108,8 @@ void USimCoreDriveReplayComponent::TickComponent(
 	if (Mode != EMode::Replaying || !ReplayGhost || !FMath::IsFinite(DeltaTime) || DeltaTime < 0.0f) return;
 	SimCoreProtocol::FVehicleState State;
 	if (!SimCoreDriveReplay::Sample(Track, ReplayElapsedSeconds, State)) { StopReplay(); return; }
-	ReplayGhost->ApplySnapshot(State, 0.0f, DeltaTime, true, 0.0f, PresentationOffsetCm);
+	ReplayGhost->ApplySnapshot(State, 0.0f, DeltaTime, true, 0.0f, PresentationOffsetCm,
+		SimCoreNpcPresentation::EPoseOrigin::PlayerCenterOfMass);
 	ReplayElapsedSeconds += DeltaTime;
 	if (ReplayElapsedSeconds > Track.DurationSeconds()) StopReplay();
 }

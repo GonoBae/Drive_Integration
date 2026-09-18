@@ -7,9 +7,11 @@
 #include <boost/asio/steady_timer.hpp>
 
 #include <chrono>
+#include <array>
 #include <cmath>
 #include <iostream>
 #include <memory>
+#include <numbers>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -121,10 +123,68 @@ void test_player_vehicle_selection_is_authoritative_and_reset_fenced()
         "selected truck WorldState must parse");
     const auto& ego = truck_world.world_state().entities(0);
     require(ego.runtime_vehicle_class() == simcore::RUNTIME_VEHICLE_CLASS_TRUCK
-            && std::abs(ego.collision_half_length() - 3.65f) < 1e-4f
-            && std::abs(ego.collision_half_width() - 1.22f) < 1e-4f
-            && std::abs(ego.collision_half_height() - 1.25f) < 1e-4f,
+            && std::abs(ego.collision_half_length() - 3.10f) < 1e-4f
+            && std::abs(ego.collision_half_width() - 1.05f) < 1e-4f
+            && std::abs(ego.collision_half_height() - 0.965f) < 1e-4f,
         "selected truck must publish its server-owned collision profile");
+}
+
+void test_truck_collision_matches_authored_body_at_each_heading()
+{
+    const auto parameters = simcore_host::make_player_vehicle_parameters(
+        VehicleParameters{}, simcore_host::RuntimeVehicleClass::Truck);
+    require(std::abs(parameters.cg_height_m - 0.75f) < 1e-6f
+            && std::abs(parameters.chassis_shell_center_up_offset_m - 0.705f) < 1e-6f
+            && std::abs(parameters.chassis_shell_half_height_m - 0.965f) < 1e-6f,
+        "truck shell must match the authored body without moving its physical CG");
+
+    // Model-space body bounds are forward [-3.25, 2.95], right [-1.05, 1.05],
+    // and up [-0.26, 1.67] relative to the unchanged 0.75 m CG. Probe each
+    // face just outside/inside so oversized extents and a lost centre offset
+    // both fail even if the published half-size metadata looks correct.
+    const std::array<Vector3State, 6> outside{{
+        {2.97, 0.0, 1.455}, {-3.27, 0.0, 1.455},
+        {-0.15, 1.07, 1.455}, {-0.15, -1.07, 1.455},
+        {-0.15, 0.0, 2.44}, {-0.15, 0.0, 0.47}}};
+    const std::array<Vector3State, 6> inside{{
+        {2.94, 0.0, 1.455}, {-3.24, 0.0, 1.455},
+        {-0.15, 1.04, 1.455}, {-0.15, -1.04, 1.455},
+        {-0.15, 0.0, 2.41}, {-0.15, 0.0, 0.50}}};
+    for (const float heading_degrees : {0.f, 90.f}) {
+        const double heading = heading_degrees * std::numbers::pi_v<double> / 180.0;
+        const auto empty_world = std::make_shared<simcore_host::CollisionWorld>();
+        VehiclePhysics reference(40.7069, -74.0095, 0.0, heading_degrees,
+            parameters, {}, empty_world);
+        const auto clear_state = reference.update(1.0 / 120.0);
+        require(std::abs(clear_state.east) < 1e-8 && std::abs(clear_state.north) < 1e-8,
+            "an offset truck collision centre must not translate its stationary CG");
+        for (std::size_t face = 0; face < outside.size(); ++face) {
+            for (const bool overlapping : {false, true}) {
+                const auto& point = overlapping ? inside[face] : outside[face];
+                const simcore_host::StaticObbCollider probe{
+                    "truck-body-face-probe", simcore_host::StaticColliderSemantic::Wall,
+                    {{std::sin(heading) * point.x + std::cos(heading) * point.y,
+                      std::cos(heading) * point.x - std::sin(heading) * point.y},
+                     point.z, heading, 0.005, 0.005, 0.005}, {0.8, 0.0}};
+                const auto world = std::make_shared<simcore_host::CollisionWorld>(
+                    std::vector<simcore_host::StaticObbCollider>{probe});
+                VehiclePhysics vehicle(40.7069, -74.0095, 0.0, heading_degrees,
+                    parameters, {}, world);
+                const auto state = vehicle.update(1.0 / 120.0);
+                if (vehicle.get_last_collision_contacts().empty() == overlapping) {
+                    throw std::runtime_error("truck authored face contact mismatch; face="
+                        + std::to_string(face) + " heading=" + std::to_string(heading_degrees)
+                        + " overlapping=" + std::to_string(overlapping));
+                }
+                if (!overlapping) {
+                    require(std::abs(state.east - clear_state.east) < 1e-8
+                            && std::abs(state.north - clear_state.north) < 1e-8
+                            && std::abs(state.position_enu.z - clear_state.position_enu.z) < 1e-8,
+                        "a probe outside the authored truck must not displace its physical pose");
+                }
+            }
+        }
+    }
 }
 
 std::string make_hello_message(
@@ -1391,6 +1451,7 @@ int main()
             "optional observer must preserve the frozen EntityStatePacket format");
     test_host_requires_verified_map_identity();
     test_player_vehicle_selection_is_authoritative_and_reset_fenced();
+    test_truck_collision_matches_authored_body_at_each_heading();
     test_traffic_lifecycle_and_map_reload();
     test_authoritative_health_initial_reset_active_and_nonnegative_age();
     test_health_reports_tick_overruns_and_reset_clears_metrics();

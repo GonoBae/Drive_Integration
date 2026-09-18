@@ -100,6 +100,7 @@ struct RuntimeEntityState {
     // NPC-only monotonic event sequence; reset to zero with the Play lifecycle.
     std::uint32_t horn_event_sequence = 0;
     RuntimeVehicleClass vehicle_class = RuntimeVehicleClass::Unspecified;
+    bool npc_local_bypass_active = false;
 };
 
 struct ParsedControlCommand {

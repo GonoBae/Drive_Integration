@@ -5,6 +5,7 @@
 #include "Animation/AnimSingleNodeInstance.h"
 #include "Components/BoxComponent.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Components/PoseableMeshComponent.h"
 #include "Engine/Engine.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/World.h"
@@ -70,7 +71,7 @@ UBoxComponent* AddQueryOnlyGroundBox(
 SimCoreProtocol::FVehicleState Pedestrian(float Speed = 1.4f)
 {
 	SimCoreProtocol::FVehicleState State;
-	State.EntityId = 2002;
+	State.EntityId = 2004; // Adult-height even ID; population profiles also include smaller bodies.
 	State.EntityKind = SimCoreProtocol::EEntityKind::Pedestrian;
 	State.PositionEnu = FVector3d(10.0, 20.0, 0.9);
 	State.LinearVelocityEnu = FVector3d(0.0, Speed, 0.0);
@@ -240,6 +241,39 @@ bool FSimCorePedestrianRagdollTest::RunTest(const FString& Parameters)
 	Ok &= TestTrue(TEXT("Server +X-forward root is authoritative even while its skeletal mesh tumbles"),
 		Actor->GetActorLocation().Equals(FVector(2000, 1100, 90), 0.01)
 		&& Actor->GetActorForwardVector().Equals(FVector::ForwardVector, 0.001));
+	const FTransform FrozenRagdollRoot = Actor->GetActorTransform();
+	TArray<TPair<FBodyInstance*, FTransform>> FrozenBodies;
+	bool bHadMovingBody = false;
+	for (FBodyInstance* Body : Mesh->Bodies)
+	{
+		if (!Body || !Body->IsValidBodyInstance() || !Body->IsInstanceSimulatingPhysics()) continue;
+		FrozenBodies.Emplace(Body, Body->GetUnrealWorldTransform());
+		bHadMovingBody |= !Body->GetUnrealWorldVelocity().IsNearlyZero(0.01);
+	}
+	Ok &= TestTrue(TEXT("stale ragdoll fixture contains moving simulated bodies"),
+		!FrozenBodies.IsEmpty() && bHadMovingBody);
+	Actor->FreezePresentation();
+	Actor->FreezePresentation();
+	for (int32 Frame = 0; Frame < 3; ++Frame)
+		Scene.World->Tick(LEVELTICK_All, 1.0f / 60.0f);
+	bool bBodiesRemainFrozen = true;
+	for (const auto& Frozen : FrozenBodies)
+	{
+		bBodiesRemainFrozen &= Frozen.Key->IsInstanceSimulatingPhysics()
+			&& !Frozen.Key->IsInstanceAwake()
+			&& Frozen.Key->GetUnrealWorldVelocity().IsNearlyZero(0.01)
+			&& Frozen.Key->GetUnrealWorldAngularVelocityInRadians().IsNearlyZero(0.01)
+			&& Frozen.Key->GetUnrealWorldTransform().Equals(Frozen.Value, 0.01f);
+	}
+	Ok &= TestTrue(TEXT("stale freeze keeps actual ragdoll bodies asleep and motionless through physics frames"),
+		Actor->IsPresentationFrozen() && Actor->IsRagdollActive() && !Actor->IsHidden()
+		&& Mesh->bPauseAnims && !Mesh->IsGravityEnabled() && bBodiesRemainFrozen
+		&& Actor->GetActorTransform().Equals(FrozenRagdollRoot, 0.001f));
+	Ok &= TestTrue(TEXT("fresh same-collision state resumes retained ragdoll without another launch"),
+		Actor->ApplySnapshot(State, 0.0f, 0.02f, true, 0.05f, FVector::ZeroVector)
+		&& !Actor->IsPresentationFrozen() && Actor->IsRagdollActive()
+		&& !Mesh->bPauseAnims && Mesh->IsGravityEnabled()
+		&& Actor->GetRagdollLaunchCount() == 1);
 	Actor->ApplySnapshot(State, 0.0f, 0.02f, false, 0.05f, FVector::ZeroVector);
 	Ok &= TestTrue(TEXT("Safe stop freezes ragdoll without restoring walking"),
 		Actor->IsRagdollActive() && Mesh->bPauseAnims && !Mesh->IsGravityEnabled());
@@ -263,10 +297,31 @@ bool FSimCorePedestrianRagdollTest::RunTest(const FString& Parameters)
 		Actor->IsRagdollActive() && Actor->IsRecoveringRagdoll()
 		&& Actor->GetRecoveryPoseAlpha() > 0.0f
 		&& Actor->GetRecoveryPoseAlpha() < 1.0f);
-	for (int32 Index = 0; Index < 27; ++Index)
+	Ok &= TestTrue(TEXT("get-up uses its own kneeling pose instead of stretching a live ragdoll into idle"),
+		Actor->GetRecoveryMesh() && Actor->GetRecoveryMesh()->IsVisible()
+		&& !Mesh->IsVisible() && !Mesh->IsSimulatingPhysics());
+	if (!TestNotNull(TEXT("recovery pose exists before stale freeze"), Actor->GetRecoveryMesh())) return false;
+	const float FrozenRecoveryAlpha = Actor->GetRecoveryPoseAlpha();
+	const float FrozenWalkDelay = Actor->GetRecoveryWalkDelaySeconds();
+	const FTransform FrozenRecoveryAnchor = Actor->GetRecoveryMesh()->GetComponentTransform();
+	const FTransform FrozenRecoveryHead = Actor->GetRecoveryMesh()->GetBoneTransformByName(
+		TEXT("head"), EBoneSpaces::ComponentSpace);
+	Actor->FreezePresentation();
+	Actor->FreezePresentation();
+	for (int32 Frame = 0; Frame < 3; ++Frame)
+		Scene.World->Tick(LEVELTICK_All, 1.0f / 60.0f);
+	Ok &= TestTrue(TEXT("stale recovery keeps its world anchor, bone pose and recovery progress"),
+		Actor->IsPresentationFrozen() && Actor->IsRecoveringRagdoll()
+		&& Actor->GetRecoveryPoseAlpha() == FrozenRecoveryAlpha
+		&& Actor->GetRecoveryWalkDelaySeconds() == FrozenWalkDelay
+		&& Actor->GetRecoveryMesh()->IsVisible() && !Mesh->IsVisible()
+		&& Actor->GetRecoveryMesh()->GetComponentTransform().Equals(FrozenRecoveryAnchor, 0.001f)
+		&& Actor->GetRecoveryMesh()->GetBoneTransformByName(TEXT("head"), EBoneSpaces::ComponentSpace)
+			.Equals(FrozenRecoveryHead, 0.001f));
+	for (int32 Index = 0; Index < 40; ++Index)
 		Actor->ApplySnapshot(State, 0.0f, 0.05f, true, 0.05f, FVector::ZeroVector);
 	Ok &= TestTrue(TEXT("Only server-authorized recovery blends back and remains recovered without event replay"),
-		!Actor->IsRagdollActive() && !Mesh->IsSimulatingPhysics()
+		!Actor->IsPresentationFrozen() && !Actor->IsRagdollActive() && !Mesh->IsSimulatingPhysics()
 		&& Mesh->GetCollisionEnabled() == ECollisionEnabled::NoCollision
 		&& Mesh->GetAttachParent() == Actor->GetRootComponent() && Actor->GetRagdollLaunchCount() == 2);
 	Ok &= TestTrue(TEXT("A recovered person pauses upright before resuming a received walking velocity"),
@@ -313,6 +368,48 @@ bool FSimCorePedestrianRagdollTest::RunTest(const FString& Parameters)
 	Restored->ApplySnapshot(State, 0.0f, 0.02f, true, 0.05f, FVector::ZeroVector);
 	Ok &= TestTrue(TEXT("Reconnect into old damage reconstructs downed physics without re-firing its launch"),
 		Restored->IsRagdollActive() && Restored->GetRagdollLaunchCount() == 0);
+	return Ok;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSimCorePedestrianPopulationProfileTest,
+	"DriveIntegration.PedestrianPresentation.PopulationProfilesMatchCapsules",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FSimCorePedestrianPopulationProfileTest::RunTest(const FString& Parameters)
+{
+	using namespace SimCorePedestrianPresentationTests;
+	FTestWorld TestWorld;
+	auto* Actor = TestWorld.World->SpawnActor<ASimCorePedestrianPresentationActor>();
+	if (!TestNotNull(TEXT("actor"), Actor)) return false;
+	bool Ok = true;
+	TSet<float> Heights;
+	TSet<float> Speeds;
+	for (const uint32 Id : {2001u, 2002u, 2003u})
+	{
+		const auto Profile = SimCorePedestrianPresentation::BodyProfile(Id);
+		auto State = Pedestrian(Profile.WalkingSpeedMps);
+		State.EntityId = Id;
+		State.PositionEnu.Z = Profile.HalfHeightMeters;
+		State.CollisionHalfHeightMeters = Profile.HalfHeightMeters;
+		State.CollisionRadiusMeters = Profile.CapsuleRadiusMeters;
+		Ok &= TestTrue(TEXT("population profile snapshot applies"),
+			Actor->ApplySnapshot(State, 0.0f, 0.02f, true, 0.05f, FVector::ZeroVector));
+		auto* Mesh = Actor->GetCharacterMesh();
+		const FBox Model = Mesh->GetSkeletalMeshAsset()->GetImportedBounds().GetBox();
+		const double Height = Model.GetSize().Z * Mesh->GetComponentScale().Z;
+		const double Foot = Mesh->GetComponentTransform().TransformPosition(
+			FVector(Model.GetCenter().X, Model.GetCenter().Y, Model.Min.Z)).Z;
+		Ok &= TestTrue(TEXT("visual height and feet match the authoritative capsule"),
+			FMath::IsNearlyEqual(Height, Profile.HalfHeightMeters * 200.0, 0.01)
+			&& FMath::IsNearlyZero(Foot, 0.01));
+		Ok &= TestTrue(TEXT("shorter limbs use proportionally shorter animation strides"),
+			FMath::IsNearlyEqual(Actor->GetAnimationPlayRate(), Profile.WalkingSpeedMps
+				/ (1.4f * Profile.HalfHeightMeters / 0.9f), 0.001f));
+		Heights.Add(Profile.HalfHeightMeters);
+		Speeds.Add(Profile.WalkingSpeedMps);
+	}
+	Ok &= TestTrue(TEXT("population has three different heights and walking speeds"),
+		Heights.Num() == 3 && Speeds.Num() == 3);
 	return Ok;
 }
 
@@ -498,9 +595,28 @@ bool FSimCorePedestrianHumanoidAnimationTest::RunTest(const FString& Parameters)
 	Ok &= TestTrue(TEXT("Normal crossing velocity plays the bundled forward-walk clip"), Actor->IsWalking()
 		&& FMath::IsNearlyEqual(Actor->GetAnimationPlayRate(), 1.0f)
 		&& Animation->GetAnimationAsset()->GetName() == TEXT("MF_Unarmed_Walk_Fwd"));
+	Actor->ApplySnapshot(Pedestrian(), 0.04f, 0.02f, true, 0.05f, FVector::ZeroVector);
+	Mesh->SetPosition(0.31f, false);
+	Mesh->RefreshBoneTransforms();
+	const FTransform FrozenWalkingRoot = Actor->GetActorTransform();
+	const FTransform FrozenWalkingHead = Mesh->GetSocketTransform(TEXT("head"), RTS_World);
+	const auto* FrozenAnimationAsset = Animation->GetAnimationAsset();
+	const float FrozenAnimationPosition = Mesh->GetPosition();
+	Actor->FreezePresentation();
+	Actor->FreezePresentation();
+	Ok &= TestTrue(TEXT("stale walking freeze retains the displayed prediction, clip and animation phase"),
+		Actor->IsPresentationFrozen() && !Actor->IsHidden()
+		&& Mesh->bPauseAnims && Actor->GetAnimationPlayRate() == 0.0f
+		&& Actor->GetActorTransform().Equals(FrozenWalkingRoot, 0.001f)
+		&& Mesh->GetSingleNodeInstance()->GetAnimationAsset() == FrozenAnimationAsset
+		&& Mesh->GetPosition() == FrozenAnimationPosition
+		&& Mesh->GetSocketTransform(TEXT("head"), RTS_World).Equals(FrozenWalkingHead, 0.001f));
 	Actor->ApplySnapshot(Pedestrian(0.7f), 0.0f, 0.02f, true, 0.05f, FVector::ZeroVector);
 	Ok &= TestTrue(TEXT("Half walking speed halves cadence without moving the actor locally"),
-		FMath::IsNearlyEqual(Actor->GetAnimationPlayRate(), 0.5f)
+		!Actor->IsPresentationFrozen() && !Mesh->bPauseAnims
+		&& Mesh->GetSingleNodeInstance()->GetAnimationAsset() == FrozenAnimationAsset
+		&& Mesh->GetPosition() == FrozenAnimationPosition
+		&& FMath::IsNearlyEqual(Actor->GetAnimationPlayRate(), 0.5f)
 		&& Actor->GetActorLocation().Equals(FVector(2000, 1000, 90), 0.01));
 	Actor->ApplySnapshot(Pedestrian(0.0f), 0.0f, 0.02f, true, 0.05f, FVector::ZeroVector);
 	Ok &= TestTrue(TEXT("Signal wait or settled collision displays idle, never walking in place"),

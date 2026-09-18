@@ -3,16 +3,20 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Components/SceneComponent.h"
+#include "Components/PoseableMeshComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "SimCorePedestrianPresentationActor.h"
 #include "SimCoreDeformableBody.h"
+#include "SimCoreDriverPresentation.h"
 #include "Engine/World.h"
 #include "HAL/PlatformTime.h"
 #include "Misc/AutomationTest.h"
 #include "SimCoreClientComponent.h"
 #include "SimCoreTrafficSignalActor.h"
+#include "SimCoreVehicleVisualProfile.h"
 #include <limits>
 
 namespace SimCoreNpcPresentationTests
@@ -112,7 +116,7 @@ void Vector(TArray<uint8>& Out, uint32 Field, const FVector3d& Value)
 }
 TArray<uint8> Envelope(uint64 Sequence, const TArray<FVehicleState>& Entities,
 	const FString& Status = TEXT("active"), const FString& Session = Play,
-	const FString& Map = MapChecksum)
+	const FString& Map = MapChecksum, uint64 SimulationTimeNs = 900000)
 {
 	TArray<uint8> World, Ego, Out;
 	Integer(Ego, 1, 1); Integer(Ego, 22, static_cast<uint8>(EEntityKind::EgoVehicle)); Message(World, 1, Ego);
@@ -145,7 +149,7 @@ TArray<uint8> Envelope(uint64 Sequence, const TArray<FVehicleState>& Entities,
 	{
 		TArray<uint8> Health; Text(Health, 1, Status); Integer(Health, 5, 1); Message(World, 2, Health);
 	}
-	Integer(Out, 1, SchemaVersion); Integer(Out, 2, Sequence); Integer(Out, 3, 900000);
+	Integer(Out, 1, SchemaVersion); Integer(Out, 2, Sequence); Integer(Out, 3, SimulationTimeNs);
 	Text(Out, 5, Map); Text(Out, 7, Session); Message(Out, 12, World);
 	return Out;
 }
@@ -363,7 +367,7 @@ bool FSimCoreNpcFleetVariantsTest::RunTest(const FString& Parameters)
 		{ERuntimeVehicleClass::Compact,
 			TEXT("/Game/Vehicles/NpcFleet/SM_CompactBody.SM_CompactBody"), 1.8f, .86f, .70f, 4},
 		{ERuntimeVehicleClass::Truck,
-			TEXT("/Game/Vehicles/NpcFleet/SM_TruckBody.SM_TruckBody"), 3.1f, 1.12f, 1.25f, 4},
+			TEXT("/Game/Vehicles/NpcFleet/SM_TruckBody.SM_TruckBody"), 3.1f, 1.05f, .965f, 4},
 		{ERuntimeVehicleClass::Motorcycle,
 			TEXT("/Game/Vehicles/NpcFleet/SM_MotorcycleBody.SM_MotorcycleBody"), 1.15f, .38f, .68f, 2},
 	};
@@ -375,7 +379,9 @@ bool FSimCoreNpcFleetVariantsTest::RunTest(const FString& Parameters)
 		State.CollisionHalfLengthMeters = Case.HalfLength;
 		State.CollisionHalfWidthMeters = Case.HalfWidth;
 		State.CollisionHalfHeightMeters = Case.HalfHeight;
-		State.PositionEnu.Z = Case.HalfHeight + .1f;
+		SimCoreVehicleVisualProfile::FProfile Profile;
+		SimCoreVehicleVisualProfile::Resolve(Case.Class, Profile);
+		State.PositionEnu.Z = Case.HalfHeight + Profile.NpcCollisionGroundClearanceMeters;
 		Ok &= TestTrue(TEXT("Vehicle-class snapshot is accepted"),
 			Actor->ApplySnapshot(State, 0.0f, .016f, true, .05f,
 				FVector::ZeroVector));
@@ -389,6 +395,23 @@ bool FSimCoreNpcFleetVariantsTest::RunTest(const FString& Parameters)
 			FMath::IsNearlyZero(Actor->GetActorLocation().Z
 				+ Actor->GetModelRoot()->GetRelativeLocation().Z
 				+ Actor->GetAuthoredBounds().Min.Z, .02f));
+		if (Case.Class == ERuntimeVehicleClass::Truck)
+		{
+			const FBox BodyBounds = Actor->GetBody()->GetStaticMesh()->GetBoundingBox();
+			const FVector BodyCentre = Actor->GetModelRoot()->GetRelativeLocation()
+				+ BodyBounds.GetCenter();
+			Ok &= TestTrue(TEXT("Truck body centre is the authoritative NPC collision centre"),
+				BodyCentre.IsNearlyZero(.001));
+			Ok &= TestTrue(TEXT("Truck body asset fits all six collision faces"),
+				BodyBounds.GetExtent().Equals(FVector(Case.HalfLength, Case.HalfWidth,
+					Case.HalfHeight) * 100.0, .001));
+			State.HeadingDegrees = 90.0f;
+			Ok &= TestTrue(TEXT("Turned truck snapshot is accepted"),
+				Actor->ApplySnapshot(State, 0.0f, .016f, true, .05f, FVector::ZeroVector));
+			Ok &= TestTrue(TEXT("Body and collision centres stay aligned after turning"),
+				Actor->GetBody()->GetComponentTransform().TransformPosition(BodyBounds.GetCenter())
+					.Equals(Actor->GetActorLocation(), .001));
+		}
 		Sizes.Add(Actor->GetAuthoredBounds().GetSize());
 	}
 	Ok &= TestTrue(TEXT("Truck, compact and motorcycle have distinct silhouettes"),
@@ -457,7 +480,11 @@ bool FSimCoreNpcClientLifecycleTest::RunTest(const FString& Parameters)
 		&& Actor->GetWheelSpinDegrees() == SpinBeforeWrongPlay);
 	Apply(32, {Npc()});
 	SetAge(0.101); Client->TickRuntimeProxyActors(0.01f);
-	Ok &= TestTrue(TEXT("No packet for 100 ms destroys the actual actor and clears cached entities"),
+	Ok &= TestTrue(TEXT("A short stale gap freezes the same actor and retains its accepted cache"),
+		Client->RuntimeEntityActors.FindRef(1001).Get() == Actor && Actor->IsPresentationFrozen()
+		&& Client->RuntimeEntityStates.Num() == 1);
+	SetAge(0.501); Client->TickRuntimeProxyActors(0.01f);
+	Ok &= TestTrue(TEXT("No packet for 500 ms destroys the actual actor and clears cached entities"),
 		Actor->IsActorBeingDestroyed() && Client->RuntimeEntityActors.IsEmpty() && Client->RuntimeEntityStates.IsEmpty());
 	Apply(31, {Npc()}); Client->TickRuntimeProxyActors(0.01f);
 	Ok &= TestTrue(TEXT("An old packet cannot resurrect an expired NPC"), Client->RuntimeEntityActors.IsEmpty());
@@ -495,6 +522,201 @@ bool FSimCoreNpcClientLifecycleTest::RunTest(const FString& Parameters)
 	Ok &= TestTrue(TEXT("Disconnect/reset leaves no runtime cache"),
 		Client->RuntimeEntityStates.IsEmpty() && Client->RuntimeEntityActors.IsEmpty());
 	Ok &= TestEqual(TEXT("Presentation and fixture acceptance never send controls or open a real connection"), Socket->SendCount, 0);
+	return Ok;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSimCoreRuntimeEntityGraceTest,
+	"DriveIntegration.NpcPresentation.BoundedReceiveGrace",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSimCoreRuntimeEntityGraceTest::RunTest(const FString& Parameters)
+{
+	using namespace SimCoreNpcPresentationTests;
+	FTestWorld Scene;
+	if (!Scene.World) return false;
+	auto* Owner = Scene.World->SpawnActor<AActor>();
+	if (!Owner) return false;
+	auto* Client = NewObject<USimCoreClientComponent>(Owner);
+	auto Socket = MakeShared<FConnectedSocket>();
+	Client->Socket = Socket; Client->ConnectionState = ESimCoreConnectionState::Connected;
+	Client->SocketGeneration = 7;
+	Client->bProtocolHandshakeComplete = true; Client->bMapHandshakeComplete = true;
+	Client->PlaySessionId = Play; Client->MapPackageChecksum = MapChecksum;
+	auto CarState = Npc(); CarState.YawRateRad = 0.3f;
+	CarState.DamagePercent = 35.0f; CarState.LastImpactImpulseNs = 9000.0f;
+	CarState.CollisionEventSequence = 1; CarState.DamageZone = EVehicleDamageZone::Front;
+	auto PedState = Npc(1.4f);
+	PedState.EntityId = 2001; PedState.EntityKind = EEntityKind::Pedestrian;
+	PedState.PositionEnu.Z = 0.9; PedState.CollisionHalfHeightMeters = 0.9f;
+	PedState.CollisionRadiusMeters = 0.3f;
+	uint64 Sequence = 0;
+	uint64 WireSimulationTimeNs = 1000000000;
+	const auto Apply = [&](const TArray<FVehicleState>& Entities)
+	{
+		Client->ApplyBinaryMessage(7, Envelope(++Sequence, Entities,
+			TEXT("active"), Play, MapChecksum, WireSimulationTimeNs), true, false);
+	};
+	const auto SetAge = [&](double Age)
+	{
+		Client->RuntimeEntityReceiveTimeSeconds = FPlatformTime::Seconds() - Age;
+		Client->LatestStateReceiveTimeSeconds = Client->RuntimeEntityReceiveTimeSeconds;
+	};
+	const auto SpawnFresh = [&]()
+	{
+		Apply({CarState, PedState});
+		return Client->RuntimeEntityActors.Num() == 2;
+	};
+	if (!TestTrue(TEXT("Accepted wire creates both actual runtime actors"), SpawnFresh())) return false;
+	auto* Car = Cast<ASimCoreNpcPresentationActor>(Client->RuntimeEntityActors.FindRef(1001).Get());
+	auto* Ped = Cast<ASimCorePedestrianPresentationActor>(Client->RuntimeEntityActors.FindRef(2001).Get());
+	if (!Car || !Ped || !Car->GetWheel(0)) return false;
+	auto* Driver = Car->GetDriverPresentation();
+	if (!Driver || !Ped->GetCharacterMesh()) return false;
+	bool Ok = TestEqual(TEXT("Default prediction cap remains 50 ms"), Client->RuntimeEntityMaxExtrapolationSeconds, 0.05f);
+	Ok &= TestEqual(TEXT("Health freshness remains 100 ms"), Client->HealthStateStaleTimeoutSeconds, 0.1f);
+	SetAge(0.095); Client->TickRuntimeProxyActors(0.04f);
+	Driver->AdvancePresentation(0.02f);
+	const FTransform CarPose = Car->GetActorTransform();
+	const FTransform PedPose = Ped->GetActorTransform();
+	const FTransform WheelPose = Car->GetWheel(0)->GetRelativeTransform();
+	const float WheelSpin = Car->GetWheelSpinDegrees();
+	const float DriverInjury = Driver->GetCurrentInjuryAlpha();
+	const float AnimationPosition = Ped->GetCharacterMesh()->GetPosition();
+	Ok &= TestTrue(TEXT("A 95 ms-old pose extrapolates only 50 ms, with actual wheel motion"),
+		FMath::IsNearlyEqual(CarPose.GetLocation().X, 2025.0, 0.01) && WheelSpin > 0.0f
+		&& Ped->IsWalking() && DriverInjury > 0.0f);
+	for (const double Age : {0.101, 0.2, 0.49})
+	{
+		SetAge(Age); Client->TickRuntimeProxyActors(0.05f);
+		Driver->AdvancePresentation(0.05f);
+		Ped->GetCharacterMesh()->TickAnimation(0.05f, false);
+		Ok &= TestTrue(TEXT("100-490 ms grace preserves identities, cache and visible frozen poses"),
+			Client->RuntimeEntityActors.FindRef(1001).Get() == Car
+			&& Client->RuntimeEntityActors.FindRef(2001).Get() == Ped
+			&& Client->RuntimeEntityStates.Num() == 2
+			&& !Car->IsHidden() && !Ped->IsHidden()
+			&& Car->IsPresentationFrozen() && Ped->IsPresentationFrozen()
+			&& Car->GetActorTransform().Equals(CarPose, 0.001)
+			&& Ped->GetActorTransform().Equals(PedPose, 0.001)
+			&& Car->GetWheel(0)->GetRelativeTransform().Equals(WheelPose, 0.001)
+			&& Car->GetWheelSpinDegrees() == WheelSpin
+			&& Driver->IsPresentationFrozen() && Driver->GetCurrentInjuryAlpha() == DriverInjury
+			&& Ped->GetCharacterMesh()->bPauseAnims && Ped->GetAnimationPlayRate() == 0.0f
+			&& Ped->GetCharacterMesh()->GetPosition() == AnimationPosition);
+		Ok &= TestFalse(TEXT("Visual retention never extends authoritative Health freshness"),
+			Client->GetHealthDisplay().bAuthoritative);
+		Ok &= TestEqual(TEXT("Retained visuals still report Stale Health"),
+			Client->GetHealthDisplay().Status, FString(TEXT("Stale")));
+	}
+	const double FrozenArrival = Client->RuntimeEntityReceiveTimeSeconds;
+	Client->ApplyBinaryMessage(6, Envelope(Sequence + 1, {}), true, false);
+	Client->ApplyBinaryMessage(7, Envelope(Sequence, {}), true, false);
+	Ok &= TestTrue(TEXT("Rejected generation/sequence cannot extend the retention deadline"),
+		Client->RuntimeEntityReceiveTimeSeconds == FrozenArrival
+		&& Client->RuntimeEntityActors.FindRef(1001).Get() == Car);
+	SetAge(0.2);
+	CarState.PositionEnu.Y += 1.0; PedState.PositionEnu.Y += 0.3;
+	Apply({CarState, PedState});
+	Ok &= TestTrue(TEXT("Fresh recovery after a 200 ms gap uses the same actors and normal pose correction"),
+		Client->RuntimeEntityActors.FindRef(1001).Get() == Car
+		&& Client->RuntimeEntityActors.FindRef(2001).Get() == Ped
+		&& !Car->IsPresentationFrozen() && !Driver->IsPresentationFrozen()
+		&& !Ped->IsPresentationFrozen() && Ped->IsWalking()
+		&& Car->GetActorLocation().X > CarPose.GetLocation().X + 50.0
+		&& Car->GetWheelSpinDegrees() == WheelSpin);
+	SetAge(0.02); Client->TickRuntimeProxyActors(0.01f);
+	Ok &= TestTrue(TEXT("Recovery advances wheels only for the new frame, not the missing interval"),
+		Car->GetWheelSpinDegrees() > WheelSpin && Car->GetWheelSpinDegrees() < WheelSpin + 10.0f);
+	SetAge(0.501); Client->TickRuntimeProxyActors(0.01f);
+	Ok &= TestTrue(TEXT("Retention deadline destroys both actual actors and all cache"),
+		Car->IsActorBeingDestroyed() && Ped->IsActorBeingDestroyed()
+		&& Client->RuntimeEntityActors.IsEmpty() && Client->RuntimeEntityStates.IsEmpty());
+	Client->ApplyBinaryMessage(7, Envelope(Sequence, {CarState, PedState}), true, false);
+	Ok &= TestTrue(TEXT("An old packet cannot resurrect expired actors"), Client->RuntimeEntityActors.IsEmpty());
+	if (!SpawnFresh()) return false;
+	AActor* BeforeExpiredReceive = Client->RuntimeEntityActors.FindRef(1001).Get();
+	SetAge(0.501); Apply({CarState, PedState});
+	Ok &= TestTrue(TEXT("A fresh callback after deadline replaces actors even before an expiry tick"),
+		BeforeExpiredReceive->IsActorBeingDestroyed()
+		&& Client->RuntimeEntityActors.FindRef(1001).Get() != BeforeExpiredReceive);
+	AActor* Missing = Client->RuntimeEntityActors.FindRef(2001).Get();
+	Missing->Destroy(); Client->RuntimeEntityActors.Remove(2001);
+	SetAge(0.2); Client->TickRuntimeProxyActors(0.01f);
+	Ok &= TestTrue(TEXT("Stale cache never spawns a missing actor"),
+		!Client->RuntimeEntityActors.Contains(2001) && Client->RuntimeEntityStates.Num() == 2);
+	AActor* Deleted = Client->RuntimeEntityActors.FindRef(1001).Get();
+	Apply({});
+	Ok &= TestTrue(TEXT("Accepted entity deletion remains immediate during grace"),
+		Deleted->IsActorBeingDestroyed() && Client->RuntimeEntityStates.IsEmpty());
+	if (!SpawnFresh()) return false;
+	AActor* Replaced = Client->RuntimeEntityActors.FindRef(1001).Get();
+	SetAge(0.2); Client->TickRuntimeProxyActors(0.01f);
+	auto ChangedKind = PedState; ChangedKind.EntityId = 1001;
+	Apply({ChangedKind});
+	Ok &= TestTrue(TEXT("Accepted kind change replaces a frozen car immediately"),
+		Replaced->IsActorBeingDestroyed()
+		&& Cast<ASimCorePedestrianPresentationActor>(Client->RuntimeEntityActors.FindRef(1001).Get()));
+	auto BikeState = Npc(12.0f);
+	BikeState.RuntimeVehicleClass = ERuntimeVehicleClass::Motorcycle;
+	Apply({BikeState});
+	auto* Bike = Cast<ASimCoreNpcPresentationActor>(Client->RuntimeEntityActors.FindRef(1001).Get());
+	if (!Bike || !Bike->GetDriverPresentation()->GetDriverMesh()) return false;
+	auto* Rider = Bike->GetDriverPresentation();
+	BikeState.CollisionEventSequence = 1; BikeState.LastImpactImpulseNs = 1500.0f;
+	BikeState.SpeedMps = 0.0f; BikeState.LinearVelocityEnu = FVector3d::ZeroVector;
+	WireSimulationTimeNs += 50000000; Apply({BikeState});
+	if (!TestTrue(TEXT("Wire-accepted collision ejects an actual rider before the receive gap"),
+		Rider->IsRiderEjected())) return false;
+	const FTransform RiderBeforeGap = Rider->GetDriverMesh()->GetComponentTransform();
+	const FVector RiderVelocityBeforeGap = Rider->GetRiderVelocityCmPerSecond();
+	SetAge(0.2); // Intentionally no stale tick before the receive callback.
+	WireSimulationTimeNs += 200000000; Apply({BikeState});
+	Ok &= TestTrue(TEXT("Fresh-before-stale-tick recovery rebases rider time without catch-up"),
+		Client->RuntimeEntityActors.FindRef(1001).Get() == Bike && Rider->IsRiderEjected()
+		&& !Rider->IsPresentationFrozen()
+		&& Rider->GetDriverMesh()->GetComponentTransform().Equals(RiderBeforeGap, 0.001)
+		&& Rider->GetRiderVelocityCmPerSecond().Equals(RiderVelocityBeforeGap, 0.001));
+	WireSimulationTimeNs += 50000000; Apply({BikeState});
+	Ok &= TestTrue(TEXT("Rider resumes its next accepted interval after callback-first recovery"),
+		!Rider->GetDriverMesh()->GetComponentTransform().Equals(RiderBeforeGap, 0.01));
+	for (const double Age : {std::numeric_limits<double>::quiet_NaN(),
+		std::numeric_limits<double>::infinity(), -0.1})
+	{
+		if (!SpawnFresh()) return false;
+		SetAge(Age); Client->TickRuntimeProxyActors(0.01f);
+		Ok &= TestTrue(TEXT("Non-finite or negative cache age cleans up instead of entering grace"),
+			Client->RuntimeEntityActors.IsEmpty() && Client->RuntimeEntityStates.IsEmpty());
+	}
+	for (int32 Gate = 0; Gate < 8; ++Gate)
+	{
+		if (!SpawnFresh()) return false;
+		AActor* BeforeGate = Client->RuntimeEntityActors.FindRef(1001).Get();
+		SetAge(0.2); Client->TickRuntimeProxyActors(0.01f);
+		switch (Gate)
+		{
+		case 0: Socket->bConnected = false; break;
+		case 1: Client->bProtocolHandshakeComplete = false; break;
+		case 2: Client->bMapHandshakeComplete = false; break;
+		case 3: ++Client->SocketGeneration; break;
+		case 4: Client->PlaySessionId = TEXT("new-current-play"); break;
+		case 5: Client->MapPackageChecksum = TEXT("fnv1a64:fedcba9876543210"); break;
+		case 6: Client->bShowRuntimeEntities = false; break;
+		case 7: Client->bHasState = false; break;
+		}
+		Client->TickRuntimeProxyActors(0.01f);
+		Ok &= TestTrue(*FString::Printf(TEXT("Safety gate %d revokes grace immediately"), Gate),
+			BeforeGate->IsActorBeingDestroyed() && Client->RuntimeEntityActors.IsEmpty()
+			&& Client->RuntimeEntityStates.IsEmpty());
+		Socket->bConnected = true;
+		Client->bProtocolHandshakeComplete = true; Client->bMapHandshakeComplete = true;
+		Client->SocketGeneration = 7; Client->PlaySessionId = Play;
+		Client->MapPackageChecksum = MapChecksum; Client->bShowRuntimeEntities = true;
+	}
+	if (!SpawnFresh()) return false;
+	SetAge(0.2); Client->TickRuntimeProxyActors(std::numeric_limits<float>::quiet_NaN());
+	Ok &= TestTrue(TEXT("An invalid frame delta cannot hold a frozen cache indefinitely"),
+		Client->RuntimeEntityActors.IsEmpty() && Client->RuntimeEntityStates.IsEmpty());
+	Client->Disconnect();
+	Ok &= TestEqual(TEXT("Grace tests never connect to a server or send control"), Socket->SendCount, 0);
 	return Ok;
 }
 

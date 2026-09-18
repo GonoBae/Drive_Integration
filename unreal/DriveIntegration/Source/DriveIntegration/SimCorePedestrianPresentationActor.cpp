@@ -3,6 +3,7 @@
 #include "Animation/AnimSequence.h"
 #include "Components/SceneComponent.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Components/PoseableMeshComponent.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/World.h"
 #include "PhysicsEngine/BodyInstance.h"
@@ -11,6 +12,39 @@
 #include "SimCorePresentation.h"
 #include "SimCoreTrafficSignalActor.h"
 #include "UObject/ConstructorHelpers.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "Materials/MaterialInterface.h"
+
+SimCorePedestrianPresentation::FBodyProfile SimCorePedestrianPresentation::BodyProfile(const uint32 EntityId)
+{
+	FBodyProfile Profile;
+	if (EntityId % 3 == 1)
+	{
+		Profile = {0.625f, 0.22f, 1.10f, FLinearColor(0.72f, 0.32f, 0.035f)};
+	}
+	else if (EntityId % 3 == 2)
+	{
+		Profile = {0.825f, 0.28f, 1.00f, FLinearColor(0.20f, 0.29f, 0.17f)};
+	}
+	return Profile;
+}
+
+void ASimCorePedestrianPresentationActor::ApplyBodyProfile(const uint32 ProfileEntityId)
+{
+	if (AppliedBodyProfileEntityId == ProfileEntityId) return;
+	AppliedBodyProfileEntityId = ProfileEntityId;
+	ClothingMaterials.Reset();
+	const auto Profile = SimCorePedestrianPresentation::BodyProfile(ProfileEntityId);
+	for (int32 Slot = 0; Slot < CharacterMesh->GetNumMaterials(); ++Slot)
+	{
+		auto* Material = UMaterialInstanceDynamic::Create(ClothingBaseMaterial, this);
+		if (!Material) continue;
+		Material->SetVectorParameterValue(TEXT("Color"), Slot == 0
+			? Profile.ClothingColor : FLinearColor(0.055f, 0.06f, 0.07f));
+		CharacterMesh->SetMaterial(Slot, Material);
+		ClothingMaterials.Add(Material);
+	}
+}
 
 bool SimCorePedestrianPresentation::BuildModelTransform(
 	const FBox& Bounds, float CapsuleHalfHeightMeters, FTransform& OutTransform)
@@ -190,6 +224,9 @@ ASimCorePedestrianPresentationActor::ASimCorePedestrianPresentationActor()
 	QuinnMesh = Quinn.Object;
 	IdleAnimation = Idle.Object;
 	WalkAnimation = Walk.Object;
+	static ConstructorHelpers::FObjectFinder<UMaterialInterface> ClothingMaterial(
+		TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
+	ClothingBaseMaterial = ClothingMaterial.Object;
 	CharacterMesh->SetSkeletalMesh(MannyMesh);
 }
 
@@ -210,6 +247,7 @@ bool ASimCorePedestrianPresentationActor::StartRagdoll(
 	const SimCoreProtocol::FVehicleState& State, bool bLaunch)
 {
 	if (!HasRagdollPhysicsAsset() || !GetWorld() || !GetWorld()->GetPhysicsScene()) return false;
+	if (bRecoveringRagdoll) StopRagdoll();
 	if (bLaunch && bRagdollActive && !FMath::IsNearlyZero(RagdollGroundAnchorOffsetCm))
 	{
 		CharacterMesh->AddWorldOffset(FVector(0.0, 0.0, -RagdollGroundAnchorOffsetCm),
@@ -293,6 +331,7 @@ bool ASimCorePedestrianPresentationActor::StartRagdoll(
 void ASimCorePedestrianPresentationActor::StopRagdoll(
 	const bool bBeginLocomotionDelay)
 {
+	EndGetUpPose();
 	if (!bRagdollActive)
 	{
 		if (!bBeginLocomotionDelay)
@@ -325,17 +364,32 @@ void ASimCorePedestrianPresentationActor::StopRagdoll(
 	GroundAnchorDownwardSpeedCmPerSecond = 0.0f;
 }
 
+void ASimCorePedestrianPresentationActor::PauseRagdoll()
+{
+	CharacterMesh->SetEnableGravity(false);
+	CharacterMesh->SetAllPhysicsLinearVelocity(FVector::ZeroVector);
+	CharacterMesh->SetAllPhysicsAngularVelocityInRadians(FVector::ZeroVector);
+	CharacterMesh->PutAllRigidBodiesToSleep();
+	CharacterMesh->bPauseAnims = true;
+	bRagdollPaused = true;
+}
+
+void ASimCorePedestrianPresentationActor::FreezePresentation()
+{
+	bPresentationFrozen = true;
+	bWalking = false;
+	AnimationPlayRate = 0.0f;
+	CharacterMesh->bPauseAnims = true;
+	CharacterMesh->SetPlayRate(0.0f);
+	if (bRagdollActive) PauseRagdoll();
+}
+
 void ASimCorePedestrianPresentationActor::UpdateRagdoll(
 	const SimCoreProtocol::FVehicleState& State, float DeltaSeconds, bool bMotionAllowed)
 {
 	if (!bMotionAllowed)
 	{
-		CharacterMesh->SetEnableGravity(false);
-		CharacterMesh->SetAllPhysicsLinearVelocity(FVector::ZeroVector);
-		CharacterMesh->SetAllPhysicsAngularVelocityInRadians(FVector::ZeroVector);
-		CharacterMesh->PutAllRigidBodiesToSleep();
-		CharacterMesh->bPauseAnims = true;
-		bRagdollPaused = true;
+		PauseRagdoll();
 		return;
 	}
 	if (bRagdollPaused)
@@ -359,6 +413,7 @@ void ASimCorePedestrianPresentationActor::UpdateRagdoll(
 			RagdollRecoverySeconds = 0.0f;
 			CurrentRecoveryPoseAlpha = 0.0f;
 			RecoveryStartModelTransform = CharacterMesh->GetRelativeTransform();
+			BeginGetUpPose();
 		}
 		RagdollRecoverySeconds += Step;
 		// First arrest residual limb movement on the measured resting pose. Then
@@ -382,13 +437,7 @@ void ASimCorePedestrianPresentationActor::UpdateRagdoll(
 			/ SimCorePedestrianPresentation::RagdollRecoveryBlendSeconds,
 			0.0f, 1.0f);
 		CurrentRecoveryPoseAlpha = FMath::SmoothStep(0.0f, 1.0f, LinearAlpha);
-		CharacterMesh->SetAllBodiesBelowPhysicsBlendWeight(TEXT("pelvis"),
-			1.0f - CurrentRecoveryPoseAlpha, false, false);
-		FTransform RecoveryTransform;
-		RecoveryTransform.Blend(RecoveryStartModelTransform,
-			StandingModelTransform, CurrentRecoveryPoseAlpha);
-		CharacterMesh->SetRelativeTransform(RecoveryTransform, false, nullptr,
-			ETeleportType::TeleportPhysics);
+		UpdateGetUpPose(CurrentRecoveryPoseAlpha);
 		if (LinearAlpha >= 1.0f) StopRagdoll(true);
 		return;
 	}
@@ -396,6 +445,7 @@ void ASimCorePedestrianPresentationActor::UpdateRagdoll(
 	{
 		// A new severe contact can interrupt recovery without restoring locomotion.
 		bRecoveringRagdoll = false;
+		EndGetUpPose();
 		RagdollRecoverySeconds = 0.0f;
 		CurrentRecoveryPoseAlpha = 0.0f;
 		CharacterMesh->SetAllBodiesBelowPhysicsBlendWeight(TEXT("pelvis"), 1.0f, false, false);
@@ -525,9 +575,12 @@ bool ASimCorePedestrianPresentationActor::ApplySnapshot(
 	}
 	USkeletalMesh* SelectedMesh = (State.EntityId % 2 == 0) ? MannyMesh.Get() : QuinnMesh.Get();
 	FTransform ModelTransform;
+	const auto Profile = SimCorePedestrianPresentation::BodyProfile(State.EntityId);
+	const float StandingHalfHeight = State.CollisionRadiusMeters > 0.0f
+		? State.CollisionHalfHeightMeters : Profile.HalfHeightMeters;
 	if (!SimCorePedestrianPresentation::BuildModelTransform(
 		SelectedMesh->GetImportedBounds().GetBox(),
-		SimCorePedestrianPresentation::StandingHalfHeightMeters, ModelTransform))
+		StandingHalfHeight, ModelTransform))
 	{
 		bNeedsDownedReconstruction |= bRagdollActive;
 		StopRagdoll();
@@ -535,6 +588,7 @@ bool ASimCorePedestrianPresentationActor::ApplySnapshot(
 		SetActorHiddenInGame(true);
 		return false;
 	}
+	bPresentationFrozen = false;
 	const bool bIdentityChanged = bReceivedSnapshot && (EntityId != State.EntityId
 		|| PresentedPlaySessionId != State.PlaySessionId || PresentedMapChecksum != State.MapPackageChecksum);
 	if (bIdentityChanged)
@@ -551,7 +605,10 @@ bool ASimCorePedestrianPresentationActor::ApplySnapshot(
 		StopRagdoll();
 		CharacterMesh->SetSkeletalMesh(SelectedMesh);
 		CurrentAnimation = nullptr;
+		AppliedBodyProfileEntityId = 0;
 	}
+	ApplyBodyProfile(State.EntityId);
+	PresentedStandingHalfHeightMeters = StandingHalfHeight;
 	EntityId = State.EntityId;
 	PresentedPlaySessionId = State.PlaySessionId;
 	PresentedMapChecksum = State.MapPackageChecksum;
@@ -609,11 +666,15 @@ bool ASimCorePedestrianPresentationActor::ApplySnapshot(
 	{
 		CharacterMesh->PlayAnimation(Animation, true);
 		// Stable per-entity phases keep nearby people from walking in lockstep.
-		CharacterMesh->SetPosition(FMath::Fmod(EntityId * 0.137f, Animation->GetPlayLength()), false);
+		const bool bFirstRecoveryStep = bWalking && CurrentRecoveryPoseAlpha >= 0.999f;
+		CharacterMesh->SetPosition(bFirstRecoveryStep ? 0.0f
+			: FMath::Fmod(EntityId * 0.137f, Animation->GetPlayLength()), false);
+		if (bFirstRecoveryStep) CurrentRecoveryPoseAlpha = 0.0f;
 		CurrentAnimation = Animation;
 	}
 	AnimationPlayRate = bWalking ? FMath::Clamp(static_cast<float>(Speed)
-		/ SimCorePedestrianPresentation::WalkReferenceSpeedMps, 0.05f, 2.0f) : 1.0f;
+		/ (SimCorePedestrianPresentation::WalkReferenceSpeedMps
+			* PresentedStandingHalfHeightMeters / 0.9f), 0.05f, 2.0f) : 1.0f;
 	CharacterMesh->bPauseAnims = !bMotionAllowed || !bUpright;
 	if (CharacterMesh->bPauseAnims) AnimationPlayRate = 0.0f;
 	CharacterMesh->SetPlayRate(AnimationPlayRate);

@@ -256,7 +256,7 @@ namespace
 		{
 			uint32 Field; uint8 Wire; uint64 Integer = 0;
 			if (!Reader.ReadTag(Field, Wire)) return false;
-			if (Field <= 9)
+			if (Field <= 12)
 			{
 				const uint32 Mask = 1u << Field;
 				if (Seen & Mask) return false;
@@ -317,6 +317,17 @@ namespace
 			case 9:
 				if (Wire != 0 || !Reader.ReadVarint(Integer) || Integer > 1) return false;
 				State.bOutOfService = Integer != 0;
+				break;
+			case 10:
+				if(Wire!=0 || !Reader.ReadVarint(Integer) || Integer>4096) return false;
+				State.LeftGroupId=static_cast<uint32>(Integer);
+				break;
+			case 11:
+				if(Wire!=0 || !Reader.ReadVarint(Integer) || Integer>3) return false;
+				State.LeftAspect=static_cast<ETrafficSignalAspect>(Integer);
+				break;
+			case 12:
+				if(Wire!=5 || !Reader.ReadFixed32(State.LeftRemainingSeconds)) return false;
 				break;
 			default:
 				if (!Reader.Skip(Wire)) return false;
@@ -778,7 +789,7 @@ namespace
 		}
 		// Controller identity is additive: legacy v1 heads default to controller 1.
 		// Group consistency and mutually-exclusive permissions are controller-local.
-		TMap<uint64, const FTrafficSignalState*> GroupStates;
+		TMap<uint64, TPair<ETrafficSignalAspect,float>> GroupStates;
 		TMap<uint32, TSet<uint32>> PermissiveGroupsByController;
 		TSet<uint32> ControllersPermittingVehicles;
 		for (const FTrafficSignalState& Signal : Signals)
@@ -786,24 +797,27 @@ namespace
 			// Disabled lenses are Red0 on the wire, not a controller-wide phase.
 			// Their matching damage record is checked below.
 			if (Signal.bOutOfService) continue;
-			const uint64 GroupKey = (static_cast<uint64>(Signal.ControllerId) << 32)
-				| static_cast<uint64>(Signal.GroupId);
-			if (const FTrafficSignalState* const* Existing = GroupStates.Find(GroupKey))
+			const auto AddMovement=[&](uint32 Group,ETrafficSignalAspect Aspect,float Remaining)
 			{
-				if ((*Existing)->Aspect != Signal.Aspect
-					|| FMath::Abs((*Existing)->RemainingSeconds - Signal.RemainingSeconds) > 0.001f)
+				const uint64 GroupKey=(static_cast<uint64>(Signal.ControllerId)<<32)|Group;
+				if(const auto* Existing=GroupStates.Find(GroupKey))
 				{
-					OutError = TEXT("WorldState traffic signal group disagrees on aspect or countdown");
-					return false;
+					if(Existing->Key!=Aspect || FMath::Abs(Existing->Value-Remaining)>0.001f)
+					{
+						OutError=TEXT("WorldState traffic signal group disagrees on aspect or countdown");
+						return false;
+					}
 				}
-			}
-			else GroupStates.Add(GroupKey, &Signal);
-			if (Signal.Aspect == ETrafficSignalAspect::Green || Signal.Aspect == ETrafficSignalAspect::Yellow)
-			{
-				PermissiveGroupsByController.FindOrAdd(Signal.ControllerId).Add(Signal.GroupId);
-				if (Signal.Kind != ETrafficSignalKind::Pedestrian)
-					ControllersPermittingVehicles.Add(Signal.ControllerId);
-			}
+				else GroupStates.Add(GroupKey,TPair<ETrafficSignalAspect,float>(Aspect,Remaining));
+				if(Aspect==ETrafficSignalAspect::Green || Aspect==ETrafficSignalAspect::Yellow)
+				{
+					PermissiveGroupsByController.FindOrAdd(Signal.ControllerId).Add(Group);
+					if(Signal.Kind!=ETrafficSignalKind::Pedestrian) ControllersPermittingVehicles.Add(Signal.ControllerId);
+				}
+				return true;
+			};
+			if(!AddMovement(Signal.GroupId,Signal.Aspect,Signal.RemainingSeconds)
+				|| (Signal.LeftGroupId && !AddMovement(Signal.LeftGroupId,Signal.LeftAspect,Signal.LeftRemainingSeconds))) return false;
 		}
 		for (uint32 Controller : ControllersPermittingVehicles)
 		{
@@ -853,7 +867,17 @@ namespace
 
 bool IsValidTrafficSignalState(const FTrafficSignalState& State)
 {
+	const bool bLeftValid=State.LeftGroupId==0
+		? State.LeftAspect==ETrafficSignalAspect::Unknown && State.LeftRemainingSeconds==0.0f
+		: State.Kind==ETrafficSignalKind::Vehicle && State.LeftGroupId<=4096
+			&& State.LeftGroupId!=State.GroupId
+			&& State.LeftAspect!=ETrafficSignalAspect::Unknown
+			&& static_cast<uint8>(State.LeftAspect)<=static_cast<uint8>(ETrafficSignalAspect::Green)
+			&& FMath::IsFinite(State.LeftRemainingSeconds) && State.LeftRemainingSeconds>=0.0f
+			&& State.LeftRemainingSeconds<=MaxTrafficSignalCountdownSeconds
+			&& (!State.bOutOfService || (State.LeftAspect==ETrafficSignalAspect::Red && State.LeftRemainingSeconds==0.0f));
 	return State.SignalId != 0 && State.GroupId >= 1 && State.GroupId <= 4096
+		&& bLeftValid
 		&& State.ControllerId >= 1 && State.ControllerId <= 64
 		&& static_cast<uint8>(State.Aspect) <= static_cast<uint8>(ETrafficSignalAspect::Green)
 		&& static_cast<uint8>(State.Kind) >= static_cast<uint8>(ETrafficSignalKind::Vehicle)

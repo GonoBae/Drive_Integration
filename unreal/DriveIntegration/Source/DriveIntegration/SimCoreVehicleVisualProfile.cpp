@@ -45,8 +45,13 @@ bool Resolve(SimCoreProtocol::ERuntimeVehicleClass VehicleClass, FProfile& OutPr
 		return true;
 	}
 	case ERuntimeVehicleClass::Truck:
-		OutProfile.HalfHeightMeters = 1.25f;
+		OutProfile.HalfHeightMeters = 0.965f;
 		OutProfile.CgHeightMeters = 0.75f;
+		// SM_TruckBody bounds: (-325,-105,-26) .. (295,105,167) cm.
+		OutProfile.CollisionBodyForwardOffsetMeters = -0.15f;
+		OutProfile.CollisionGroundClearanceMeters = 0.49f;
+		// Include the 32.055cm tread radius: -26 - (-28 - 32.055 * 1.22).
+		OutProfile.NpcCollisionGroundClearanceMeters = 0.411071f;
 		OutProfile.ExhaustLocationCm = FVector(-290.0, 86.0, -15.0);
 		OutProfile.DriverTransform = FTransform(FQuat::Identity,
 			FVector(110.0, 0.0, 62.0), FVector(0.8, 1.0, 1.0));
@@ -77,5 +82,12 @@ bool Resolve(SimCoreProtocol::ERuntimeVehicleClass VehicleClass, FProfile& OutPr
 	default:
 		return false;
 	}
+}
+
+FVector CollisionCenterOffsetCm(const FProfile& Profile, const float CollisionHalfHeightMeters)
+{
+	return FVector(Profile.CollisionBodyForwardOffsetMeters * 100.0, 0.0,
+		(Profile.CollisionGroundClearanceMeters + CollisionHalfHeightMeters
+			- Profile.CgHeightMeters) * 100.0);
 }
 }

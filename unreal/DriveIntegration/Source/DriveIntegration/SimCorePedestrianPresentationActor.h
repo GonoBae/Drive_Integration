@@ -9,10 +9,21 @@ class UAnimSequence;
 class USceneComponent;
 class USkeletalMesh;
 class USkeletalMeshComponent;
+class UPoseableMeshComponent;
+class UMaterialInterface;
+class UMaterialInstanceDynamic;
 class UWorld;
 
 namespace SimCorePedestrianPresentation
 {
+	struct FBodyProfile
+	{
+		float HalfHeightMeters = 0.9f;
+		float CapsuleRadiusMeters = 0.35f;
+		float WalkingSpeedMps = 1.35f;
+		FLinearColor ClothingColor = FLinearColor(0.035f, 0.14f, 0.30f);
+	};
+	DRIVEINTEGRATION_API FBodyProfile BodyProfile(uint32 EntityId);
 	/** Fit the authored standing character to the server capsule; feet stay at its bottom. */
 	DRIVEINTEGRATION_API bool BuildModelTransform(
 		const FBox& Bounds, float CapsuleHalfHeightMeters, FTransform& OutTransform);
@@ -38,7 +49,7 @@ namespace SimCorePedestrianPresentation
 	inline constexpr float WalkReferenceSpeedMps = 1.4f;
 	inline constexpr float StandingHalfHeightMeters = 0.9f;
 	inline constexpr float RagdollRecoverySettleSeconds = 0.25f;
-	inline constexpr float RagdollRecoveryBlendSeconds = 1.35f;
+	inline constexpr float RagdollRecoveryBlendSeconds = 2.0f;
 	inline constexpr float RecoveryWalkDelaySeconds = 0.55f;
 	inline constexpr float GroundContactToleranceCm = 1.5f;
 	inline constexpr float MinimumGroundNormalZ = 0.25f;
@@ -55,6 +66,9 @@ public:
 	bool ApplySnapshot(const SimCoreProtocol::FVehicleState& State, float SnapshotAgeSeconds,
 		float DeltaSeconds, bool bMotionAllowed, float MaxExtrapolationSeconds,
 		const FVector& PresentationOffsetCm);
+	/** Hold animation/physics and the current displayed root during receive grace. */
+	void FreezePresentation();
+	bool IsPresentationFrozen() const { return bPresentationFrozen; }
 	bool HasHumanoidAssets() const;
 	bool HasRagdollPhysicsAsset() const;
 	USkeletalMeshComponent* GetCharacterMesh() const { return CharacterMesh; }
@@ -67,6 +81,7 @@ public:
 	float GetRagdollGroundAnchorOffsetCm() const { return RagdollGroundAnchorOffsetCm; }
 	float GetRecoveryPoseAlpha() const { return CurrentRecoveryPoseAlpha; }
 	float GetRecoveryWalkDelaySeconds() const { return RecoveryWalkDelayRemainingSeconds; }
+	UPoseableMeshComponent* GetRecoveryMesh() const { return RecoveryMesh; }
 
 protected:
 	virtual void PostInitializeComponents() override;
@@ -77,10 +92,26 @@ private:
 	void UpdateRagdoll(const SimCoreProtocol::FVehicleState& State, float DeltaSeconds,
 		bool bMotionAllowed);
 	void StopRagdoll(bool bBeginLocomotionDelay = false);
+	void PauseRagdoll();
+	void BeginGetUpPose();
+	void UpdateGetUpPose(float Alpha);
+	void EndGetUpPose();
+	void ApplyBodyProfile(uint32 ProfileEntityId);
 	UPROPERTY(VisibleAnywhere, Category="SimCore|Pedestrian Presentation")
 	TObjectPtr<USceneComponent> PedestrianRoot;
 	UPROPERTY(VisibleAnywhere, Category="SimCore|Pedestrian Presentation")
 	TObjectPtr<USkeletalMeshComponent> CharacterMesh;
+	UPROPERTY(Transient)
+	TObjectPtr<UPoseableMeshComponent> RecoveryMesh;
+	UPROPERTY()
+	TObjectPtr<UMaterialInterface> ClothingBaseMaterial;
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UMaterialInstanceDynamic>> ClothingMaterials;
+	TArray<FTransform> RecoveryStartBones;
+	TArray<FTransform> RecoveryStandingBones;
+	FTransform RecoveryAnchor = FTransform::Identity;
+	uint32 AppliedBodyProfileEntityId = 0;
+	float PresentedStandingHalfHeightMeters = 0.9f;
 	UPROPERTY()
 	TObjectPtr<USkeletalMesh> MannyMesh;
 	UPROPERTY()
@@ -104,6 +135,7 @@ private:
 	bool bRagdollActive = false;
 	bool bNeedsDownedReconstruction = false;
 	bool bRagdollPaused = false;
+	bool bPresentationFrozen = false;
 	bool bRecoveringRagdoll = false;
 	float RagdollElapsedSeconds = 0.0f;
 	float RagdollRecoverySeconds = 0.0f;

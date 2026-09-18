@@ -140,6 +140,7 @@ namespace
 		Center.PointsEnuM = Original;
 		FTrafficLane Left = Center, RightLane = Center;
 		Left.Id = SourceId == 1034 ? 2035 : SourceId + 5;
+		Left.SignalGroupId = Center.SignalGroupId + 6;
 		RightLane.Id = SourceId == 1034 ? 2036 : SourceId + 6;
 		Center.WidthM = Left.WidthM = RightLane.WidthM = 3.2;
 		Center.Successors = {Movements[0]};
@@ -162,7 +163,7 @@ namespace
 			Left.PointsEnuM[Index] = Original[Index] - Right * (0.3 * Blend);
 			RightLane.PointsEnuM[Index] = Original[Index] + Right * (6.3 * Blend);
 			if (Progress <= 14.0 + 1.e-6) { BeginIndex = Index; }
-			if (Progress <= Length - 8.0 + 1.e-6) { EndIndex = Index; }
+			if (Progress <= Length - 5.0 + 1.e-6) { EndIndex = Index; }
 		}
 		for (FTrafficLane* Neighbor : {&Left, &RightLane})
 		{
@@ -276,7 +277,13 @@ FTrafficLayout BuildTrafficLayout()
 	AddStraight(Result, 2031, {2,110}, {2,130}, {2034}, 0, 6.944444);
 	AddMovement(Result, 2032, {2,110}, {2,115}, {5,118}, {10,118}, 2014);
 	AddMovement(Result, 2033, {2,110}, {2,120}, {0,122}, {-10,122}, 2024);
-	AddStraight(Result, 2034, {2,130}, {2,168}, {});
+	AddStraight(Result, 2034, {2,130}, {2,168}, {4001});
+	FTrafficLane& NorthLoop=Result.Lanes.AddDefaulted_GetRef();
+	NorthLoop.Id=4001;
+	NorthLoop.WidthM=3.2;
+	NorthLoop.SpeedLimitMps=6.944444;
+	NorthLoop.PointsEnuM=BuildNorthLoopLane();
+	NorthLoop.Successors={2040};
 
 	// Two asymmetric, bidirectional collectors close the urban blocks without
 	// falling back to the old map's rectangular perimeter road.
@@ -309,23 +316,31 @@ FTrafficLayout BuildTrafficLayout()
 		{107, 2, 206, FVector(15,108.5,0), 0, ETrafficSignalKind::Pedestrian},
 		{108, 2, 206, FVector(15,131.5,0), 180, ETrafficSignalKind::Pedestrian},
 	};
+	for(FTrafficSignal& Signal : Result.Signals)
+	{
+		if(Signal.Kind==ETrafficSignalKind::Vehicle) Signal.LeftGroupId=Signal.GroupId+6;
+	}
 
 	const auto MakePlan = [](uint32 Id, uint32 Offset, uint32 Base)
 	{
 		FSignalPlan Plan;
 		Plan.Id = Id;
 		Plan.OffsetMs = Offset;
-		Plan.Groups = {Base+1, Base+2, Base+3, Base+4, Base+5, Base+6};
+		Plan.Groups = {Base+1, Base+2, Base+3, Base+4, Base+5, Base+6,Base+7,Base+8,Base+9,Base+10};
 		Plan.Phases = {{2000, {}, {}}};
-		// Protected approach: left/straight/right of one incoming direction
-		// share green; opposing approaches and every pedestrian remain red.
+		// Straight/right and the dedicated left lane receive separate protected
+		// permissions. Every other direction and all crossings remain red.
 		for (uint32 Group : {Base+1, Base+3, Base+2, Base+4})
 		{
 			Plan.Phases.Add({9000, {Group}, {}});
 			Plan.Phases.Add({2000, {}, {Group}});
 			Plan.Phases.Add({1500, {}, {}});
+			Plan.Phases.Add({6000, {Group+6}, {}});
+			Plan.Phases.Add({2000, {}, {Group+6}});
+			Plan.Phases.Add({1500, {}, {}});
 		}
-		Plan.Phases.Add({18000, {Base+5, Base+6}, {}});
+		// The 23m crossing also serves the 1m/s elder profile, including entry margin.
+		Plan.Phases.Add({24000, {Base+5, Base+6}, {}});
 		Plan.Phases.Add({2000, {}, {}});
 		return Plan;
 	};
@@ -475,11 +490,35 @@ bool ValidateTrafficLayout(const FTrafficLayout& Layout, FString& OutError)
 			return Fail(TEXT("Invalid traffic signal identity/controller/group/pose."));
 		}
 		SignalIds.Add(Signal.Id);
+		if(Signal.LeftGroupId && (Signal.Kind!=ETrafficSignalKind::Vehicle
+			|| Signal.LeftGroupId==Signal.GroupId
+			|| GroupControllers.FindRef(Signal.LeftGroupId)!=Signal.ControllerId))
+		{
+			return Fail(TEXT("Protected left group must be a distinct movement of the same controller."));
+		}
 		Signal.Kind == ETrafficSignalKind::Vehicle ? ++VehicleHeadCount : ++PedestrianHeadCount;
 	}
 	if (VehicleHeadCount != 8 || PedestrianHeadCount != 8)
 	{
 		return Fail(TEXT("SignalCity requires exactly 8 vehicle and 8 pedestrian heads."));
+	}
+	for(const FSignalPlan& Plan:Layout.SignalPlans)
+	{
+		for(const FSignalPhase& Phase:Plan.Phases)
+		{
+			TSet<uint32> VehiclePermissions;
+			bool bWalk=false;
+			const auto Active=[&](uint32 Group){return Group && (Phase.GreenGroups.Contains(Group)||Phase.YellowGroups.Contains(Group));};
+			for(const FTrafficSignal& Signal:Layout.Signals)
+			{
+				if(Signal.ControllerId!=Plan.Id) continue;
+				if(Signal.Kind==ETrafficSignalKind::Pedestrian) {bWalk|=Active(Signal.GroupId);continue;}
+				if(Active(Signal.GroupId)) VehiclePermissions.Add(Signal.GroupId);
+				if(Active(Signal.LeftGroupId)) VehiclePermissions.Add(Signal.LeftGroupId);
+			}
+			if(VehiclePermissions.Num()>1 || (bWalk && !VehiclePermissions.IsEmpty()))
+				return Fail(TEXT("Protected movements and exclusive WALK cannot overlap."));
+		}
 	}
 	for (const FTrafficLane& Lane : Layout.Lanes)
 	{
@@ -519,7 +558,14 @@ bool ValidateTrafficLayout(const FTrafficLayout& Layout, FString& OutError)
 				|| Change.SourceBeginM < 5.0 || Change.TargetBeginM < 5.0 || Span < 8 || TargetSpan < 8
 				|| Change.SourceEndM > ArcLength(Lane.PointsEnuM)-5.0
 				|| Change.TargetEndM > ArcLength(Target.PointsEnuM)-5.0
-				|| FMath::Abs(Span-TargetSpan) > 0.5 || Lane.SignalGroupId != Target.SignalGroupId)
+				|| FMath::Abs(Span-TargetSpan) > 0.5
+				|| (Lane.SignalGroupId != Target.SignalGroupId
+					&& !Layout.Signals.ContainsByPredicate([&](const FTrafficSignal& Signal)
+					{
+						return Signal.LeftGroupId && Signal.Kind==ETrafficSignalKind::Vehicle
+							&& ((Signal.GroupId==Lane.SignalGroupId && Signal.LeftGroupId==Target.SignalGroupId)
+								|| (Signal.LeftGroupId==Lane.SignalGroupId && Signal.GroupId==Target.SignalGroupId));
+					})))
 			{
 				return Fail(TEXT("Lane-change windows must be reciprocal and clear of junctions."));
 			}
@@ -563,7 +609,7 @@ bool ValidateTrafficLayout(const FTrafficLayout& Layout, FString& OutError)
 			const bool bHasHead = Layout.Signals.ContainsByPredicate([&](const FTrafficSignal& Signal)
 			{
 				return Signal.Kind == ETrafficSignalKind::Vehicle
-					&& Signal.GroupId == Lane.SignalGroupId
+					&& (Signal.GroupId == Lane.SignalGroupId || Signal.LeftGroupId == Lane.SignalGroupId)
 					&& FVector::Dist(Signal.PositionEnuM, Lane.PointsEnuM.Last()) <= 15;
 			});
 			if (!bHasHead) { return Fail(TEXT("Controlled stop line has no nearby signal head.")); }
@@ -578,6 +624,9 @@ bool ValidateTrafficLayout(const FTrafficLayout& Layout, FString& OutError)
 				&& FVector::Dist(Signal.PositionEnuM, Lane.PointsEnuM.Last()) <= 15;
 		});
 		if (!bHasStopline) { return Fail(TEXT("Traffic signal has no matching nearby stop line.")); }
+		if(Signal.LeftGroupId && !Layout.Lanes.ContainsByPredicate([&](const FTrafficLane& Lane)
+			{return Lane.SignalGroupId==Signal.LeftGroupId && FVector::Dist(Signal.PositionEnuM,Lane.PointsEnuM.Last())<=15;}))
+			return Fail(TEXT("Protected left head has no matching nearby stop line."));
 	}
 	return true;
 }
@@ -657,6 +706,7 @@ bool SerializeTrafficLayout(const FTrafficLayout& Layout, const FString& SourceM
 		Writer->WriteValue(TEXT("id"), Signal.Id);
 		Writer->WriteValue(TEXT("controller_id"), Signal.ControllerId);
 		Writer->WriteValue(TEXT("group_id"), Signal.GroupId);
+		if(Signal.LeftGroupId) Writer->WriteValue(TEXT("left_group_id"),Signal.LeftGroupId);
 		Writer->WriteValue(TEXT("kind"), Signal.Kind == ETrafficSignalKind::Pedestrian
 			? TEXT("pedestrian") : TEXT("vehicle"));
 		Writer->WriteIdentifierPrefix(TEXT("position_enu")); Vector(Signal.PositionEnuM);

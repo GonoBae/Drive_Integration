@@ -8,7 +8,7 @@ Only the Popen child is terminated; map/network inputs are never modified.
 import argparse
 import asyncio
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 import json
 import math
@@ -36,10 +36,12 @@ class Expectations:
     heads: dict
     plans: dict
     pedestrian_only_groups: frozenset
+    left_groups: dict = field(default_factory=dict)
 
     @property
     def group_keys(self):
-        return {(controller, group) for controller, group, _, _ in self.heads.values()}
+        return ({(controller, group) for controller, group, _, _ in self.heads.values()}
+                | {(self.heads[identity][0], group) for identity, group in self.left_groups.items()})
 
     @property
     def observation_ns(self):
@@ -76,6 +78,8 @@ def network_expectations(data):
                          for signal in signals if signal.get("kind") == "pedestrian"}
     vehicle_groups = {(signal.get("controller_id", 1), signal.get("group_id"))
                       for signal in signals if signal.get("kind", "vehicle") != "pedestrian"}
+    vehicle_groups |= {(signal.get("controller_id", 1), signal["left_group_id"])
+                       for signal in signals if signal.get("left_group_id", 0)}
     pedestrian_only_groups = frozenset(pedestrian_groups - vehicle_groups)
     if version == 2:
         raw_plans = network.get("signal_plans")
@@ -115,6 +119,7 @@ def network_expectations(data):
                     "signal plan offset is outside its cycle")
             plans[identity] = (offset_ms * 1_000_000, tuple(phases), cycle_ns)
     heads = {}
+    left_groups = {}
     for signal in signals:
         identity, group = signal["id"], signal["group_id"]
         require(type(identity) is int and identity > 0 and identity not in heads,
@@ -134,15 +139,21 @@ def network_expectations(data):
         require(len(pose) == 3 and all(type(value) in (int, float) and math.isfinite(value)
                                       for value in [*pose, heading]), "invalid authored signal pose")
         heads[identity] = (controller, group, tuple(pose), heading % 360)
+        left = signal.get("left_group_id", 0)
+        require(type(left) is int and 0 <= left <= 4096, "invalid protected-left group")
+        if left:
+            require(version == 2 and left != group and signal.get("kind", "vehicle") == "vehicle"
+                    and group_owners.get(left) == controller, "invalid protected-left head ownership")
+            left_groups[identity] = left
     if version == 1:
         require({head[1] for head in heads.values()} == {1, 2}, "both legacy signal groups must exist")
     else:
-        require(set(group_owners) == {head[1] for head in heads.values()},
+        require(set(group_owners) == ({head[1] for head in heads.values()} | set(left_groups.values())),
                 "each planned group must have an authored signal head")
     fnv = 14695981039346656037
     for byte in data:
         fnv = ((fnv ^ byte) * 1099511628211) & ((1 << 64) - 1)
-    return Expectations(version, checksum, f"fnv1a64:{fnv:016x}", heads, plans, pedestrian_only_groups)
+    return Expectations(version, checksum, f"fnv1a64:{fnv:016x}", heads, plans, pedestrian_only_groups, left_groups)
 
 
 def expected_phase(group, elapsed_ns, active):
@@ -238,6 +249,22 @@ def validate_world(message, expected):
         key = (controller, group)
         require(key not in groups or groups[key] == state, "heads within one controller/group disagree")
         groups[key] = state
+        expected_left = expected.left_groups.get(head.signal_id, 0)
+        require(head.left_group_id == expected_left, "protected-left group changed or was omitted")
+        if expected_left:
+            left_phase, left_remaining = expected_signal(expected, controller, expected_left,
+                message.simulation_time_ns, world.health.status == "active")
+            require(head.left_aspect == left_phase and math.isfinite(head.left_remaining_seconds)
+                    and abs(head.left_remaining_seconds - left_remaining) < 0.0001,
+                    "protected-left phase/countdown disagrees with atomic simulation time")
+            left_key = (controller, expected_left)
+            left_state = (head.left_aspect, head.left_remaining_seconds)
+            require(left_key not in groups or groups[left_key] == left_state,
+                    "protected-left heads within one group disagree")
+            groups[left_key] = left_state
+        else:
+            require(head.left_aspect == pb.TRAFFIC_SIGNAL_UNKNOWN and head.left_remaining_seconds == 0,
+                    "legacy head unexpectedly acquired a protected-left signal")
     for controller in {key[0] for key in groups}:
         active_groups = {key for key, (aspect, _) in groups.items()
                          if key[0] == controller and aspect != pb.TRAFFIC_SIGNAL_RED}
@@ -348,6 +375,8 @@ async def exercise(url, process, expected_source, expected):
             frames += 1
             for head in message.world_state.traffic_signals:
                 seen[(head.controller_id, head.group_id)].add(head.aspect)
+                if head.left_group_id:
+                    seen[(head.controller_id, head.left_group_id)].add(head.left_aspect)
             permissive_controllers = {
                 head.controller_id for head in message.world_state.traffic_signals
                 if head.aspect != pb.TRAFFIC_SIGNAL_RED

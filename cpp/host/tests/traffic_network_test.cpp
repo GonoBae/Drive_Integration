@@ -791,6 +791,41 @@ void test_v2_multi_controller_offsets_boundaries_and_countdowns()
             "a group whose aspect never changes must report an indefinite zero countdown");
 }
 
+void test_protected_left_head_identity_phase_and_legacy_compatibility()
+{
+    TemporaryNetwork fixture;
+    using Aspect=simcore_host::SignalAspect;
+    const std::string head=replace_once(signal_v2(1,101,1,"[10,1,0]","vehicle"),
+        "\"group_id\":101","\"group_id\":101,\"left_group_id\":107");
+    const auto bytes=network_json_v2("["+lane(10,"[[0,0,0],[10,0,0]]","[20]",101,false)+","
+        +lane(15,"[[0,3,0],[10,3,0]]","[25]",107,false)+","
+        +lane(20,"[[10,0,0],[20,0,0]]")+","+lane(25,"[[10,3,0],[20,3,0]]")+"]",
+        "["+head+"]","["+plan(1,0,"[101,107]","["+phase(1000)+","+phase(2000,"[101]")
+            +","+phase(1000,"[]","[101]")+","+phase(1000)+","+phase(2000,"[107]")
+            +","+phase(1000,"[]","[107]")+","+phase(1000)+"]")+"]");
+    const auto network=fixture.load(bytes,simcore_host::FlatGroundQuery{});
+    const auto straight=network.signals_at(2*second_ns)[0];
+    require(straight.aspect==Aspect::Green && straight.left_aspect==Aspect::Red
+        && straight.left_group_id==107 && straight.remaining_seconds==1 && straight.left_remaining_seconds==3,
+        "straight phase must not grant protected left and both countdowns stay independent");
+    const auto left=network.signals_at(5*second_ns)[0];
+    require(left.aspect==Aspect::Red && left.left_aspect==Aspect::Green && left.left_remaining_seconds==2,
+        "exact protected-left phase boundary must activate only its arrow movement");
+    const auto disabled=network.signals_at(5*second_ns,false)[0];
+    require(disabled.aspect==Aspect::Red && disabled.left_aspect==Aspect::Red
+        && disabled.remaining_seconds==0 && disabled.left_remaining_seconds==0,
+        "disabled controller revokes both vehicle permissions indefinitely");
+    const auto legacy=fixture.load(valid_json(),simcore_host::FlatGroundQuery{}).signals_at(0)[0];
+    require(legacy.left_group_id==0 && legacy.left_aspect==Aspect::Unknown && legacy.left_remaining_seconds==0,
+        "legacy packets must not invent a left movement");
+    rejects(replace_once(bytes,"\"left_group_id\":107","\"left_group_id\":101"),"left cannot alias its straight group");
+    rejects(replace_once(bytes,"\"left_group_id\":107","\"left_group_id\":0"),"authored left field must be nonzero");
+    rejects(replace_once(bytes,"\"left_group_id\":107","\"left_group_id\":108"),"left must belong to the same controller");
+    rejects(replace_once(bytes,"\"left_group_id\":107","\"left_group_id\":\"107\""),"left identity is a strict integer");
+    rejects(replace_once(bytes,"\"green_groups\":[107]","\"green_groups\":[101,107]"),
+        "protected-left and straight cannot be permissive simultaneously");
+}
+
 } // namespace
 
 int main()
@@ -808,6 +843,7 @@ int main()
         test_optional_lane_changes_geometry_safety_and_provenance();
         test_signal_phase_boundaries_reset_and_disabled_safety();
         test_v2_multi_controller_offsets_boundaries_and_countdowns();
+        test_protected_left_head_identity_phase_and_legacy_compatibility();
         std::cout << "traffic_network_test: all checks passed\n";
         return 0;
     } catch (const std::exception& error) {

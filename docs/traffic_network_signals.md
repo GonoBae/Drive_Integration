@@ -4,7 +4,7 @@
 
 - 기준일: 2026-08-31, 다중 controller 확장 2026-09-02, NPC 내비게이션 확장 2026-09-03. 이 문서는 구현 계약과 검증 절차를 기록한다. 실행 시험의 통과 여부와 실제 사용자 인수 결과는 작업일지에 별도로 기록한다.
 - `virtual_city_v1`의 현재 범위는 **25개 방향성 lane segment, 신호 head 3개·phase group 2개, 30초 신호 상태기계와 Unreal 표시**다.
-- `signal_city_v2`는 별도 맵·MapPackage와 traffic format version 2를 사용해 현재 58개 lane,
+- `signal_city_v2`는 별도 맵·MapPackage와 traffic format version 2를 사용해 현재 59개 lane,
   차량8+보행8 runtime head와 두 교차로 controller의 phase plan·offset을 data-driven으로 확장한다.
   9/3에는 저장 맵·ground를 백업 후 갱신하고 8개 접근부에 좌/직/우 전용 3차로와 실제
   인접 변경 구간을 추가했다. 기존 v1의 생성물·고정 주기·호환 동작을
@@ -14,6 +14,15 @@
 - 플레이어 차량은 계속 사용자가 조작한다. **적색 신호에 Ego 차량을 자동 제동하거나 신호 위반을 강제로 막지 않는다.** 신호가 바뀌는 것과 차량 AI가 신호를 준수하는 것은 별도 구현이다.
 
 ## 책임 분리
+
+9/8 변경: 가로 4등식 차량 head 8개에 독립 보호 좌회전을 추가했다. JSON의 선택 필드
+`left_group_id`와 wire의 `left_group_id`·`left_aspect`·`left_remaining_seconds`(10·11·12)가
+직진 상태와 같은 WorldState로 전달된다. 좌회전 없는 기존 지도는 0·Unknown·0으로
+호환한다. 같은 교차로의 상충 녹색/황색, 불일치 countdown, 고장 head의 녹색은 거부한다.
+신호기 파괴는 해당 head의 양쪽 허용 상태를 적색/잔여 0으로 만들고 화면에서는 소등한다.
+직진·우회전과 좌회전을 분리한 현재 주기는 116초, 두 교차로 offset은 0/14초다.
+보행 전용 WALK는 느린 체형까지 23m를 건너도록 24초로 늘렸다. 아래의 과거 실행 시간과
+생성 수치는 이력이며 최신 값은 [9/8 작업일지](./worklogs/2026-09-08.md)를 따른다.
 
 | 영역 | 담당 | 현재 동작 |
 |---|---|---|

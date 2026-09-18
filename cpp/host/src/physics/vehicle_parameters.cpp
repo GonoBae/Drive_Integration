@@ -7,7 +7,7 @@
 
 bool valid_vehicle_parameters(const VehicleParameters& parameters)
 {
-    const std::array<float, 57> finite_values{
+    const std::array<float, 59> finite_values{
         parameters.mass_kg,
         parameters.wheelbase_m,
         parameters.max_steering_angle_rad,
@@ -62,6 +62,8 @@ bool valid_vehicle_parameters(const VehicleParameters& parameters)
         parameters.collision_body_overhang_m,
         parameters.collision_body_side_padding_m,
         parameters.collision_body_half_height_m,
+        parameters.collision_body_center_forward_offset_m,
+        parameters.collision_body_ground_clearance_m,
         parameters.chassis_shell_center_up_offset_m,
         parameters.chassis_shell_half_height_m,
         parameters.suspension.rest_length_m,
@@ -138,6 +140,9 @@ bool valid_vehicle_parameters(const VehicleParameters& parameters)
         && parameters.collision_body_overhang_m > 0.f
         && parameters.collision_body_side_padding_m > 0.f
         && parameters.collision_body_half_height_m > 0.f
+        && std::abs(parameters.collision_body_center_forward_offset_m)
+            < parameters.wheelbase_m * 0.5f + parameters.collision_body_overhang_m
+        && parameters.collision_body_ground_clearance_m >= 0.f
         && parameters.chassis_shell_half_height_m > 0.f
         && std::abs(parameters.chassis_shell_center_up_offset_m)
             < parameters.collision_body_half_height_m * 2.f

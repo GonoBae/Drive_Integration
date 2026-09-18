@@ -7,7 +7,7 @@ namespace SimCoreVirtualCity
 {
 	enum class EPalette : uint8
 	{
-		Ground, Road, Sidewalk, Curb, Building, Glass, Marking, Yellow, Barrier, Grass
+		Ground, Road, Sidewalk, Curb, Building, Glass, Marking, Yellow, Barrier, Grass, SignBlue
 	};
 
 	struct FBox

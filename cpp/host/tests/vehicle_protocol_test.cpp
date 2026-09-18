@@ -734,6 +734,33 @@ void test_runtime_horn_event_sequence_is_additive_and_npc_only()
     require(rejected, "pedestrians cannot publish vehicle horn events");
 }
 
+void test_runtime_local_bypass_is_additive_and_npc_only()
+{
+    static_assert(simcore::EntityState::kNpcLocalBypassActiveFieldNumber == 40);
+    using namespace simcore_host;
+    VehicleState ego;
+    ego.entity_id = 1;
+    auto npc = make_runtime_attitude_npc();
+    const auto baseline = serialize_world_state_envelope(ego, {npc}, make_metadata());
+    npc.npc_local_bypass_active = true;
+    simcore::Envelope wire;
+    require(wire.ParseFromString(serialize_world_state_envelope(ego, {npc}, make_metadata()))
+            && wire.world_state().entities(1).npc_local_bypass_active()
+            && !wire.world_state().entities(0).npc_local_bypass_active(),
+        "local bypass must be explicit on the active NPC, never Ego");
+    npc.npc_local_bypass_active = false;
+    require(serialize_world_state_envelope(ego, {npc}, make_metadata()) == baseline,
+        "inactive/completed/reset bypass must preserve legacy wire bytes");
+    RuntimeEntityState pedestrian{
+        2001, RuntimeEntityKind::Pedestrian,
+        {"ped-2001", VerticalCapsule{{2, 3}, .9, .35, .9}, {}, 0.0, {.7, 0}}};
+    pedestrian.npc_local_bypass_active = true;
+    bool rejected = false;
+    try { (void)serialize_world_state_envelope(ego, {pedestrian}, make_metadata()); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected, "pedestrians cannot publish NPC local-bypass authority");
+}
+
 void test_runtime_vehicle_class_is_additive_for_ego_and_npc()
 {
     static_assert(simcore::EntityState::kRuntimeVehicleClassFieldNumber == 39);
@@ -1066,12 +1093,81 @@ void test_contact_local_vehicle_dents()
     require(ego.dent_patches.empty(),"world reset must clear all contact dents");
 }
 
+void test_protected_left_signal_is_additive_and_atomic()
+{
+    using namespace simcore_host;
+    static_assert(simcore::TrafficSignalState::kLeftGroupIdFieldNumber == 10);
+    static_assert(simcore::TrafficSignalState::kLeftAspectFieldNumber == 11);
+    static_assert(simcore::TrafficSignalState::kLeftRemainingSecondsFieldNumber == 12);
+    VehicleState ego;
+    ego.entity_id = 1;
+    TrafficSignalSnapshot head;
+    head.id = 7; head.group_id = 101; head.aspect = SignalAspect::Red;
+    head.remaining_seconds = 12.5;
+    const auto encode = [&](const std::vector<TrafficSignalSnapshot>& signals) {
+        simcore::Envelope result;
+        require(result.ParseFromString(serialize_world_state_envelope(ego, {}, make_metadata(),
+            std::nullopt, signals, "fnv1a64:0123456789abcdef")), "protected-left WorldState must parse");
+        return result;
+    };
+    const auto legacy = encode({head});
+    require(legacy.world_state().traffic_signals(0).left_group_id() == 0
+        && legacy.world_state().traffic_signals(0).left_aspect() == simcore::TRAFFIC_SIGNAL_UNKNOWN,
+        "legacy heads must not acquire a fictitious left-turn permission");
+    head.left_group_id = 107; head.left_aspect = SignalAspect::Green; head.left_remaining_seconds = 7.25;
+    const auto left = encode({head});
+    const auto& wire = left.world_state().traffic_signals(0);
+    require(wire.group_id() == 101 && wire.aspect() == simcore::TRAFFIC_SIGNAL_RED
+        && wire.remaining_seconds() == 12.5f && wire.left_group_id() == 107
+        && wire.left_aspect() == simcore::TRAFFIC_SIGNAL_GREEN && wire.left_remaining_seconds() == 7.25f,
+        "red straight and green left arrow must share the same atomic head without sharing permission");
+    auto straight = head;
+    straight.aspect = SignalAspect::Green; straight.left_aspect = SignalAspect::Red;
+    (void)encode({straight});
+    const auto rejects = [&](std::vector<TrafficSignalSnapshot> signals) {
+        bool rejected = false;
+        try { (void)encode(signals); } catch (const std::invalid_argument&) { rejected = true; }
+        require(rejected, "malformed or conflicting protected-left snapshot must fail closed");
+    };
+    for (int invalid = 0; invalid < 10; ++invalid) {
+        auto bad = head;
+        switch (invalid) {
+        case 0: bad.left_group_id = 4097; break;
+        case 1: bad.left_group_id = head.group_id; break;
+        case 2: bad.left_group_id = 0; break;
+        case 3: bad.left_aspect = SignalAspect::Unknown; break;
+        case 4: bad.left_aspect = static_cast<SignalAspect>(9); break;
+        case 5: bad.left_remaining_seconds = -1; break;
+        case 6: bad.left_remaining_seconds = std::numeric_limits<double>::quiet_NaN(); break;
+        case 7: bad.left_remaining_seconds = kMaxTrafficSignalCountdownSeconds + 1; break;
+        case 8: bad.kind = TrafficSignalKind::Pedestrian; break;
+        case 9: bad.aspect = SignalAspect::Green; break;
+        }
+        rejects({bad});
+    }
+    auto other = head; other.id = 8; other.group_id = 102; other.left_group_id = 108;
+    rejects({head, other});
+    rejects({other, head});
+    other.left_group_id = head.left_group_id;
+    other.left_remaining_seconds += .01;
+    rejects({head, other});
+    other.left_remaining_seconds = head.left_remaining_seconds;
+    (void)encode({head, other});
+    other.controller_id = 2; other.left_group_id = 207;
+    (void)encode({head, other});
+    auto absent = head;
+    absent.left_group_id = 0; absent.left_aspect = SignalAspect::Unknown;
+    absent.left_remaining_seconds = 1.0;
+    rejects({absent});
+}
+
 int main()
 {
     try {
         test_world_state_envelope_roundtrip();
         test_contact_local_vehicle_dents();
         test_traffic_snapshot_is_additive_and_atomic();
+        test_protected_left_signal_is_additive_and_atomic();
         test_structure_damage_is_additive_atomic_and_bounded();
         test_world_health_is_additive_and_atomic();
         test_runtime_entities_are_additive_and_deterministically_ordered();
@@ -1079,6 +1175,7 @@ int main()
         test_downed_pedestrian_body_and_vertical_velocity_roundtrip();
         test_runtime_attitude_default_and_reset_preserve_legacy_wire();
         test_runtime_horn_event_sequence_is_additive_and_npc_only();
+        test_runtime_local_bypass_is_additive_and_npc_only();
         test_runtime_vehicle_class_is_additive_for_ego_and_npc();
         test_runtime_tilt_uses_existing_true_flu_body_contract();
         test_control_command_envelope_maps_to_input();

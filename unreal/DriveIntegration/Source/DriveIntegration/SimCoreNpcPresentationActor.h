@@ -15,12 +15,16 @@ class USimCoreVehicleHornComponent;
 
 namespace SimCoreNpcPresentation
 {
-	/** v1 OBB bottom is 10 cm above the server's ground anchor. No UE ground query. */
+	// Live NPC poses use the collision center; recorded player poses use the CG.
+	enum class EPoseOrigin : uint8 { NpcCollisionCenter, PlayerCenterOfMass };
+
+	/** Default OBB clearance; taller chassis use their vehicle profile. */
 	inline constexpr double ObbBottomAboveGroundCm = 10.0;
 	// The server's tilted collision envelope changes size, the authored car does not.
 	inline constexpr float AuthoredBodyHalfHeightMeters = 0.75f;
 	DRIVEINTEGRATION_API bool BuildAuthoredModelOffset(
-		const FBox& AuthoredBounds, float ObbHalfHeightMeters, FVector& OutOffsetCm);
+		const FBox& AuthoredBounds, float ObbHalfHeightMeters, FVector& OutOffsetCm,
+		float GroundClearanceCm = ObbBottomAboveGroundCm);
 }
 
 /** Server-driven visual only: no controller, collision, terrain solve or local route. */
@@ -33,7 +37,12 @@ public:
 	ASimCoreNpcPresentationActor();
 	bool ApplySnapshot(const SimCoreProtocol::FVehicleState& State, float SnapshotAgeSeconds,
 		float DeltaSeconds, bool bMotionAllowed, float MaxExtrapolationSeconds,
-		const FVector& PresentationOffsetCm);
+		const FVector& PresentationOffsetCm,
+		SimCoreNpcPresentation::EPoseOrigin PoseOrigin =
+			SimCoreNpcPresentation::EPoseOrigin::NpcCollisionCenter);
+	/** Same-session receive grace: hold the displayed pose and silence effects. */
+	void FreezePresentation();
+	bool IsPresentationFrozen() const { return bPresentationFrozen; }
 	bool HasAuthoredSedan() const { return bHasAuthoredSedan; }
 	bool HasAuthoredFleet() const { return bHasAuthoredFleet; }
 	SimCoreProtocol::ERuntimeVehicleClass GetRuntimeVehicleClass() const { return RuntimeVehicleClass; }
@@ -71,6 +80,8 @@ private:
 	UPROPERTY(VisibleAnywhere, Category="SimCore|NPC Presentation")
 	TObjectPtr<USceneComponent> ModelRoot;
 	UPROPERTY(VisibleAnywhere, Category="SimCore|NPC Presentation")
+	TObjectPtr<class USimCoreSuspensionPresentation> SuspensionPresentation;
+	UPROPERTY(VisibleAnywhere, Category="SimCore|NPC Presentation")
 	TObjectPtr<UStaticMeshComponent> Body;
 	UPROPERTY(VisibleAnywhere, Category="SimCore|NPC Presentation")
 	TArray<TObjectPtr<UStaticMeshComponent>> Wheels;
@@ -97,7 +108,9 @@ private:
 	// must not translate or stretch the visual model between snapshots.
 	float PresentationHalfHeightMeters =
 		SimCoreNpcPresentation::AuthoredBodyHalfHeightMeters;
+	float PresentationGroundClearanceCm = SimCoreNpcPresentation::ObbBottomAboveGroundCm;
 	FString HornPlaySessionId;
 	FString HornMapPackageChecksum;
 	bool bHornSequenceInitialized = false;
+	bool bPresentationFrozen = false;
 };

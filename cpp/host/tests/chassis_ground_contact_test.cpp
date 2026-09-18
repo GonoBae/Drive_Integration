@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <numbers>
 #include <stdexcept>
 #include <string>
@@ -95,6 +96,65 @@ void test_clear_shell_is_unchanged()
             "clear body shell pose must remain unchanged");
 }
 
+class TruckEndLedgeGroundQuery final : public simcore_host::GroundQuery {
+public:
+    TruckEndLedgeGroundQuery(double heading_rad, bool behind)
+        : heading_rad_(heading_rad), behind_(behind) {}
+
+    std::optional<simcore_host::GroundHit> query_down(
+        const simcore_host::GroundQueryRequest& request) const override
+    {
+        const double forward = std::sin(heading_rad_) * request.origin_enu.east_m
+            + std::cos(heading_rad_) * request.origin_enu.north_m;
+        if (behind_ ? forward >= -3.20 : forward <= 3.00) {
+            return std::nullopt;
+        }
+        const double distance = request.origin_enu.up_m - 0.55;
+        if (distance < 0.0 || distance > request.max_distance_m) {
+            return std::nullopt;
+        }
+        return simcore_host::GroundHit{
+            {request.origin_enu.east_m, request.origin_enu.north_m, 0.55},
+            {0.0, 0.0, 1.0}, distance};
+    }
+
+private:
+    double heading_rad_;
+    bool behind_;
+};
+
+void test_truck_shell_contacts_its_authored_offset_rear_edge()
+{
+    const simcore_host::ChassisContactBox truck{
+        0.705, 3.10, 1.05, 0.965, 6200.0, 4500.0, 12000.0, 14500.0, -0.15};
+    for (const double heading : {0.0, std::numbers::pi_v<double> * 0.5}) {
+        simcore_host::ChassisGroundPose pose;
+        pose.up_m = 0.75;
+        pose.heading_rad = heading;
+        const TruckEndLedgeGroundQuery rear_ledge(heading, true);
+        const auto rear = simcore_host::resolve_chassis_ground_contact(
+            pose, truck, rear_ledge);
+        require(rear.corrected && std::abs(rear.maximum_penetration_m - 0.06) < 1e-6,
+            "truck rear at -3.25 m must meet the ledge with its 0.49 m underbody");
+
+        const TruckEndLedgeGroundQuery front_ledge(heading, false);
+        const auto front = simcore_host::resolve_chassis_ground_contact(
+            pose, truck, front_ledge);
+        require(!front.corrected && front.contact_count == 0,
+            "terrain beyond the authored 2.95 m truck nose must not contact a phantom shell");
+    }
+    auto invalid = truck;
+    invalid.center_forward_offset_m = std::numeric_limits<double>::quiet_NaN();
+    bool rejected = false;
+    try {
+        (void)simcore_host::resolve_chassis_ground_contact(
+            {}, invalid, simcore_host::FlatGroundQuery{});
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    require(rejected, "nonfinite shell offsets must fail before querying terrain");
+}
+
 } // namespace
 
 int main()
@@ -104,6 +164,7 @@ int main()
         test_roof_contact_blocks_upside_down_penetration();
         test_side_contact_blocks_ninety_degree_roll();
         test_clear_shell_is_unchanged();
+        test_truck_shell_contacts_its_authored_offset_rear_edge();
         std::cout << "chassis_ground_contact_tests: all tests passed\n";
         return 0;
     } catch (const std::exception& error) {

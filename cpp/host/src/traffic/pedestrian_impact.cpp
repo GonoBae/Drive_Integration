@@ -29,7 +29,7 @@ double sedan_surface_up(const ObbPrism& vehicle, CollisionVector2 point)
 
 ImpactTumbleSupport PedestrianImpactState::support() const noexcept
 {
-    return impact_tumble_support(body_dimensions, pitch_rad_, 0.0);
+    return impact_tumble_support(dimensions_, pitch_rad_, 0.0);
 }
 
 bool PedestrianImpactState::settled() const noexcept
@@ -57,15 +57,17 @@ void PedestrianImpactState::contact(std::uint32_t event, double impulse,
     if (impulse <= previous_impulse || event_age_seconds_ > contact_window_seconds + 1e-9) return;
     // Do not add repeated reports or separate gentle bumps together. Only the
     // growing peak of this brief physical contact episode can cause a fall.
-    if (!downed_ && impulse < knockdown_impulse_n_s) return;
+    if (!downed_ && impulse < dimensions_.mass_kg * knockdown_delta_v_mps) return;
     const bool was_downed = downed_;
-    const double contact_up = std::isfinite(geometry.contact_up_m) ? geometry.contact_up_m : ground_up + 0.45;
-    const double lever = std::clamp(current_up - contact_up, -body_dimensions.half_height_m,
-        body_dimensions.half_height_m);
-    const double inertia = body_dimensions.mass_kg * (body_dimensions.half_height_m * body_dimensions.half_height_m
-        + body_dimensions.half_length_m * body_dimensions.half_length_m) / 3.0;
+    const double contact_up = std::isfinite(geometry.contact_up_m) ? geometry.contact_up_m
+        : ground_up + dimensions_.half_height_m * 0.5;
+    const double lever = std::clamp(current_up - contact_up, -dimensions_.half_height_m,
+        dimensions_.half_height_m);
+    const double inertia = dimensions_.mass_kg * (dimensions_.half_height_m * dimensions_.half_height_m
+        + dimensions_.half_length_m * dimensions_.half_length_m) / 3.0;
     if (!downed_) {
         downed_ = true;
+        get_up_balance_seconds_ = 0.0;
         heading_rad_ = std::atan2(direction.east_m, direction.north_m);
         // A force BELOW the centre of mass drives the legs ahead of the torso:
         // positive pitch leans the head BACK toward the striking vehicle.
@@ -95,7 +97,10 @@ void PedestrianImpactState::tick(double dt, double ground_up, bool recovering, b
     // Age even while standing: a held bumper must not become a delayed launch
     // merely because its episode's reported pressure grows several seconds later.
     if (event_ != 0) event_age_seconds_ += dt;
-    if (!downed_) return;
+    if (!downed_) {
+        get_up_balance_seconds_ = std::max(0.0, get_up_balance_seconds_ - dt);
+        return;
+    }
     const int steps = std::max(1, static_cast<int>(std::ceil(dt * 240.0)));
     const double step = dt / steps;
     for (int index = 0; index < steps; ++index) {
@@ -109,8 +114,9 @@ void PedestrianImpactState::tick(double dt, double ground_up, bool recovering, b
             vertical_velocity_mps_ = 0.0;
             if (pitch_rad_ == 0.0) {
                 downed_ = false;
+                get_up_balance_seconds_ = 2.8;
                 pitch_rate_rad_s_ = 0.0;
-                center_up_m_ = ground_up + 0.9;
+                center_up_m_ = ground_up + dimensions_.half_height_m;
                 break;
             }
             continue;
@@ -144,8 +150,8 @@ void PedestrianImpactState::tick(double dt, double ground_up, bool recovering, b
         std::string vehicle_id;
         for (const auto& vehicle : vehicles) {
             if (vehicle.vehicle_id.empty()) continue;
-            for (const double x : {-body_dimensions.half_length_m, body_dimensions.half_length_m}) {
-                for (const double z : {-body_dimensions.half_height_m, 0.0, body_dimensions.half_height_m}) {
+            for (const double x : {-dimensions_.half_length_m, dimensions_.half_length_m}) {
+                for (const double z : {-dimensions_.half_height_m, 0.0, dimensions_.half_height_m}) {
                     const double horizontal = x * std::cos(pitch_rad_) - z * std::sin(pitch_rad_);
                     const double up = x * std::sin(pitch_rad_) + z * std::cos(pitch_rad_);
                     const CollisionVector2 sample{center.east_m + horizontal * std::sin(heading_rad_),

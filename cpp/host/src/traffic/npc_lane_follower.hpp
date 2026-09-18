@@ -103,7 +103,8 @@ public:
     const NpcLaneFollowerState& step(
         double dt_seconds, std::span<const TrafficSignalSnapshot> signals,
         bool enabled = true,
-        std::optional<double> blocked_distance_m = std::nullopt);
+        std::optional<double> blocked_distance_m = std::nullopt,
+        double local_speed_limit_mps = 55.6, double extra_stop_margin_m = 0.0);
 
     [[nodiscard]] const NpcLaneFollowerState& state() const noexcept { return state_; }
     [[nodiscard]] const NpcLaneFollowerConfig& config() const noexcept { return config_; }
@@ -114,13 +115,21 @@ public:
     }
     // Geometry/ground-only lookahead for the host's collision guard; this does
     // not authorize movement through signals or mutate controller progress.
+    // Heading blends adjoining tangents within at most 1m of each vertex,
+    // including lane/loop joins, without moving the authored centreline.
     [[nodiscard]] std::optional<NpcLaneSample> sample_ahead(double distance_m) const;
+    // 0/off, 1/left, 2/right. The selected connector after a controlled
+    // approach defines intention; ordinary lane curvature does not.
+    [[nodiscard]] std::uint32_t turn_signal_intent(double lookahead_m) const;
     // Host-authorized low-speed escape only. This moves a stopped follower
     // backwards on its current authored lane without crossing a lane boundary
-    // or an active stop-line commitment. The host must sweep the body against
+    // or reversing through a junction connector. The host must sweep the body against
     // rear traffic/static collision before calling it. It is deliberately not
     // a graph edge and therefore cannot invent reverse travel through a junction.
     [[nodiscard]] std::optional<NpcLaneSample> sample_behind(double distance_m) const;
+    // A nose-only stopline entry may back out while still on its approach.
+    // Once the centre enters the junction connector, reverse remains forbidden.
+    [[nodiscard]] bool can_retreat_from_current_lane() const noexcept;
     [[nodiscard]] bool retreat_for_obstacle(double distance_m);
 
 private:
@@ -136,6 +145,7 @@ private:
     struct SignalIdentity {
         std::uint32_t id = 0;
         std::uint32_t group_id = 0;
+        bool protected_left = false;
     };
 
     [[nodiscard]] std::optional<NpcLaneSample> sample_at(double progress_m) const;

@@ -42,6 +42,7 @@ namespace SimCoreSignalCity
 		FVector PositionEnuM = FVector::ZeroVector;
 		double HeadingDegrees = 0.0;
 		ETrafficSignalKind Kind = ETrafficSignalKind::Vehicle;
+		uint32 LeftGroupId = 0;
 	};
 
 	struct FSignalPhase

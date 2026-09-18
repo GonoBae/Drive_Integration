@@ -1,0 +1,185 @@
+[
+  {
+    "id": "C01",
+    "section": "C++ 서버 자동 검사",
+    "title": "CTest와 자체 판정 함수",
+    "question": "이 프로젝트는 어떤 방식으로 C++ 테스트의 성공과 실패를 판정하나요?",
+    "imageKey": "new_ctest",
+    "why": "테스트 등록 한 건과 내부 검사 여러 개를 구분하고 실패 원인을 실행 파일까지 추적합니다.",
+    "reading": ["CTest는 등록된 실행 파일과 인수를 호출하고 결과를 모읍니다.", "실행 파일 안의 require가 조건을 검사해 실패를 알립니다."],
+    "answer": "CMake가 테스트 실행 파일을 만들고 CTest가 등록된 명령을 실행합니다. 내부 검사는 자체 require 함수로 조건을 확인하며 실패하면 예외를 던집니다. 현재 소스의 등록 45개는 실행 파일 33종과 인수 조합의 수입니다. 내부 검사 수나 현재 전체 통과 수와 같지는 않습니다.",
+    "followup": "CTest 한 건이 통과했을 때 내부의 몇 가지 조건을 검사했는지 어떻게 확인하나요?",
+    "codeRef": {
+      "path": "cpp/host/tests/control_lease_test.cpp",
+      "start": 12,
+      "end": 17,
+      "explain": "조건이 거짓이면 설명을 담은 예외를 던지는 프로젝트 자체 판정 함수입니다."
+    },
+    "sources": [
+      {"path": "cpp/host/CMakeLists.txt", "start": 189, "end": 210, "symbol": "CTest registration and NPC variants"},
+      {"path": "cpp/host/CMakeLists.txt", "start": 299, "end": 324, "symbol": "Offline probe and skipped course test"},
+      {"path": "cpp/host/CMakePresets.json", "start": 45, "end": 54, "symbol": "release test preset"},
+      {"path": "cpp/host/tests/control_lease_test.cpp", "start": 268, "end": 288, "symbol": "main"},
+      {"path": "runtime_logs/20260908-final-local-bypass-cpp-tests.log", "start": 87, "end": 89, "symbol": "Past full run: 42 tests"},
+      {"path": "runtime_logs/20260908-final-npc-yaw-budget-cpp-tests.log", "start": 184, "end": 191, "symbol": "Past full run: 44 tests, two failures"},
+      {"path": "runtime_logs/20260908-final-npc-scheduled-fixtures-tests.log", "start": 1, "end": 9, "symbol": "Past focused rerun: two tests"}
+    ],
+    "notes": "기술과 개념\n기술 구조는 CMake의 include(CTest)와 BUILD_TESTING 조건, add_executable·add_test 등록, 각 실행 파일의 main과 자체 require입니다. 조사한 CMake와 테스트 소스에는 Catch2나 GoogleTest 사용 근거가 없습니다. require는 실패 시 예외를 던지며 주요 main은 이를 받아 오류를 출력하고 종료 코드 1을 반환합니다.\n\n준비·실행·판정\n준비는 Release 테스트 바이너리와 필요한 지도 자료를 마련하는 것입니다. 실행 명령은 cpp/host 폴더에서 ctest --preset release이며, 프로젝트 루트에서 특정 범위는 ctest --test-dir cpp/host/build -C Release -R control_lease_tests --output-on-failure처럼 고릅니다. 명령 예시는 실행 방법을 설명하며 실제 통과 로그를 대신하지 않습니다. 현재 소스에는 45개 등록과 33종 실행 파일이 있습니다. NPC 실행 파일을 다른 인수로 재사용하고, lease 한 실행 파일도 내부 함수 11개를 호출하므로 등록 수는 검사 조건 수가 아닙니다. vehicle_cornering_probe는 빌드 대상이지만 CTest에 등록되지 않았습니다. 지도 코스는 자료가 없으면 77을 반환해 건너뛸 수 있으므로 skip도 확인합니다.\n\n사용 시점과 효과\n장점은 같은 조건을 반복하고 실패 범위를 좁히는 것입니다.\n\n한계\n과거 9/8 로그는 42/42 성공, 후속 44개 실행의 42개 성공·2개 실패, 해당 2개 재검사 성공을 따로 기록합니다. 이것을 현재 45/45 전체 성공으로 합쳐 쓰면 안 됩니다. TIMEOUT은 멈춘 검사를 끝내는 한도이며 차량 성능 목표가 아닙니다."
+  },
+  {
+    "id": "C02",
+    "section": "C++ 서버 자동 검사",
+    "title": "기다리지 않고 시간 조건 검사",
+    "question": "250ms 만료와 1초 과부하를 실제로 기다리지 않고 어떻게 검사하나요?",
+    "imageKey": "lease_time",
+    "why": "시간 경계와 오래된 입력의 복구 조건을 정해진 숫자로 반복해서 확인합니다.",
+    "reading": ["클라이언트 생성 시각과 서버 수신 시각을 따로 준비합니다.", "수신 간격과 무입력 기간은 같은 서버 시계에서 계산합니다."],
+    "answer": "lease와 clock 검사는 시작 시각과 이후 시각을 인수로 넣어 시간을 통제합니다. 251ms에 SafeStop을 만든 뒤 오래된 명령을 보내 정지가 유지되는지 확인합니다. clock에는 1초 늦은 완료를 넣고 한 틱만 증가하며 다음 마감이 미래인지 검사합니다. 실제 대기 없이 시간 정책의 경계를 반복 검증합니다.",
+    "followup": "clock 검사가 통과했다면 실제 서버도 모든 장면에서 60Hz를 유지하나요?",
+    "codeRef": {
+      "path": "cpp/host/tests/control_lease_test.cpp",
+      "start": 80,
+      "end": 82,
+      "explain": "순번이 늘어도 오래된 입력은 거부하고 SafeStop이 계속 켜져 있는지 확인합니다."
+    },
+    "sources": [
+      {"path": "cpp/host/tests/control_lease_test.cpp", "start": 70, "end": 92, "symbol": "test_stale_queued_packet_cannot_release_safe_stop"},
+      {"path": "cpp/host/tests/control_lease_test.cpp", "start": 94, "end": 122, "symbol": "test_new_session_can_acquire_only_after_hard_timeout"},
+      {"path": "cpp/host/tests/control_lease_test.cpp", "start": 150, "end": 168, "symbol": "test_rejected_packet_does_not_poison_sequence_state"},
+      {"path": "cpp/host/tests/simulation_clock_test.cpp", "start": 38, "end": 80, "symbol": "Overrun and reset deadline tests"}
+    ],
+    "notes": "기술과 개념\n기술은 실제 시간을 기다리는 대신 경과시간을 입력값으로 주는 결정적인 조건 검사입니다.\n\n준비·실행·판정\nlease 준비 단계에서는 timeout 250ms·queue age 100ms와 서버 시작 시각을 만들고, 클라이언트 1초의 첫 정상 명령을 수락시킵니다. 실행 단계는 서버 시작+251ms로 만료를 검사한 뒤, 생성 시각은 10ms만 늘었는데 서버에서는 252ms 뒤에 온 명령을 넣습니다. 판정은 추가 지연 242ms가 한도를 넘어서 거부되고 SafeStop도 유지되는 것입니다. 이어 생성·수신 간격이 모두 253ms인 같은 소유자의 정상 명령은 복구해야 합니다. 별도 검사는 정확히 1000ms에서 hard 만료가 발생하지 않고 1001ms에서 발생하는지 확인합니다. 순번 100을 가진 잘못된 시각의 명령을 거부한 뒤 정상 순번 2가 수락되는지도 검사합니다. 잘못된 입력이 정상 기준을 오염시키지 않게 하는 목적입니다. clock 준비는 60Hz와 고정 시작점이며, 완료를 1초 뒤로 주어도 계산 틱은 하나만 늘고 다음 마감은 완료 시각보다 미래여야 합니다. reset은 누적 시간과 진단을 지우되 이미 예약한 마감은 보존합니다.\n\n사용 시점과 효과\n효과는 통신 연결 없이 만료·복구·과부하 정책의 회귀를 빠르게 잡는 것입니다.\n\n한계\n단, 이 검사는 실제 소켓 지연이나 OS 스케줄링, 모든 장면의 실시간 60Hz를 측정하지 않습니다. queue age도 절대 단방향 지연이 아니라 두 간격 차이의 추정값입니다."
+  },
+  {
+    "id": "C03",
+    "section": "C++ 서버 자동 검사",
+    "title": "프로토콜 성공과 거부 경로",
+    "question": "정상 메시지 왕복만 검사하면 잘못된 버전이나 생략 필드도 안전할까요?",
+    "imageKey": "v1_L09",
+    "why": "바이트 해석의 성공과 현재 계약에 맞는 값의 수락을 나누어 검증합니다.",
+    "reading": ["Envelope의 payload 종류와 내부 목록은 서로 다른 구조입니다.", "필드 번호·원소 위치·활성 종류를 각각 맞춰야 의미가 보존됩니다."],
+    "answer": "정상 왕복 검사는 직렬화한 값이 같은 의미로 복원되는지 봅니다. 여기에 잘못된 버전 1·3과 알 수 없는 차종을 넣어 거부하는지도 검사합니다. gear 부재는 기본 Drive를 유지해야 합니다. 성공 경로와 실패 경로를 함께 검사해야 파싱은 되지만 계약이 다른 값이 물리 입력으로 들어가는 회귀를 잡습니다.",
+    "followup": "직렬화기와 파서가 같은 잘못을 공유한다면 왕복 테스트만으로 발견할 수 있나요?",
+    "codeRef": {
+      "path": "cpp/host/tests/vehicle_protocol_test.cpp",
+      "start": 945,
+      "end": 946,
+      "explain": "잘못된 버전이 물리 입력으로 들어가지 않는지 판정합니다."
+    },
+    "sources": [
+      {"path": "cpp/host/tests/vehicle_protocol_test.cpp", "start": 337, "end": 403, "symbol": "test_world_state_envelope_roundtrip"},
+      {"path": "cpp/host/tests/vehicle_protocol_test.cpp", "start": 925, "end": 965, "symbol": "Unknown vehicle class, schema rejection and missing gear"},
+      {"path": "cpp/host/tests/vehicle_protocol_test.cpp", "start": 967, "end": 982, "symbol": "test_estop_maps_to_safe_brake"},
+      {"path": "cpp/host/tests/vehicle_protocol_test.cpp", "start": 640, "end": 644, "symbol": "Compile-time field-number contract"},
+      {"path": "cpp/host/tests/vehicle_protocol_test.cpp", "start": 1164, "end": 1194, "symbol": "main"}
+    ],
+    "notes": "기술과 개념\n기술은 생성된 Protobuf 클래스와 프로젝트 변환 함수의 왕복 검사, 거부 검사, 컴파일 시 필드 번호 확인입니다.\n\n준비·실행·판정\n정상 준비에서는 VehicleState에 위치·속도·기어·좌회전 부호와 네 바퀴 값을 넣습니다. 직렬화 후 생성 Envelope로 읽어 순번, 계산 시간, 출처, 엔티티와 바퀴 값이 유지되는지 판정합니다. 같은 숫자 타입이어도 좌표 방향이나 단위가 바뀌면 동작이 달라지므로 의미가 있는 값들을 선택합니다. static_assert는 공개 필드 번호를 바꿨을 때 컴파일 단계에서 빌드를 실패시킵니다. 실패 준비에서는 문법적으로 만들 수 있는 Envelope의 schema_version을 1 또는 3으로 설정합니다. 현재 v2 decoder에 넣었을 때 optional 결과가 비어 있고 오류에 schema version이 들어 있어야 합니다. 알 수 없는 차종 5도 거부합니다. 반면 gear를 생략한 정상 입력은 파싱에 성공하고 내부 Drive를 유지해야 하며 E-stop 입력은 스로틀 0·브레이크 1·handbrake로 변환돼야 합니다. 잘못된 것은 거부하고 허용한 부재는 보존하는 정책을 함께 검사하는 이유입니다.\n\n사용 시점과 효과\n효과는 스키마 확장이나 변환 리팩터링이 과거 클라이언트 동작을 깨뜨리는 회귀를 발견하는 것입니다.\n\n한계\n한계는 이 실행 파일이 WebSocket·Hello·실제 Unreal 파서까지 왕복하지 않는다는 점입니다. 같은 잘못을 공유한 직렬화기와 파서는 서로 일치할 수 있으므로 독립적인 wire 계약과 다른 런타임 검사가 보완해야 합니다."
+  },
+  {
+    "id": "C04",
+    "section": "C++ 서버 자동 검사",
+    "title": "접지와 힘의 불변 조건",
+    "question": "차가 움직인다는 사실 외에 물리 계산에서 무엇을 자동으로 검사하나요?",
+    "imageKey": "suspension",
+    "why": "접촉 없는 바퀴가 차체를 가속하거나 한 바퀴의 하중을 다른 바퀴에 잘못 주는 오류를 잡습니다.",
+    "reading": ["지면 높이와 접촉 여부는 바퀴마다 다를 수 있습니다.", "각 바퀴의 지지력과 차체 반응을 별도 조건으로 확인합니다."],
+    "answer": "물리 테스트는 만든 지면 조건에 고정 시간 간격으로 입력을 적용합니다. 지면이 없으면 타이어 하중과 힘이 0인지, 왼쪽만 지지하면 오른쪽 힘이 0인지 검사합니다. 평지에서는 접지·유한한 값·힘 한도를 확인하고 제동 뒤 후진이나 잔여 바퀴 회전이 없는지도 봅니다. 움직임뿐 아니라 유지해야 할 관계를 판정합니다.",
+    "followup": "테스트에서 힘 한도를 통과한 것이 실제 차량의 승차감이나 타이어 정확도도 증명하나요?",
+    "codeRef": null,
+    "sources": [
+      {"path": "cpp/host/tests/vehicle_physics_test.cpp", "start": 496, "end": 507, "symbol": "advance / make_vehicle"},
+      {"path": "cpp/host/tests/vehicle_physics_test.cpp", "start": 1733, "end": 1782, "symbol": "No-ground and partial-ground invariants"},
+      {"path": "cpp/host/tests/vehicle_physics_test.cpp", "start": 3611, "end": 3632, "symbol": "test_service_brake_stops_without_reversing"},
+      {"path": "cpp/host/tests/vehicle_physics_test.cpp", "start": 3821, "end": 3860, "symbol": "test_four_wheel_contact_and_force_limits"}
+    ],
+    "notes": "기술과 개념\n기술은 GroundQuery의 대체 구현으로 지면을 통제하고 VehiclePhysics를 직접 여러 고정 틱 진행하는 모델 검사입니다. 화면을 보고 느낌을 비교하는 대신 접촉과 힘 사이에 반드시 유지할 관계를 판정합니다.\n\n준비·실행·판정\n지면이 전혀 없는 준비에서는 NoGroundQuery를 넣고 스로틀 1로 60틱 진행합니다. 모든 바퀴가 비접촉이고 하중·종횡 타이어 힘·공개 slip 값이 0인지, 떠 있는 차체가 타이어 힘으로 가속하지 않는지 확인합니다. 왼쪽 절반만 지면인 준비에서는 3틱 뒤 왼쪽 바퀴 0·2만 접촉하고 하중을 받으며 오른쪽 1·3의 힘은 0인지 검사합니다. 평지 준비에서는 스로틀 0.7·조향 0.2를 120틱 적용합니다. 네 바퀴의 접촉과 양의 하중, 유한한 slip·각속도, 앞바퀴만 좌조향하는 계약을 확인합니다. 이 기본 평지 fixture의 합성 타이어 힘 한도는 하중에 작은 허용 오차를 더한 값입니다. 이를 모든 노면의 마찰계수가 1이라는 일반식으로 설명하면 안 됩니다. 제동 검사는 먼저 120틱 가속한 뒤 300틱 브레이크를 주며 속도가 음수가 되지 않고 마지막 속도와 바퀴 각속도가 0인지 봅니다.\n\n사용 시점과 효과\n효과는 힘 모델이나 좌표 변환 수정이 비접촉 힘, 부호 오류, 잔여 회전을 만드는 회귀를 잡는 것입니다.\n\n한계\n한계는 정해진 축약 모델과 입력 조건의 일관성 검사라는 점입니다. 실제 타이어·실차 보정·승차감과 화면 표현의 완성은 별도의 측정과 수동 확인이 필요합니다."
+  },
+  {
+    "id": "C05",
+    "section": "C++ 서버 자동 검사",
+    "title": "연석 문제를 재현하는 회귀",
+    "question": "연석을 올라가게 수정한 뒤 벽도 통과하는 부작용은 어떻게 막나요?",
+    "imageKey": "curb_actual",
+    "why": "사용자가 본 걸침 문제를 조건으로 재현하고 올라갈 연석과 막아야 할 장애물을 함께 검사합니다.",
+    "reading": ["사진은 이전 사용자 문제 화면이며 현재 통과 결과를 나타내지 않습니다.", "특정 걸침 자세의 재현과 합성 연석 검사는 구분합니다."],
+    "answer": "연석 회귀는 높이·지지면·구동력과 시간 간격을 정해 같은 상황을 재현합니다. 24cm 연석은 충분한 구동력과 지지가 있을 때 오르고, 30cm 턱이나 Wall은 계속 막혀야 합니다. 접촉 수·차체 기울기·정착 높이도 검사합니다. 실제 저장 지도 검사까지 더해 올라가는 수정이 충돌 경계를 허물지 않는지 확인합니다.",
+    "followup": "합성 연석 검사는 통과했는데 실제 지도에서 걸린다면 어떤 자료를 더 확인하나요?",
+    "codeRef": null,
+    "sources": [
+      {"path": "cpp/host/tests/vehicle_physics_test.cpp", "start": 4201, "end": 4270, "symbol": "test_curb_requires_authored_wheel_support_and_climbs_by_suspension"},
+      {"path": "cpp/host/tests/vehicle_physics_test.cpp", "start": 4379, "end": 4439, "symbol": "test_swept_curb_candidate_prevents_tunneling_and_velocity_erasure"},
+      {"path": "cpp/host/tests/virtual_city_course_test.cpp", "start": 317, "end": 362, "symbol": "test_high_throttle_climbs_authored_south_curb"},
+      {"path": "cpp/host/tests/virtual_city_course_test.cpp", "start": 1084, "end": 1147, "symbol": "Package loading, skip and named course groups"},
+      {"path": "docs/worklogs/2026-09-08.md", "start": 107, "end": 132, "symbol": "Recorded curb stop/restart investigation"}
+    ],
+    "notes": "기술과 개념\n기술은 작은 합성 지면의 조건 비교와 실제 MapPackage를 읽는 회귀의 조합입니다.\n\n준비·실행·판정\n합성 준비는 24cm 연석, 경사 연결면과 충분한 반대편 평탄 지지면입니다. 최대 구동력을 300N으로 둔 경우 턱 앞에서 멈추고, 6000N인 경우 60·120·240Hz에서 올라가야 합니다. 판정은 통과 여부만이 아니라 앞뒤 축이 차례로 올라가는지, 접촉 바퀴가 최소 두 개인지, pitch가 35도 미만인지, 최종 차체 높이가 예상 0.79m에서 8cm 이내인지입니다. 세 시간 간격의 통과 시각 차이도 0.12초 미만으로 제한합니다. 부작용 검사는 30cm 턱, Wall 의미, 먼 평탄 지지면 없음, 가까운 상승면과 반대쪽의 먼 지지를 각각 넣어 계속 막히는지 확인합니다. 별도 30·50m/s 스트레스는 한 틱에서 연석을 건너는 후보를 놓치거나 속도를 잘못 없애는지와 수직 변화의 한도를 검사하며 승차감 측정은 아닙니다. 실제 지도 검사는 파일을 로드하여 Curb_South_1의 의미·24cm 형상, 도로와 보도 높이·법선·지지면을 확인합니다.\n\n사용 시점과 효과\n장점은 계산 원리의 실패와 저작·Bake 자료의 실패를 분리하는 것입니다.\n\n한계\n사진은 과거 사용자 문제의 관찰 자료이고 합격 화면이 아닙니다. 화면 번호와 로그 번호는 별도 식별 체계일 수 있어 대응을 확인해야 합니다. 합성 fixture 성공만으로 모든 실제 연석을 통과한다고 할 수 없으며, 실제 자세·차종·접근 각도와 저장 자료를 맞춘 재현이 필요합니다."
+  },
+  {
+    "id": "C06",
+    "section": "C++ 서버 자동 검사",
+    "title": "충돌 결과와 탐색 최적화 검사",
+    "question": "빠른 차량의 벽 관통과 충돌 후보 누락을 어떻게 자동으로 찾아내나요?",
+    "imageKey": "collision",
+    "why": "비관통과 충격 반응을 유지하면서 후보 탐색을 바꿔도 물리 결과가 달라지지 않게 합니다.",
+    "reading": ["접촉 위치와 힘 방향을 보고 밀림과 회전의 조건을 구분합니다.", "무게중심에서 벗어난 접촉은 지렛팔과 관성의 영향을 받습니다."],
+    "answer": "충돌 테스트는 정한 위치·속도의 차체를 벽이나 NPC에 접근시킵니다. 빠른 정면 충돌은 세부 스텝으로 처리되어 벽 앞에 남고 들어오는 속도를 없애야 합니다. 공간 격자 최적화는 전수 탐색과 상태·접촉 결과를 직접 비교합니다. 후보 수 감소와 결과 보존을 함께 봐야 빠르지만 장애물을 놓치는 수정을 잡습니다.",
+    "followup": "후보 수가 10분의 1 미만이라는 검사로 전체 게임이 10배 빨라졌다고 말할 수 있나요?",
+    "codeRef": {
+      "path": "cpp/host/tests/collision_world_test.cpp",
+      "start": 173,
+      "end": 175,
+      "explain": "빠른 이동 뒤에도 실제 벽 접촉을 보고하는지 확인합니다."
+    },
+    "sources": [
+      {"path": "cpp/host/tests/collision_world_test.cpp", "start": 27, "end": 60, "symbol": "require_same_physics_result"},
+      {"path": "cpp/host/tests/collision_world_test.cpp", "start": 162, "end": 203, "symbol": "Head-on and glancing collision tests"},
+      {"path": "cpp/host/tests/collision_world_test.cpp", "start": 321, "end": 359, "symbol": "Center-of-mass contact lever arm tests"},
+      {"path": "cpp/host/tests/collision_world_test.cpp", "start": 645, "end": 697, "symbol": "test_uniform_grid_matches_brute_force_and_reduces_candidates"}
+    ],
+    "notes": "기술과 개념\n기술은 알려진 형상의 충돌 fixture, 비관통 불변 조건, 최적화 구현과 기준 구현의 직접 비교입니다.\n\n준비·실행·판정\n정면 검사 준비에서는 두께가 얇은 벽과 50m/s로 움직이는 차체를 만들고 0.1초 적분합니다. 판정은 이동을 단순 잘라서 숨기지 않고 최소 50개의 세부 스텝을 사용했는지, 해당 벽 접촉 한 개를 보고했는지, 차체 앞부분이 벽의 가까운 쪽에 남는지, 반발이 없는 법선 방향의 접근 속도를 없앴는지입니다. 비스듬한 접촉에서는 법선 관통을 막으면서 마찰 0 조건의 접선 속도는 보존해야 합니다. 중심 접촉과 중심에서 벗어난 접촉도 나눠 회전 토크를 검사합니다. 최적화 준비는 멀리 있는 정적 장애물 120개와 동적 proxy 120개에 가까운 벽·NPC를 더하는 것입니다. UniformGrid와 BruteForceReference에 같은 차체·입력·시간을 넣어 위치, 방향, 속도, 접촉 순서·지점·충격량 등 선택된 결과가 정확히 같은지 봅니다. 동시에 격자의 narrow-phase 후보 수가 기준의 10분의 1 미만이고 질의 횟수는 같은지 확인합니다.\n\n사용 시점과 효과\n이 방식은 빠른 후보 검색이 실제 충돌을 빠뜨리는 회귀를 검출합니다.\n\n한계\n다만 후보 수 비율은 해당 fixture에서의 연산량 지표이며 전체 서버나 게임의 속도 향상 배수가 아닙니다. 양쪽에 공통인 solver 오류나 테스트에 없는 형상까지 증명하지 않으므로 독립적인 비관통·운동량·형상 사례와 실제 장면 측정이 함께 필요합니다."
+  },
+  {
+    "id": "C07",
+    "section": "C++ 서버 자동 검사",
+    "title": "NPC 통과 공간과 탐색 예산",
+    "question": "NPC가 사고차를 피하면서 입력 처리를 오래 막지 않는지 어떻게 검사하나요?",
+    "imageKey": "server_tick",
+    "why": "우회 경로의 물리적 통과 가능성과 여러 NPC의 계산 기회를 함께 보장하도록 검사합니다.",
+    "reading": ["위쪽 긴 탐색은 다른 입력 처리와 상태 발행을 늦출 수 있습니다.", "아래쪽은 후보를 여러 틱에 나누고 NPC마다 차례를 줍니다."],
+    "answer": "NPC 검사는 경로선뿐 아니라 차체가 차지할 공간과 지면 지지를 확인합니다. 별도 예산 검사는 세 대 앞을 막아 실패 후보를 반복하게 하고, 전체 차량이 틱당 비싼 검색 한 단계만 수행하는지 봅니다. 순환 순서와 재시도, 새 Play 초기화도 검사합니다. 시간 출력과 합격 기준인 작업량 한도는 구분합니다.",
+    "followup": "실패한 우회 후보만으로 검사를 구성하는 이유는 무엇인가요?",
+    "codeRef": null,
+    "sources": [
+      {"path": "cpp/host/tests/npc_local_bypass_test.cpp", "start": 38, "end": 110, "symbol": "Body corridor, support, truck geometry and signal tests"},
+      {"path": "cpp/host/tests/npc_search_budget_test.cpp", "start": 36, "end": 80, "symbol": "blocked_fleet_config"},
+      {"path": "cpp/host/tests/npc_search_budget_test.cpp", "start": 137, "end": 218, "symbol": "Harness::tick / exercise_searches"},
+      {"path": "cpp/host/tests/npc_search_budget_test.cpp", "start": 222, "end": 238, "symbol": "main: reset and full-search runs"}
+    ],
+    "notes": "기술과 개념\n기술은 차체 통과 공간의 기하 검사와 host의 틱별 탐색 작업량 검사입니다.\n\n준비·실행·판정\n통과 공간 검사는 도로 지면·장애물 OBB·차량 크기로 우회 계획을 만들고 0.1m 간격의 샘플마다 차체가 장애물과 겹치지 않는지 확인합니다. 경로 연속성, 원래 차로 복귀, 진입·복귀 방향지시등도 판정합니다. 지지면 구멍이나 부족한 도로 폭, 분류되지 않은 평면은 유효한 우회 공간으로 취급하지 않아야 합니다. 트럭은 자기 길이·폭·최소 회전 반경을 사용하고 우회 중에도 원래 경로의 적색 신호와 확대된 앞쪽 여유를 지켜야 합니다. 탐색 예산 검사의 준비는 폭이 좁은 도로에 자율 NPC 세 대와 길을 막는 고장 차량을 놓는 것입니다. 모두 성공 경로를 찾기 어려워 반복 실패 후보를 충분히 평가하게 만듭니다. 호스트를 한 틱씩 실행하며 새 제어를 보내고 실제 기본 250ms·1000ms·100ms 제한에서 Health가 active인지 확인합니다. 전체 fleet의 search_steps 증가량은 틱당 1 이하여야 하고 첫 연속 탐색 구간의 순서는 1001·1002·1003 순환이어야 합니다. 후진 후보는 0.5m씩 증가하고 긴 검사에서는 각자 16m·32개 후보를 소진한 뒤 재시도해야 합니다. 새 Play는 후보와 순환 순서도 초기화합니다.\n\n사용 시점과 효과\n장점은 한 NPC의 비싼 실패 탐색이 다른 NPC나 제어 입력을 굶기는 회귀를 잡는 것입니다.\n\n한계\n최대 tick ms는 타이머 대기를 포함한 참고 출력이며 합격 기준은 작업량입니다. 이것으로 항상 60Hz나 모든 교통 상황의 우회 성공을 주장할 수 없습니다."
+  },
+  {
+    "id": "C08",
+    "section": "C++ 서버 자동 검사",
+    "title": "상태 재생과 물리 재검산",
+    "question": "저장된 경로를 다시 보여 주는 것과 물리 replay 검증은 무엇이 다른가요?",
+    "imageKey": "v2_L13",
+    "why": "입력과 환경을 고정해 계산 결과를 대조하고 불완전한 기록을 검증 성공으로 오인하지 않습니다.",
+    "reading": ["위 ghost는 저장된 상태로 과거 경로를 보여 줍니다.", "아래 검증은 입력과 외부 proxy로 ego 물리를 다시 풀어 결과를 비교합니다."],
+    "answer": "ghost는 저장된 상태를 표시하지만 물리 replay는 적용 입력과 외부 충돌 자료로 다시 계산합니다. host 테스트는 80틱을 기록하고 위치·방향 오차 0과 reset·이벤트 수를 검사합니다. 빌드·지도 정체성 변경과 손상 파일은 거부해야 합니다. 같은 조건의 재현성 검사이며 모든 NPC 판단을 재현하지는 않습니다.",
+    "followup": "손상 기록의 checksum을 다시 계산한 뒤에도 거부 검사를 하는 이유는 무엇인가요?",
+    "codeRef": {
+      "path": "cpp/host/tests/physics_replay_test.cpp",
+      "start": 143,
+      "end": 145,
+      "explain": "프레임·이벤트 수와 위치·방향 오차를 함께 봅니다."
+    },
+    "sources": [
+      {"path": "cpp/host/tests/physics_replay_test.cpp", "start": 28, "end": 34, "symbol": "Scratch"},
+      {"path": "cpp/host/tests/physics_replay_test.cpp", "start": 101, "end": 157, "symbol": "test_actual_host_and_strict_reader"},
+      {"path": "cpp/host/tests/physics_replay_test.cpp", "start": 171, "end": 225, "symbol": "Resigned corruption negative cases"},
+      {"path": "cpp/host/tests/physics_replay_test.cpp", "start": 227, "end": 261, "symbol": "test_recording_guards_and_cli"},
+      {"path": "cpp/host/tests/physics_replay_test.cpp", "start": 263, "end": 289, "symbol": "test_contact_policy_round_trip"}
+    ],
+    "notes": "기술과 개념\n기술은 실제 SimulationHost를 프로세스 안에서 구동하는 기록·재검산 검사와 엄격한 파일 거부 검사입니다.\n\n준비·실행·판정\n준비는 임시 디렉터리, 빌드·차량·지도·물리 주기 식별 정보, 움직이는 NPC와 보행자 proxy, 80틱 상한의 recorder입니다. host에 직접 reset과 제어 Envelope를 넣고 io_context의 run_one으로 틱을 진행합니다. 40틱에서 차종을 트럭으로 바꾸는 reset을 넣고 75틱에서는 E-stop을 발생시킵니다. 실제 소켓을 열어 Unreal과 통신하는 시험은 아닙니다. 판정은 기록 완료, 80프레임·reset 2회·이벤트 3개·동적 proxy 80프레임과 위치·yaw 최대 오차 0입니다. 부정 검사는 다른 실행 파일·차량·지도 checksum, 물리 주기와 출발 조건을 넣어 거부하는지 봅니다. footer 없음, 뒤에 붙인 쓰레기, 알 수 없는 버전·이벤트·차종, 잘못된 틱 순서, NaN·inf, 잘못된 접촉 정책도 검사합니다. 일부 손상 기록은 checksum을 다시 계산해 넣습니다. 그래야 단순 checksum 불일치 때문에 실패한 것을 구조·의미 검사가 동작한 증거로 착각하지 않습니다. 파일 크기 상한, 부분 프레임 미완료, 지도 변경에 따른 기록 무효화도 확인합니다.\n\n사용 시점과 효과\n장점은 바뀐 계산이 같은 적용 입력에서 같은 결과를 내는지와 검증 자료의 완전성을 함께 확인하는 것입니다.\n\n한계\n내부 80틱 fixture와 별도 실행 로그의 480프레임 실적은 다른 증거입니다. 이 검사는 기록된 외부 proxy를 사용해 ego 물리를 재검산하며 전체 NPC 의사결정, 화면·오디오, 모든 플랫폼의 실차 정확도를 보장하지 않습니다."
+  }
+]

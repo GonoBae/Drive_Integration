@@ -115,6 +115,7 @@ public:
             return ControlLeaseDecision::StaleSequence;
         }
 
+        auto queue_age = std::chrono::nanoseconds::zero();
         if (previous_receive_time != Clock::time_point::min()) {
             if (command.client_time_ns < previous_client_time_ns) {
                 return ControlLeaseDecision::ClientClockRegression;
@@ -123,11 +124,15 @@ public:
             const auto server_elapsed = received_at - previous_receive_time;
             const auto client_elapsed = std::chrono::nanoseconds(
                 command.client_time_ns - previous_client_time_ns);
-            const auto estimated_queue_age = server_elapsed > client_elapsed
-                ? std::chrono::duration_cast<std::chrono::nanoseconds>(
-                      server_elapsed - client_elapsed)
-                : std::chrono::nanoseconds::zero();
-            if (estimated_queue_age > max_queue_age_) {
+            // Keep delay relative to the freshest timing observed in this
+            // session. Resetting the estimate at every accepted packet lets
+            // a slowly growing FIFO backlog refresh the lease indefinitely.
+            const auto accumulated_age = estimated_queue_age_
+                + std::chrono::duration_cast<std::chrono::nanoseconds>(server_elapsed)
+                - client_elapsed;
+            queue_age = accumulated_age > std::chrono::nanoseconds::zero()
+                ? accumulated_age : std::chrono::nanoseconds::zero();
+            if (queue_age > max_queue_age_) {
                 return ControlLeaseDecision::ExcessiveQueueAge;
             }
         }
@@ -145,6 +150,7 @@ public:
         highest_sequence_ = command.sequence;
         last_client_time_ns_ = command.client_time_ns;
         last_receive_time_ = received_at;
+        estimated_queue_age_ = queue_age;
         safe_stop_active_ = false;
         return ControlLeaseDecision::Accepted;
     }
@@ -206,6 +212,7 @@ public:
         highest_sequence_ = 0;
         last_client_time_ns_ = 0;
         last_receive_time_ = Clock::time_point::min();
+        estimated_queue_age_ = std::chrono::nanoseconds::zero();
         safe_stop_active_ = true;
         reset_session_key_ = key;
         return ControlLeaseResetDecision::Ready;
@@ -226,6 +233,7 @@ public:
         highest_sequence_ = 0;
         last_client_time_ns_ = 0;
         last_receive_time_ = Clock::time_point::min();
+        estimated_queue_age_ = std::chrono::nanoseconds::zero();
         safe_stop_active_ = true;
     }
 
@@ -255,6 +263,7 @@ public:
         highest_sequence_ = 0;
         last_client_time_ns_ = 0;
         last_receive_time_ = Clock::time_point::min();
+        estimated_queue_age_ = std::chrono::nanoseconds::zero();
         safe_stop_active_ = true;
         reset_session_key_ = key;
         return ControlLeaseResetDecision::Ready;
@@ -305,5 +314,6 @@ private:
     std::uint64_t highest_sequence_ = 0;
     std::uint64_t last_client_time_ns_ = 0;
     Clock::time_point last_receive_time_ = Clock::time_point::min();
+    std::chrono::nanoseconds estimated_queue_age_{};
     bool safe_stop_active_ = true;
 };

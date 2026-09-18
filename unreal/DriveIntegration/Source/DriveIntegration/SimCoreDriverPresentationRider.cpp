@@ -56,6 +56,9 @@ void USimCoreDriverPresentation::UpdateRiderState(const SimCoreProtocol::FVehicl
 		RiderMapChecksum = State.MapPackageChecksum;
 		bRiderStateInitialized = true;
 	}
+	// Consume a receive-gap pause without integrating the missing interval.
+	// Keep the lifecycle check above intact, including a simulation-time rewind.
+	if (bPresentationFrozen) RiderSimulationTimeNs = State.SimulationTimeNs;
 	const double Elapsed = (State.SimulationTimeNs - RiderSimulationTimeNs) * 1.e-9;
 	const bool bSimulationActive = !State.ServerHealth.bPresent
 		|| State.ServerHealth.Status == SimCoreProtocol::EServerHealthStatus::Active;

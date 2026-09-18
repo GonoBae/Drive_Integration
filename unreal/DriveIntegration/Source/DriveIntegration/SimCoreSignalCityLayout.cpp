@@ -240,7 +240,7 @@ namespace
 
 	void AddCollectorLaneMerges(FLayout& Layout, const FString& Prefix,
 		const TArray<FVector>& Points, const TArray<double>& Stations,
-		const TArray<FVector>& UnitRightPoints)
+		const TArray<FVector>& UnitRightPoints, bool bDashed)
 	{
 		for (bool bSouth : {true, false})
 		{
@@ -276,12 +276,37 @@ namespace
 						Paint.Add(Points[Vertex] + TravelRight * Side * FMath::Lerp(EntryOffset, EdgeOffset, Blend));
 						if (Vertex == Last) break;
 					}
+					double PaintStation = 0.0;
+					int32 Piece = 0;
 					for (int32 Index = 1; Index < Paint.Num(); ++Index)
 					{
-						AddLanePaint(Layout, Id + FString::Printf(TEXT("_%02d"), Index - 1),
-							(Paint[Index - 1] + Paint[Index]) * 0.5,
-							FVector::Dist2D(Paint[Index - 1], Paint[Index]) + 0.08,
-							0.14, HeadingFor(Paint[Index - 1], Paint[Index]), EPalette::Marking, true);
+						const FVector A = Paint[Index - 1], B = Paint[Index];
+						const double Length = FVector::Dist2D(A, B);
+						if (!bDashed)
+						{
+							AddLanePaint(Layout, Id + FString::Printf(TEXT("_%02d"), Index - 1),
+								(A+B)*0.5, Length+0.08, 0.14, HeadingFor(A,B), EPalette::Marking, true);
+							continue;
+						}
+						// Clip a continuous guide by arc length: two metres painted,
+						// two metres open, independently of how the curve is tessellated.
+						for (double Local = 0.0; Local < Length - 1.e-8; )
+						{
+							const double Station=PaintStation+Local;
+							const int32 Band=FMath::FloorToInt((Station+1.e-9)/2.0);
+							const bool bPaint = Band%2==0;
+							const double Span = FMath::Min(Length-Local, (Band+1)*2.0-Station);
+							if (Span < 1.e-8) break;
+							if (bPaint)
+							{
+								const FVector Start = FMath::Lerp(A, B, Local/Length);
+								const FVector End = FMath::Lerp(A, B, (Local+Span)/Length);
+								AddLanePaint(Layout, Id + FString::Printf(TEXT("_Dash_%03d"), Piece++),
+									(Start+End)*0.5, Span+0.01, 0.14, HeadingFor(A,B), EPalette::Marking, true);
+							}
+							Local += Span;
+						}
+						PaintStation += Length;
 					}
 				}
 			}
@@ -289,7 +314,7 @@ namespace
 	}
 
 	void AddSharedCollector(FLayout& Layout, const FString& Prefix,
-		const TArray<FVector>& Points, bool bSealJoints, bool bLaneMerges)
+		const TArray<FVector>& Points, bool bSealJoints, bool bLaneMerges, bool bDashedMerges)
 	{
 		const TArray<double> Stations = BuildArcStations(Points);
 		const TArray<FVector> UnitRightPoints = OffsetCollectorCenterline(Points, 1.0);
@@ -352,7 +377,7 @@ namespace
 					EPalette::Sidewalk, true);
 			}
 		}
-		if (bLaneMerges) { AddCollectorLaneMerges(Layout, Prefix, Points, Stations, UnitRightPoints); }
+		if (bLaneMerges) { AddCollectorLaneMerges(Layout, Prefix, Points, Stations, UnitRightPoints, bDashedMerges); }
 	}
 
 	void AddRaisedCollectorTransitionMarkings(FLayout& Layout, const FString& Id,
@@ -526,6 +551,118 @@ namespace
 		}
 	}
 
+	void AddAdvanceMergeArrows(FLayout& Layout, const FString& Prefix,
+		const TArray<FVector>& Points)
+	{
+		for (bool bSouth : {true, false})
+		{
+			const FVector Junction = bSouth ? Points[0] : Points.Last();
+			const FVector Incoming(Points[0].X > 0 ? 1.0 : -1.0, 0, 0);
+			const FVector Right(Incoming.Y, -Incoming.X, 0);
+			// On the inbound half only: the opposite half expands out of the bend.
+			// Each disappearing lane is warned before the first taper vertex.
+			for (int32 Lane : {1, 2})
+			{
+				const double Offset = Lane == 1 ? 5.0 : 8.3;
+				const FVector Center = Junction-Incoming*(Lane == 2 ? 16.0 : 10.0)+Right*Offset;
+				const FString Id = Prefix+(bSouth ? TEXT("_South") : TEXT("_North"))
+					+FString::Printf(TEXT("_AdvanceMerge_%d"), Lane);
+				AddLanePaint(Layout, Id+TEXT("_Stem"), Center-Incoming*0.7,
+					2.0, 0.20, HeadingFor(FVector::ZeroVector, Incoming), EPalette::Marking, true);
+				const FVector Tip = Center+Incoming*1.8-Right*0.85;
+				const FVector Bend = Center+Incoming*0.25;
+				AddLanePaint(Layout, Id+TEXT("_Bend"), (Bend+Tip)*0.5,
+					FVector::Dist2D(Bend,Tip), 0.20, HeadingFor(Bend,Tip), EPalette::Marking, true);
+				const FVector Direction=(Tip-Bend).GetSafeNormal2D();
+				const FVector Across(Direction.Y,-Direction.X,0);
+				for (int32 Side : {-1,1})
+				{
+					const FVector Tail=Tip-Direction*0.85+Across*(0.45*Side);
+					AddLanePaint(Layout, Id+FString::Printf(TEXT("_Head_%d"),Side),
+						(Tip+Tail)*0.5, FVector::Dist2D(Tip,Tail),0.20,
+						HeadingFor(Tail,Tip),EPalette::Marking,true);
+				}
+			}
+		}
+	}
+
+	void AddNorthDistrict(FLayout& Layout)
+	{
+		AddStreetSegment(Layout,TEXT("NorthAvenue"),FVector(0,168,0),FVector(0,230,0),
+			20.0,0.18,0,0,true,true);
+		// The avenue widens tangentially into the return loop. A circle cut into
+		// a straight sidewalk would overlap the first kerbs and erase their rise.
+		TArray<FVector> Boundary=Cubic(FVector(10,230,0),FVector(10,248,0),
+			FVector(26,254,0),FVector(26,272,0),44);
+		for(int32 Index=1;Index<=80;++Index)
+		{
+			const double Angle=UE_DOUBLE_PI*Index/80.0;
+			Boundary.Add(FVector(26*FMath::Cos(Angle),272+26*FMath::Sin(Angle),0));
+		}
+		Boundary.Last()=FVector(-26,272,0);
+		const auto Return=Cubic(FVector(-26,272,0),FVector(-26,254,0),
+			FVector(-10,248,0),FVector(-10,230,0),44);
+		for(int32 Index=1;Index<Return.Num();++Index) Boundary.Add(Return[Index]);
+		const auto WidthAt=[&](double North)
+		{
+			for(int32 Index=1;Index<Boundary.Num();++Index)
+			{
+				const FVector A=Boundary[Index-1],B=Boundary[Index];
+				if(B.X<0) break;
+				if(North<=B.Y) return FMath::Lerp(A.X,B.X,FMath::Clamp((North-A.Y)/(B.Y-A.Y),0.0,1.0));
+			}
+			return 0.0;
+		};
+		for(int32 North=230;North<298;++North)
+		{
+			const double HalfWidth=FMath::Min(WidthAt(North),WidthAt(North+1));
+			if(HalfWidth<0.1) continue;
+			AddTopSlab(Layout,FString::Printf(TEXT("NorthLoop_Plaza_%02d_Road"),North-230),
+				FVector(0,North+0.5,0),1.06,HalfWidth*2.0,RoadThicknessM,0,EPalette::Road,true);
+		}
+		const auto Offset=[&](int32 Index,double Distance)
+		{
+			FVector Forward=(Boundary[FMath::Min(Index+1,Boundary.Num()-1)]-Boundary[FMath::Max(0,Index-1)]).GetSafeNormal2D();
+			if(Index==0) Forward=FVector(0,1,0);
+			if(Index==Boundary.Num()-1) Forward=FVector(0,-1,0);
+			return Boundary[Index]+FVector(Forward.Y,-Forward.X,0)*Distance;
+		};
+		for(int32 Index=1;Index<Boundary.Num();++Index)
+		{
+			const FString Id=FString::Printf(TEXT("NorthLoop_%03d"),Index-1);
+			const FVector C=Offset(Index-1,0.15),D=Offset(Index,0.15);
+			AddRoad(Layout,Id+TEXT("_Rim_Road"),Offset(Index-1,-3),Offset(Index,-3),6.2,0.50);
+			AddBox(Layout,Id+TEXT("_Curb"),(C+D)*0.5+FVector(0,0,0.12),
+				FVector(FVector::Dist2D(C,D)+0.12,0.30,0.24),HeadingFor(C,D),EPalette::Curb,true,true);
+			const FVector W=Offset(Index-1,1.5),V=Offset(Index,1.5);
+			AddTopSlab(Layout,Id+TEXT("_Sidewalk"),(W+V)*0.5+FVector(0,0,0.24),
+				FVector::Dist2D(W,V)+0.12,2.4,0.22,HeadingFor(W,V),EPalette::Sidewalk,true);
+			const FVector E=Offset(Index-1,-0.35),F=Offset(Index,-0.35);
+			AddLanePaint(Layout,Id+TEXT("_EdgeLine"),(E+F)*0.5,FVector::Dist2D(E,F)+0.04,
+				0.14,HeadingFor(E,F),EPalette::Marking,true);
+		}
+		AddDirectionArrow(Layout,TEXT("NorthAvenue_NB_Arrow"),FVector(5,215,0),0,true);
+		AddDirectionArrow(Layout,TEXT("NorthAvenue_SB_Arrow"),FVector(-5,215,0),180,true);
+		AddDirectionArrow(Layout,TEXT("NorthLoop_Entry_Arrow"),FVector(19.2,272,0),0,true);
+		AddDirectionArrow(Layout,TEXT("NorthLoop_Return_Arrow"),FVector(-19.2,272,0),180,true);
+		for(int32 Side : {-1,1})
+		{
+			const double Heading=Side>0?0.0:180.0;
+			const FVector Center(Side*14.5,Side>0?206:238,4.5);
+			const FString Id=Side>0?TEXT("NorthGuide_Outbound"):TEXT("NorthGuide_Return");
+			AddBox(Layout,Id+TEXT("_Board"),Center,FVector(0.16,5.4,1.6),Heading,EPalette::SignBlue);
+			AddBox(Layout,Id+TEXT("_Post"),Center-FVector(0,0,2.25),FVector(0.16,0.16,4.5),Heading,EPalette::Curb);
+			const FVector Face=Center-ForwardEnu(Heading)*0.1;
+			AddBox(Layout,Id+TEXT("_ArrowStem"),Face,FVector(0.02,0.08,0.8),Heading,EPalette::Marking);
+			for(int32 Wing : {-1,1}) for(int32 Step=1;Step<=3;++Step)
+			{
+				AddBox(Layout,Id+FString::Printf(TEXT("_ArrowWing_%d_%d"),Wing,Step),
+					Face+RightEnu(Heading)*Wing*(Step*0.08)+FVector(0,0,0.48-Step*0.08),
+					FVector(0.02,0.12,0.12),Heading,EPalette::Marking);
+			}
+		}
+	}
+
 	void AddBuilding(FLayout& Layout, int32 Index, const FVector2D& Position,
 		double Height, double Heading = 0.0)
 	{
@@ -659,6 +796,26 @@ TArray<FVector> BuildCollectorCenterline(bool bEast)
 	return BuildCollectorCenterlineInternal(bEast, true);
 }
 
+TArray<FVector> BuildNorthLoopLane()
+{
+	TArray<FVector> Points;
+	for(int32 North=168;North<=244;++North) Points.Add(FVector(2,North,0));
+	const TArray<FVector> Entry=Cubic(FVector(2,244,0),FVector(2,257,0),
+		FVector(20,259,0),FVector(20,272,0),44);
+	for(int32 Index=1;Index<Entry.Num();++Index) Points.Add(Entry[Index]);
+	for(int32 Index=1;Index<=80;++Index)
+	{
+		const double Angle=UE_DOUBLE_PI*Index/80.0;
+		Points.Add(FVector(20*FMath::Cos(Angle),272+20*FMath::Sin(Angle),0));
+	}
+	Points.Last()=FVector(-20,272,0);
+	const TArray<FVector> Exit=Cubic(FVector(-20,272,0),FVector(-20,259,0),
+		FVector(-2,257,0),FVector(-2,244,0),44);
+	for(int32 Index=1;Index<Exit.Num();++Index) Points.Add(Exit[Index]);
+	for(int32 North=243;North>=168;--North) Points.Add(FVector(-2,North,0));
+	return Points;
+}
+
 TArray<FVector> OffsetCollectorCenterline(const TArray<FVector>& Centerline, double OffsetM)
 {
 	TArray<FVector> Points;
@@ -680,16 +837,16 @@ static SimCoreVirtualCity::FLayout BuildLayoutInternal(
 	bool bNaturalLaneMarkings = false, bool bDistantBackdrop = false,
 	bool bAlignCollectorTransitionSides = false, bool bSharedCollectors = false,
 	bool bSealCollectorJoints = true, bool bMinimumCollectorRadius = true,
-	bool bCollectorLaneMerges = false)
+	bool bCollectorLaneMerges = false, bool bKoreanNorthDistrict = false)
 {
 	FLayout Layout;
 	const double ApproachRoadWidthM = bThreeLane ? 20.0 : 10.0;
-	Layout.GroundCenterEnuM = FVector(0.0, 80.0, 0.0);
-	Layout.GroundHalfExtentNorthEastM = FVector2D(100.0, 120.0);
+	Layout.GroundCenterEnuM = FVector(0.0, bKoreanNorthDistrict?145.0:80.0, 0.0);
+	Layout.GroundHalfExtentNorthEastM = FVector2D(bKoreanNorthDistrict?165.0:100.0, 120.0);
 	Layout.Boxes.Reserve(360);
 	Layout.DriveRoute.Reserve(420);
-	AddBox(Layout, TEXT("Ground_Base"), FVector(0.0, 80.0, -0.58),
-		FVector(200.0, 240.0, 1.0), 0.0, EPalette::Ground, true);
+	AddBox(Layout, TEXT("Ground_Base"), Layout.GroundCenterEnuM+FVector(0,0,-0.58),
+		FVector(bKoreanNorthDistrict?330.0:200.0, 240.0, 1.0), 0.0, EPalette::Ground, true);
 
 	const FVector MainIntersection(0.0, 40.0, 0.0);
 	const FVector AuxiliaryIntersection(0.0, 120.0, 0.0);
@@ -762,8 +919,14 @@ static SimCoreVirtualCity::FLayout BuildLayoutInternal(
 	const double CollectorWidthM = bNaturalLaneMarkings ? StreetWidthM : 14.0;
 	if (bSharedCollectors)
 	{
-		AddSharedCollector(Layout, TEXT("CollectorWestCurve"), WestCurve, bSealCollectorJoints, bCollectorLaneMerges);
-		AddSharedCollector(Layout, TEXT("CollectorEastCurve"), EastCurve, bSealCollectorJoints, bCollectorLaneMerges);
+		AddSharedCollector(Layout, TEXT("CollectorWestCurve"), WestCurve, bSealCollectorJoints, bCollectorLaneMerges,bKoreanNorthDistrict);
+		AddSharedCollector(Layout, TEXT("CollectorEastCurve"), EastCurve, bSealCollectorJoints, bCollectorLaneMerges,bKoreanNorthDistrict);
+		if(bKoreanNorthDistrict)
+		{
+			AddAdvanceMergeArrows(Layout,TEXT("CollectorWestCurve"),WestCurve);
+			AddAdvanceMergeArrows(Layout,TEXT("CollectorEastCurve"),EastCurve);
+			AddNorthDistrict(Layout);
+		}
 	}
 	else
 	{
@@ -849,7 +1012,13 @@ static SimCoreVirtualCity::FLayout BuildLayoutInternal(
 	// and closes on the west side of the main avenue.
 	AddRoutePolyline(Layout, {FVector(-80.0, 40.0, 0.0), EastCurve[0]});
 	AddRoutePolyline(Layout, EastCurve);
-	AddRoutePolyline(Layout, {EastCurve.Last(), WestCurve.Last()});
+	if(bKoreanNorthDistrict)
+	{
+		AddRoutePolyline(Layout,{EastCurve.Last(),FVector(0,120,0),FVector(0,160,0),FVector(2,168,0)});
+		AddRoutePolyline(Layout,BuildNorthLoopLane());
+		AddRoutePolyline(Layout,{FVector(-2,168,0),FVector(0,160,0),FVector(0,120,0),WestCurve.Last()});
+	}
+	else { AddRoutePolyline(Layout, {EastCurve.Last(), WestCurve.Last()}); }
 	TArray<FVector> ReverseWest = WestCurve;
 	Algo::Reverse(ReverseWest);
 	AddRoutePolyline(Layout, ReverseWest);
@@ -857,6 +1026,10 @@ static SimCoreVirtualCity::FLayout BuildLayoutInternal(
 	return Layout;
 }
 SimCoreVirtualCity::FLayout BuildLayout()
+{
+	return BuildLayoutInternal(true, true, true, true, true, true, true, true, true, true,true);
+}
+SimCoreVirtualCity::FLayout BuildSolidCollectorMergesV7Layout()
 {
 	return BuildLayoutInternal(true, true, true, true, true, true, true, true, true, true);
 }

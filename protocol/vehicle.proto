@@ -147,6 +147,8 @@ message EntityState {
     // that no horn event has occurred in the current Play lifecycle.
     uint32 horn_event_sequence = 38;
     RuntimeVehicleClass runtime_vehicle_class = 39;
+    // NPC-only temporary measured-road detour; false retains authored-lane motion.
+    bool npc_local_bypass_active = 40;
 }
 
 // 여러 엔티티를 한 패킷에 담을 때 사용
@@ -184,6 +186,11 @@ message TrafficSignalState {
     TrafficSignalKind signal_kind = 8;
     // Broken heads are dark in presentation, but retain authoritative RED.
     bool out_of_service = 9;
+    // Optional protected-left movement on the same Korean four-lamp head.
+    // Legacy heads omit all three fields. A broken head disables both movements.
+    uint32 left_group_id = 10;
+    TrafficSignalAspect left_aspect = 11;
+    float left_remaining_seconds = 12;
 }
 
 enum StructureKind {

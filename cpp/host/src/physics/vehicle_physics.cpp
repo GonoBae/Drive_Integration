@@ -19,6 +19,10 @@ constexpr double DEG2RAD = std::numbers::pi_v<double> / 180.0;
 constexpr double RAD2DEG = 180.0 / std::numbers::pi_v<double>;
 constexpr float GRAVITY_MPS2 = 9.80665f;
 constexpr float MIN_CONTACT_NORMAL_LOAD_N = 0.001f;
+// Brake-differential assistance is a low-speed escape aid, not active yaw
+// control. Fade it out before road-speed cornering or a handbrake drift.
+constexpr float BRAKE_DIFFERENTIAL_FULL_ASSIST_MPS = 1.5f;
+constexpr float BRAKE_DIFFERENTIAL_END_ASSIST_MPS = 3.0f;
 // Shared by the velocity constraint and the next-step tire support estimate.
 // A ground ray alone is not evidence of a loaded compression stop.
 constexpr double HARD_STOP_ACTIVATION_SLOP_M = 1e-4;
@@ -41,7 +45,6 @@ constexpr double GROUND_QUERY_DEPTH_M = 20.0;
 // not near-vertical walls. Bound a discontinuous four-wheel support fit before
 // it can rotate the chassis basis into a singular ground-query pose.
 constexpr double MAX_WHEEL_SUPPORT_ATTITUDE_RAD = 60.0 * DEG2RAD;
-constexpr double COLLISION_BODY_GROUND_CLEARANCE_M = 0.10;
 // Below roughly a 6 km/h rigid-body delta-v, contacts are treated as ordinary
 // parking/curb loads. Stronger impacts accumulate visible body damage.
 constexpr double DAMAGE_IMPULSE_THRESHOLD_N_S = 2500.0;
@@ -461,6 +464,27 @@ float effective_surface_friction_multiplier(
 
 } // namespace
 
+// Only the supported pose and suspension history are restored at a coverage
+// stop. Velocities, attempted contact feedback and drive force are cleared;
+// steering remains the request already applied during the current tick.
+struct VehiclePhysics::SupportedPoseSnapshot {
+    VehicleState state;
+    double east_m;
+    double north_m;
+    double heading_rad;
+    float pitch_rad;
+    float roll_rad;
+    float ground_pitch_rad;
+    float ground_roll_rad;
+    float support_pitch_rad;
+    float support_roll_rad;
+    bool support_attitude_valid;
+    bool rider_attached;
+    std::array<float, 4> suspension_compression;
+    std::array<float, 4> suspension_force;
+    std::array<bool, 4> suspension_contact;
+};
+
 VehiclePhysics::VehiclePhysics(double lat, double lon, double alt, float heading,
                                VehicleParameters parameters,
                                std::shared_ptr<const simcore_host::GroundQuery> ground_query,
@@ -531,6 +555,7 @@ void VehiclePhysics::reset()
     ground_friction_multiplier_by_wheel_.fill(1.f);
     last_resolved_dynamic_proxies_.clear();
     last_collision_contacts_.clear();
+    ground_coverage_limited_ = false;
     last_runtime_proxy_contacts_.clear();
 
     runtime_tire_supports_.clear();
@@ -687,6 +712,7 @@ VehicleState VehiclePhysics::update(
     refresh_runtime_tire_supports(dynamic_proxies);
     last_resolved_dynamic_proxies_.clear();
     last_collision_contacts_.clear();
+    ground_coverage_limited_ = false;
     last_runtime_proxy_contacts_.clear();
     std::vector<simcore_host::KinematicCollisionProxy>
         accepted_resolved_dynamic_proxies;
@@ -704,21 +730,7 @@ VehicleState VehiclePhysics::update(
     // semantics. Keep the last published supported pose for this step so a
     // missing MapPackage cell/boundary fails closed instead of letting the
     // server integrate an endless fall below the Unreal world.
-    const VehicleState step_start_state = state_;
-    const double step_start_east_m = east_m_;
-    const double step_start_north_m = north_m_;
-    const double step_start_heading_rad = heading_rad_;
-    const float step_start_pitch_rad = pitch_rad_;
-    const float step_start_roll_rad = roll_rad_;
-    const float step_start_ground_pitch_rad = ground_pitch_rad_;
-    const float step_start_ground_roll_rad = ground_roll_rad_;
-    const float step_start_support_pitch_rad = support_pitch_rad_;
-    const float step_start_support_roll_rad = support_roll_rad_;
-    const bool step_start_support_attitude_valid = support_attitude_valid_;
-    const bool step_start_rider_attached = motorcycle_rider_attached_;
-    const auto step_start_suspension_compression = suspension_compression_m_;
-    const auto step_start_suspension_force = suspension_base_force_n_;
-    const auto step_start_suspension_contact = suspension_had_contact_;
+    const auto step_start = capture_supported_pose();
 
     // Timestamp
     const double update_timestamp = current_unix_time_seconds();
@@ -760,78 +772,13 @@ VehicleState VehiclePhysics::update(
     // --- Four-wheel planar contact and tire forces ---
     const float previous_speed = body_longitudinal_speed_mps_;
     const float gear_sign = gear_direction(in.gear);
-    const float configured_drive_force = in.gear == VehicleGear::Reverse
-        ? parameters_.max_reverse_force_n
-        : parameters_.max_drive_force_n;
-    // A force-only driveline produces unbounded power as road speed rises.
-    // Preserve launch torque while capping high-speed power to the configured
-    // sedan output.
-    const float power_limited_drive_force = parameters_.max_drive_power_w
-        / std::max(std::abs(body_longitudinal_speed_mps_), 1.f);
-    const float available_drive_force = std::min(
-        configured_drive_force, power_limited_drive_force);
-    const bool forward_limiter_active = gear_sign > 0.f
-        && body_longitudinal_speed_mps_ >= parameters_.max_forward_speed_mps;
-    const bool reverse_limiter_active = gear_sign < 0.f
-        && body_longitudinal_speed_mps_ <= -parameters_.max_reverse_speed_mps;
-    // Clamping chassis speed without cutting drive torque lets wheel angular
-    // speed wind up forever at the limiter. Remove only the torque that would
-    // accelerate farther beyond the configured speed; tire reaction then
-    // brings wheel surface speed back toward road speed.
-    const bool drive_force_suppressed = forward_limiter_active
-        || reverse_limiter_active
-        || in.brake > 0.f;
-    const float desired_drive_force = drive_force_suppressed
-        ? 0.f
-        : gear_sign * in.throttle * available_drive_force;
-    // Model the finite response of a real powertrain. In particular, a digital
-    // keyboard press must not apply the full axle force as a one-frame impulse.
-    // A direction change first sheds the old-direction force before building
-    // torque in the new direction.
-    if (applied_drive_force_n_ * desired_drive_force < 0.f) {
-        const float force_step = parameters_.drive_force_fall_rate_n_per_s * fdt;
-        applied_drive_force_n_ -= std::copysign(
-            std::min(std::abs(applied_drive_force_n_), force_step),
-            applied_drive_force_n_);
-    } else {
-        const bool increasing_force =
-            std::abs(desired_drive_force) > std::abs(applied_drive_force_n_);
-        const float response_rate = increasing_force
-            ? parameters_.drive_force_rise_rate_n_per_s
-            : parameters_.drive_force_fall_rate_n_per_s;
-        const float force_step = response_rate * fdt;
-        applied_drive_force_n_ += std::clamp(
-            desired_drive_force - applied_drive_force_n_,
-            -force_step,
-            force_step);
-    }
-    const float total_drive_force = applied_drive_force_n_;
+    const auto drive_force = advance_drive_force(in, gear_sign, fdt);
+    const float total_drive_force = drive_force.force_n;
     const float service_brake_force = in.brake * parameters_.max_service_brake_n;
     const float total_brake_force = in.handbrake
         ? std::max(service_brake_force, parameters_.max_handbrake_force_n)
         : service_brake_force;
-    // The input requests a road-wheel angle, independent of vehicle speed.
-    // Move the rack at a finite rate, then apply Ackermann geometry below.
-    // Tire slip, normal loads and friction determine the resulting turn;
-    // no speed-sensitive input assist silently reduces the requested angle.
-    const float steering_target_rad =
-        simcore_host::BodyFrameAdapter::canonical_steering_to_solver(in.steering)
-        * parameters_.max_steering_angle_rad;
-    const bool steering_is_returning =
-        solver_road_wheel_angle_rad_ * steering_target_rad <= 0.f
-        || std::abs(steering_target_rad) < std::abs(solver_road_wheel_angle_rad_);
-    const float steering_rate_rad_s = steering_is_returning
-        ? parameters_.steering_return_rate_rad_s
-        : parameters_.steering_rate_rad_s;
-    const float maximum_steering_step_rad = steering_rate_rad_s * fdt;
-    solver_road_wheel_angle_rad_ += std::clamp(
-        steering_target_rad - solver_road_wheel_angle_rad_,
-        -maximum_steering_step_rad,
-        maximum_steering_step_rad);
-    const float solver_steering_angle = solver_road_wheel_angle_rad_;
-    state_.steering_angle =
-        simcore_host::BodyFrameAdapter::solver_steering_to_canonical(
-            solver_steering_angle);
+    const float solver_steering_angle = advance_steering(in, fdt);
     // The configured static axle split locates the CG between the axles. A
     // front-heavy sedan has a shorter CG-to-front arm and a longer rear arm.
     const float cg_to_rear_axle_m = parameters_.wheelbase_m
@@ -1029,11 +976,13 @@ VehicleState VehiclePhysics::update(
                         * tire_force_y_by_wheel[index]));
     }
 
-    // Model equal half-shaft torque with traction control. If either wheel on a
-    // driven axle loses contact, torque is cut for that axle instead of winding
-    // the airborne wheel up. With both wheels grounded, requested torque is
-    // limited by the weaker wheel's remaining friction reserve.
+    // Equal half-shaft torque with brake-based traction control. The brake on
+    // an unloaded wheel supplies differential reaction torque, so a loaded
+    // partner can still drive a car straddling a curb. Brake capacity and each
+    // tire's friction circle bound that transfer; no extra ground force is
+    // assigned to the unloaded wheel.
     std::array<float, 2> axle_drive_torque_per_wheel{};
+    std::array<float, 4> traction_control_brake_torque{};
     for (std::size_t axle = 0; axle < axle_drive_torque_per_wheel.size(); ++axle) {
         const float axle_drive_fraction = axle == 0
             ? parameters_.front_drive_torque_fraction
@@ -1041,10 +990,10 @@ VehicleState VehiclePhysics::update(
         const std::size_t left_index = axle * 2;
         const std::size_t right_index = left_index + 1;
         if (axle_drive_fraction <= 0.f
-            || drive_force_suppressed
+            || drive_force.suppressed
             || gear_sign * total_drive_force <= STOP_EPSILON
-            || !state_.wheels[left_index].in_contact
-            || !state_.wheels[right_index].in_contact) {
+            || (!state_.wheels[left_index].in_contact
+                && !state_.wheels[right_index].in_contact)) {
             continue;
         }
 
@@ -1066,14 +1015,39 @@ VehicleState VehiclePhysics::update(
         const float requested_torque_per_wheel = total_drive_force
             * axle_drive_fraction * parameters_.tire_radius_m * 0.5f
             * traction_control_scale;
-        const float torque_capacity_per_wheel = std::min(
-            longitudinal_force_reserve[left_index],
-            longitudinal_force_reserve[right_index])
+        const float left_torque_capacity = longitudinal_force_reserve[left_index]
             * parameters_.tire_radius_m;
+        const float right_torque_capacity = longitudinal_force_reserve[right_index]
+            * parameters_.tire_radius_m;
+        const float brake_axle_fraction = axle == 0
+            ? parameters_.front_service_brake_fraction
+            : 1.f - parameters_.front_service_brake_fraction;
+        // During a direction change the brake must not help spin a wheel in
+        // its current direction. Keep ordinary open-diff torque until both
+        // half-shafts are stationary or rotating with the requested drive.
+        const bool can_apply_traction_brake = !in.handbrake
+            && drive_direction * wheel_angular_speed_rad_s_[left_index] >= -STOP_EPSILON
+            && drive_direction * wheel_angular_speed_rad_s_[right_index] >= -STOP_EPSILON;
+        const float brake_assist_scale = !can_apply_traction_brake ? 0.f : std::clamp(
+            (BRAKE_DIFFERENTIAL_END_ASSIST_MPS - std::abs(previous_speed))
+                / (BRAKE_DIFFERENTIAL_END_ASSIST_MPS - BRAKE_DIFFERENTIAL_FULL_ASSIST_MPS),
+            0.f, 1.f);
+        const float traction_brake_capacity = parameters_.max_service_brake_n
+            * brake_axle_fraction * 0.5f * parameters_.tire_radius_m * brake_assist_scale;
+        const float torque_capacity_per_wheel = std::min(
+            std::max(left_torque_capacity, right_torque_capacity),
+            std::min(left_torque_capacity, right_torque_capacity)
+                + traction_brake_capacity);
         axle_drive_torque_per_wheel[axle] = std::clamp(
             requested_torque_per_wheel,
             -torque_capacity_per_wheel,
             torque_capacity_per_wheel);
+        for (const auto index : {left_index, right_index}) {
+            traction_control_brake_torque[index] = drive_direction * std::clamp(
+                std::abs(axle_drive_torque_per_wheel[axle])
+                    - longitudinal_force_reserve[index] * parameters_.tire_radius_m,
+                0.f, traction_brake_capacity);
+        }
     }
 
     for (std::size_t index = 0; index < state_.wheels.size(); ++index) {
@@ -1099,7 +1073,8 @@ VehicleState VehiclePhysics::update(
         const float brake_torque = wheel_brake_force
             * parameters_.tire_radius_m * brake_direction;
         const float previous_angular_speed = wheel_angular_speed_rad_s_[index];
-        const float applied_torque = drive_torque - brake_torque;
+        const float applied_torque = drive_torque - brake_torque
+            - traction_control_brake_torque[index];
 
         float tire_force_x = 0.f;
         float tire_force_y = tire_force_y_by_wheel[index];
@@ -1161,8 +1136,8 @@ VehicleState VehiclePhysics::update(
                 -1.f,
                 1.f);
         } else {
-            // Drive torque is already zero for a partially grounded axle. The
-            // remaining passive damping settles any previous free rotation.
+            // The traction brake absorbs unsupported half-shaft torque.
+            // Passive damping settles any previous free rotation.
             const float free_spin_damping_torque =
                 parameters_.wheel_free_spin_damping_n_m_s
                 * previous_angular_speed;
@@ -1409,6 +1384,13 @@ VehicleState VehiclePhysics::update(
         const double collision_half_width =
             std::max(parameters_.front_track_m, parameters_.rear_track_m) * 0.5
             + parameters_.collision_body_side_padding_m;
+        const double body_center_offset = parameters_.collision_body_center_forward_offset_m;
+        const double body_start_east = east_m_ + std::sin(heading_rad_) * body_center_offset;
+        const double body_start_north = north_m_ + std::cos(heading_rad_) * body_center_offset;
+        const double body_end_east = east_m_ + east_velocity * dt
+            + std::sin(predicted_heading_rad) * body_center_offset;
+        const double body_end_north = north_m_ + north_velocity * dt
+            + std::cos(predicted_heading_rad) * body_center_offset;
         std::vector<std::string> tire_supported_curb_ids;
         const auto support_height = [&](double east, double north)
             -> std::optional<double> {
@@ -1443,10 +1425,9 @@ VehicleState VehiclePhysics::update(
                     relative_east * forward[0] + relative_north * forward[1],
                     relative_east * right[0] + relative_north * right[1]};
             };
-            const auto start_local = local_coordinates(east_m_, north_m_);
+            const auto start_local = local_coordinates(body_start_east, body_start_north);
             const auto end_local = local_coordinates(
-                east_m_ + east_velocity * dt,
-                north_m_ + north_velocity * dt);
+                body_end_east, body_end_north);
             const auto body_projection = [&](double body_heading,
                                              const std::array<double, 2>& axis) {
                 const std::array<double, 2> body_forward{
@@ -1465,7 +1446,7 @@ VehicleState VehiclePhysics::update(
             // start and predicted end without turning the filter into speed-only
             // padding that could still miss a diagonal crossing.
             const double rotation_projection_padding = std::hypot(
-                collision_half_length, collision_half_width)
+                collision_half_length + std::abs(body_center_offset), collision_half_width)
                 * std::abs(static_cast<double>(solver_yaw_rate_rad_s_) * dt);
             const double swept_body_forward_extent =
                 std::max(
@@ -1595,7 +1576,7 @@ VehicleState VehiclePhysics::update(
                 / ground_basis.normal[2]
             : 0.0;
         const double start_body_bottom = body_ground_height
-            + COLLISION_BODY_GROUND_CLEARANCE_M;
+            + parameters_.collision_body_ground_clearance_m;
         const double predicted_body_bottom = start_body_bottom
             + surface_vertical_rate * dt;
         const double swept_body_bottom = std::min(
@@ -1606,7 +1587,7 @@ VehicleState VehiclePhysics::update(
         simcore_host::PlanarRigidBody collision_body{
             "ego",
             {
-                {east_m_, north_m_},
+                {body_start_east, body_start_north},
                 (swept_body_bottom + swept_body_top) * 0.5,
                 heading_rad_,
                 collision_half_length,
@@ -1617,6 +1598,7 @@ VehicleState VehiclePhysics::update(
             solver_yaw_rate_rad_s_,
             parameters_.mass_kg,
             parameters_.yaw_inertia_kg_m2,
+            -body_center_offset,
         };
         std::vector<std::string> tire_supported_proxy_ids;
         for (const auto& proxy : runtime_tire_supports_) tire_supported_proxy_ids.push_back(proxy.proxy_id);
@@ -1692,9 +1674,11 @@ VehicleState VehiclePhysics::update(
                     : VehicleDamageZone::Left;
             }
         }
-        east_m_ = collision_result.body.shape.center_enu.east_m;
-        north_m_ = collision_result.body.shape.center_enu.north_m;
         heading_rad_ = collision_result.body.shape.heading_rad;
+        east_m_ = collision_result.body.shape.center_enu.east_m
+            - std::sin(heading_rad_) * body_center_offset;
+        north_m_ = collision_result.body.shape.center_enu.north_m
+            - std::cos(heading_rad_) * body_center_offset;
         solver_yaw_rate_rad_s_ = static_cast<float>(
             collision_result.body.heading_rate_rad_s);
         east_velocity = collision_result.body.linear_velocity_enu_mps.east_m;
@@ -1750,8 +1734,8 @@ VehicleState VehiclePhysics::update(
     vertical_speed_mps_ = std::clamp(
         vertical_speed_mps_ + vertical_accel * fdt, -20.f, 20.f);
     const double surface_vertical_displacement = ground_basis.normal[2] > 1e-9
-        ? -(ground_basis.normal[0] * (east_m_ - step_start_east_m)
-            + ground_basis.normal[1] * (north_m_ - step_start_north_m))
+        ? -(ground_basis.normal[0] * (east_m_ - step_start.east_m)
+            + ground_basis.normal[1] * (north_m_ - step_start.north_m))
             / ground_basis.normal[2]
         : 0.0;
     const double normal_up_for_heave = std::max(
@@ -1844,6 +1828,111 @@ VehicleState VehiclePhysics::update(
     // earlier position solve and this attitude solve.
     resolve_non_penetrating_ground_contacts(false, &tick_hard_stop_impulses);
 
+    if (!has_supported_ground_coverage()) {
+        ground_coverage_limited_ = true;
+        // A single missing corner remains physical three-wheel partial support,
+        // and diagonally opposed two-wheel coverage remains solvable. Once a
+        // complete axle or side leaves authored terrain, however, the remaining
+        // two springs would tip this non-airborne reduced model through the map
+        // before the centre query reaches the boundary. Restore the previous
+        // supported pose instead. Fitting the exporter to the Ground Actor moves
+        // this terminal safety edge to the actual Landscape extent.
+        restore_supported_pose_and_stop(
+            step_start, update_timestamp, in.gear, solver_steering_angle,
+            solver_wheel_steering_angles);
+        return state_;
+    }
+
+    update_powertrain_telemetry(in, fdt);
+
+    commit_wheel_support_feedback(tick_hard_stop_impulses, dt);
+    last_resolved_dynamic_proxies_ =
+        std::move(accepted_resolved_dynamic_proxies);
+    last_collision_contacts_ = std::move(accepted_collision_contacts);
+    last_runtime_proxy_contacts_ = std::move(accepted_runtime_proxy_contacts);
+    return state_;
+}
+
+VehiclePhysics::DriveForceStep VehiclePhysics::advance_drive_force(
+    const VehicleInput& in, float gear_sign, float fdt)
+{
+    const float configured_drive_force = in.gear == VehicleGear::Reverse
+        ? parameters_.max_reverse_force_n
+        : parameters_.max_drive_force_n;
+    // A force-only driveline produces unbounded power as road speed rises.
+    // Preserve launch torque while capping high-speed power to the configured
+    // sedan output.
+    const float power_limited_drive_force = parameters_.max_drive_power_w
+        / std::max(std::abs(body_longitudinal_speed_mps_), 1.f);
+    const float available_drive_force = std::min(
+        configured_drive_force, power_limited_drive_force);
+    const bool forward_limiter_active = gear_sign > 0.f
+        && body_longitudinal_speed_mps_ >= parameters_.max_forward_speed_mps;
+    const bool reverse_limiter_active = gear_sign < 0.f
+        && body_longitudinal_speed_mps_ <= -parameters_.max_reverse_speed_mps;
+    // Clamping chassis speed without cutting drive torque lets wheel angular
+    // speed wind up forever at the limiter. Remove only the torque that would
+    // accelerate farther beyond the configured speed; tire reaction then
+    // brings wheel surface speed back toward road speed.
+    const bool drive_force_suppressed = forward_limiter_active
+        || reverse_limiter_active
+        || in.brake > 0.f;
+    const float desired_drive_force = drive_force_suppressed
+        ? 0.f
+        : gear_sign * in.throttle * available_drive_force;
+    // Model the finite response of a real powertrain. In particular, a digital
+    // keyboard press must not apply the full axle force as a one-frame impulse.
+    // A direction change first sheds the old-direction force before building
+    // torque in the new direction.
+    if (applied_drive_force_n_ * desired_drive_force < 0.f) {
+        const float force_step = parameters_.drive_force_fall_rate_n_per_s * fdt;
+        applied_drive_force_n_ -= std::copysign(
+            std::min(std::abs(applied_drive_force_n_), force_step),
+            applied_drive_force_n_);
+    } else {
+        const bool increasing_force =
+            std::abs(desired_drive_force) > std::abs(applied_drive_force_n_);
+        const float response_rate = increasing_force
+            ? parameters_.drive_force_rise_rate_n_per_s
+            : parameters_.drive_force_fall_rate_n_per_s;
+        const float force_step = response_rate * fdt;
+        applied_drive_force_n_ += std::clamp(
+            desired_drive_force - applied_drive_force_n_,
+            -force_step,
+            force_step);
+    }
+    return {applied_drive_force_n_, drive_force_suppressed};
+}
+
+float VehiclePhysics::advance_steering(const VehicleInput& in, float fdt)
+{
+    // The input requests a road-wheel angle, independent of vehicle speed.
+    // Move the rack at a finite rate, then apply Ackermann geometry below.
+    // Tire slip, normal loads and friction determine the resulting turn;
+    // no speed-sensitive input assist silently reduces the requested angle.
+    const float steering_target_rad =
+        simcore_host::BodyFrameAdapter::canonical_steering_to_solver(in.steering)
+        * parameters_.max_steering_angle_rad;
+    const bool steering_is_returning =
+        solver_road_wheel_angle_rad_ * steering_target_rad <= 0.f
+        || std::abs(steering_target_rad) < std::abs(solver_road_wheel_angle_rad_);
+    const float steering_rate_rad_s = steering_is_returning
+        ? parameters_.steering_return_rate_rad_s
+        : parameters_.steering_rate_rad_s;
+    const float maximum_steering_step_rad = steering_rate_rad_s * fdt;
+    solver_road_wheel_angle_rad_ += std::clamp(
+        steering_target_rad - solver_road_wheel_angle_rad_,
+        -maximum_steering_step_rad,
+        maximum_steering_step_rad);
+    const float solver_steering_angle = solver_road_wheel_angle_rad_;
+    state_.steering_angle =
+        simcore_host::BodyFrameAdapter::solver_steering_to_canonical(
+            solver_steering_angle);
+    return solver_steering_angle;
+}
+
+bool VehiclePhysics::has_supported_ground_coverage() const
+{
     const simcore_host::GroundQueryRequest centre_coverage_request{
         {east_m_, north_m_, state_.position_enu.z
             + GROUND_PENETRATION_RECOVERY_M},
@@ -1867,71 +1956,92 @@ VehicleState VehiclePhysics::update(
         !ground_surface_hit_by_wheel_[1] && !ground_surface_hit_by_wheel_[3];
     const bool terminal_footprint_coverage_lost = full_front_edge_lost
         || full_rear_edge_lost || full_left_edge_lost || full_right_edge_lost;
-    if (!centre_has_ground_coverage || ground_query_hit_count_ == 0
-        || terminal_footprint_coverage_lost) {
-        // A single missing corner remains physical three-wheel partial support,
-        // and diagonally opposed two-wheel coverage remains solvable. Once a
-        // complete axle or side leaves authored terrain, however, the remaining
-        // two springs would tip this non-airborne reduced model through the map
-        // before the centre query reaches the boundary. Restore the previous
-        // supported pose instead. Fitting the exporter to the Ground Actor moves
-        // this terminal safety edge to the actual Landscape extent.
-        state_ = step_start_state;
-        state_.timestamp = update_timestamp;
-        east_m_ = step_start_east_m;
-        north_m_ = step_start_north_m;
-        heading_rad_ = step_start_heading_rad;
-        pitch_rad_ = step_start_pitch_rad;
-        roll_rad_ = step_start_roll_rad;
-        pitch_rate_rad_s_ = 0.f;
-        roll_rate_rad_s_ = 0.f;
-        vertical_speed_mps_ = 0.f;
-        ground_pitch_rad_ = step_start_ground_pitch_rad;
-        ground_roll_rad_ = step_start_ground_roll_rad;
-        support_pitch_rad_ = step_start_support_pitch_rad;
-        support_roll_rad_ = step_start_support_roll_rad;
-        support_attitude_valid_ = step_start_support_attitude_valid;
-        motorcycle_rider_attached_ = step_start_rider_attached;
-        body_longitudinal_speed_mps_ = 0.f;
-        solver_lateral_speed_mps_ = 0.f;
-        solver_yaw_rate_rad_s_ = 0.f;
-        applied_drive_force_n_ = 0.f;
-        wheel_angular_speed_rad_s_.fill(0.f);
-        suspension_compression_m_ = step_start_suspension_compression;
-        suspension_base_force_n_ = step_start_suspension_force;
-        suspension_had_contact_ = step_start_suspension_contact;
+    return !(!centre_has_ground_coverage || ground_query_hit_count_ == 0
+        || terminal_footprint_coverage_lost);
+}
 
-        resolve_non_penetrating_ground_contacts(false);
+VehiclePhysics::SupportedPoseSnapshot VehiclePhysics::capture_supported_pose() const
+{
+    return {
+        state_,
+        east_m_,
+        north_m_,
+        heading_rad_,
+        pitch_rad_,
+        roll_rad_,
+        ground_pitch_rad_,
+        ground_roll_rad_,
+        support_pitch_rad_,
+        support_roll_rad_,
+        support_attitude_valid_,
+        motorcycle_rider_attached_,
+        suspension_compression_m_,
+        suspension_base_force_n_,
+        suspension_had_contact_};
+}
 
-        state_.speed = 0.f;
-        state_.accel = 0.f;
-        state_.yaw_rate = 0.f;
-        state_.linear_velocity_body = {};
-        state_.angular_velocity_body = {};
-        state_.rpm = parameters_.idle_rpm;
-        state_.gear = in.gear;
-        state_.steering_angle =
+void VehiclePhysics::restore_supported_pose_and_stop(
+    const SupportedPoseSnapshot& snapshot, double timestamp, VehicleGear gear,
+    float solver_steering_angle,
+    const std::array<float, 4>& solver_wheel_steering_angles)
+{
+    state_ = snapshot.state;
+    state_.timestamp = timestamp;
+    east_m_ = snapshot.east_m;
+    north_m_ = snapshot.north_m;
+    heading_rad_ = snapshot.heading_rad;
+    pitch_rad_ = snapshot.pitch_rad;
+    roll_rad_ = snapshot.roll_rad;
+    pitch_rate_rad_s_ = 0.f;
+    roll_rate_rad_s_ = 0.f;
+    vertical_speed_mps_ = 0.f;
+    ground_pitch_rad_ = snapshot.ground_pitch_rad;
+    ground_roll_rad_ = snapshot.ground_roll_rad;
+    support_pitch_rad_ = snapshot.support_pitch_rad;
+    support_roll_rad_ = snapshot.support_roll_rad;
+    support_attitude_valid_ = snapshot.support_attitude_valid;
+    motorcycle_rider_attached_ = snapshot.rider_attached;
+    body_longitudinal_speed_mps_ = 0.f;
+    solver_lateral_speed_mps_ = 0.f;
+    solver_yaw_rate_rad_s_ = 0.f;
+    applied_drive_force_n_ = 0.f;
+    wheel_angular_speed_rad_s_.fill(0.f);
+    suspension_compression_m_ = snapshot.suspension_compression;
+    suspension_base_force_n_ = snapshot.suspension_force;
+    suspension_had_contact_ = snapshot.suspension_contact;
+
+    resolve_non_penetrating_ground_contacts(false);
+
+    state_.speed = 0.f;
+    state_.accel = 0.f;
+    state_.yaw_rate = 0.f;
+    state_.linear_velocity_body = {};
+    state_.angular_velocity_body = {};
+    state_.rpm = parameters_.idle_rpm;
+    state_.gear = gear;
+    state_.steering_angle =
+        simcore_host::BodyFrameAdapter::solver_steering_to_canonical(
+            solver_steering_angle);
+    for (std::size_t index = 0; index < state_.wheels.size(); ++index) {
+        auto& wheel = state_.wheels[index];
+        // A coverage stop arrests motion, not the steering linkage. Keep
+        // the same Ackermann angles as the normal integration path.
+        wheel.steering_angle =
             simcore_host::BodyFrameAdapter::solver_steering_to_canonical(
-                solver_steering_angle);
-        for (std::size_t index = 0; index < state_.wheels.size(); ++index) {
-            auto& wheel = state_.wheels[index];
-            // A coverage stop arrests motion, not the steering linkage. Keep
-            // the same Ackermann angles as the normal integration path.
-            wheel.steering_angle =
-                simcore_host::BodyFrameAdapter::solver_steering_to_canonical(
-                    solver_wheel_steering_angles[index]);
-            wheel.angular_speed = 0.f;
-            wheel.longitudinal_slip = 0.f;
-            wheel.slip_angle = 0.f;
-            wheel.longitudinal_force = 0.f;
-            wheel.lateral_force = 0.f;
-        }
-        // The attempted motion was discarded. Its reactions must not appear
-        // as support supplied by this published fail-closed state.
-        wheel_contact_support_ = {};
-        return state_;
+                solver_wheel_steering_angles[index]);
+        wheel.angular_speed = 0.f;
+        wheel.longitudinal_slip = 0.f;
+        wheel.slip_angle = 0.f;
+        wheel.longitudinal_force = 0.f;
+        wheel.lateral_force = 0.f;
     }
+    // The attempted motion was discarded. Its reactions must not appear
+    // as support supplied by this published fail-closed state.
+    wheel_contact_support_ = {};
+}
 
+void VehiclePhysics::update_powertrain_telemetry(const VehicleInput& in, float fdt)
+{
     // --- RPM (single-ratio driveline for the first physics milestone) ---
     const float wheel_rpm = std::abs(state_.speed)
         / (2.f * std::numbers::pi_v<float> * parameters_.tire_radius_m) * 60.f;
@@ -1951,7 +2061,11 @@ VehicleState VehiclePhysics::update(
     if (state_.fuel > 0.f)
         state_.fuel = std::max(
             0.f, state_.fuel - in.throttle * parameters_.fuel_rate_percent_s * fdt);
+}
 
+void VehiclePhysics::commit_wheel_support_feedback(
+    const std::array<double, 4>& tick_hard_stop_impulses, double dt)
+{
     for (std::size_t index = 0; index < state_.wheels.size(); ++index) {
         wheel_contact_support_[index].hard_stop_impulse_n_s =
             tick_hard_stop_impulses[index];
@@ -1967,11 +2081,6 @@ VehicleState VehiclePhysics::update(
             }
         }
     }
-    last_resolved_dynamic_proxies_ =
-        std::move(accepted_resolved_dynamic_proxies);
-    last_collision_contacts_ = std::move(accepted_collision_contacts);
-    last_runtime_proxy_contacts_ = std::move(accepted_runtime_proxy_contacts);
-    return state_;
 }
 
 VehicleState VehiclePhysics::get_state() const {
@@ -2029,6 +2138,7 @@ bool VehiclePhysics::resolve_non_penetrating_ground_contacts(
                     parameters_.roll_inertia_kg_m2,
                     parameters_.pitch_inertia_kg_m2,
                     parameters_.yaw_inertia_kg_m2,
+                    parameters_.collision_body_center_forward_offset_m,
                 },
                 *ground_query_);
         state_.position_enu.z = chassis_result.pose.up_m;

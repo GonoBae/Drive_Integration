@@ -1,4 +1,5 @@
 #include "traffic/npc_lane_change.hpp"
+#include "traffic/signal_approach.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -254,7 +255,7 @@ std::optional<NpcLaneChangePlan> plan_npc_lane_change(
         if (lane.id == target_lane_id) { target = &lane; }
     }
     if (!source || !target || source->lane_changes.size() > 8
-        || source->signal_group_id != target->signal_group_id) {
+        || !same_signal_approach(network, source->signal_group_id, target->signal_group_id)) {
         return std::nullopt;
     }
     const auto source_stations = stations(*source, body_half_width_m);

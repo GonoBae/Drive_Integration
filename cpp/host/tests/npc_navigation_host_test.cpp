@@ -40,7 +40,7 @@ struct CityFixture {
                   std::filesystem::path(SIMCORE_TEST_SIGNAL_CITY_MAP_PACKAGE_PATH) / "traffic_network.json",
                   package.collision_checksum, *package.ground_query)))
     {
-        require(traffic->lanes.size() == 58, "host navigation test needs the exported 58-lane Signal City");
+        require(traffic->lanes.size() == 59, "host navigation test needs the exported 59-lane Signal City");
     }
 };
 
@@ -112,10 +112,10 @@ struct Harness {
         return diagnostics[0];
     }
 
-    simcore_host::ObbPrism body() const
+    simcore_host::ObbPrism body(std::uint32_t entity_id = npc_id) const
     {
         for (const auto& entity : host.runtime_entities()) {
-            if (entity.entity_id == npc_id) {
+            if (entity.entity_id == entity_id) {
                 return std::get<simcore_host::ObbPrism>(entity.collision_proxy.shape);
             }
         }
@@ -419,8 +419,8 @@ void test_real_crash_near_window_end_is_passed_only_with_a_clear_legal_lane(cons
                     require(!simcore_host::intersect_obb_prisms(body,neighbour),
                         "blocked adjacent cars must remain solid during attempted bypass");
             } else {
-                if (tick == 0) require(navigation.changing_lane,
-                    "a known disabled lead car must trigger a safe plan before the remaining window is consumed");
+                if (tick == 1) require(navigation.changing_lane && navigation.search_steps == 1,
+                    "a known disabled lead car must plan on its next search turn before consuming turning room");
                 if (navigation.lane_changes_completed != 0) {
                     require((navigation.lane_id == 1015 || navigation.lane_id == 1016)
                         && navigation.lane_offset_m <= window_end+1.0,
@@ -474,7 +474,8 @@ void test_crash_bypass_waits_for_moving_adjacent_traffic_without_consuming_turni
         if (tick < 60) {
             require(!navigation.changing_lane,
                 "a follower cannot cut into adjacent traffic while both passing lanes are occupied");
-            require(navigation.preserving_bypass_space && !navigation.lane_change_wait_reason.empty(),
+            require(navigation.preserving_bypass_space
+                    && (navigation.search_steps == 0 || !navigation.lane_change_wait_reason.empty()),
                 "a blocked merge must retain manoeuvre space and expose its bounded wait reason");
             waited = true;
         }
@@ -499,6 +500,10 @@ void test_crash_bypass_waits_for_moving_adjacent_traffic_without_consuming_turni
     require(!harness.navigation().preserving_bypass_space
         && harness.navigation().lane_change_wait_reason.empty(),
         "a completed bypass must release its retained stopping anchor and wait reason");
+    require(harness.navigation().avoidance_phase == "none",
+        "a completed bypass must leave reverse avoidance inactive");
+    require(harness.navigation().avoidance_reverse_remaining_m == 0.0,
+        "a completed bypass must clear remaining reverse distance");
     client.reset("after-delayed-crash");
     require(!harness.navigation().preserving_bypass_space
         && harness.navigation().lane_change_wait_reason.empty()
@@ -551,6 +556,7 @@ void test_future_lane_detour_and_signal_queue_distinction()
     client.control();
     const auto before = harness.body();
     harness.tick();
+    harness.tick(); // Detection queues work; this lone NPC receives the next search turn.
     const auto detour = harness.navigation();
     require(detour.destination_lane_id == initial.destination_lane_id && detour.reroutes == 1
                 && std::find(detour.route.begin(), detour.route.end(), 20) == detour.route.end()
@@ -585,6 +591,7 @@ void test_downed_pedestrian_blocks_future_lane_detour()
     Harness harness(std::move(config));
     Client client{harness}; client.open(); client.control();
     harness.tick();
+    harness.tick(); // The legal detour is selected after the queued local proposal is checked.
     const auto route=harness.navigation();
     require(route.reroutes==1 && std::find(route.route.begin(),route.route.end(),20)==route.route.end(),
         "a stationary downed person must mark its future lane blocked and select the legal detour");
@@ -643,6 +650,438 @@ void test_stationary_ego_triggers_early_safe_bypass_and_reachable_destination()
     }
     require(began && completed && passed_ego,
         "a stationary Ego 40-80m ahead must trigger a legal lane change that actually passes it");
+}
+
+class InterruptedManeuverGround final : public simcore_host::GroundQuery {
+public:
+    bool lose_change_support = false;
+    mutable std::size_t failed_queries = 0;
+
+    std::optional<simcore_host::GroundHit> query_down(
+        const simcore_host::GroundQueryRequest& request) const override
+    {
+        if (lose_change_support && request.origin_enu.east_m > 0.1) {
+            ++failed_queries;
+            return std::nullopt;
+        }
+        return flat_.query_down(request);
+    }
+
+private:
+    simcore_host::FlatGroundQuery flat_;
+};
+
+SimulationHostConfig interrupted_maneuver_config(
+    const std::shared_ptr<simcore_host::CollisionWorld>& world,
+    const std::shared_ptr<InterruptedManeuverGround>& ground)
+{
+    auto config = ego_blocked_parallel_config();
+    config.physics_frequency_hz = 60.0;
+    config.npc_start_offset_m = 32.0;
+    config.npc_max_speed_mps = 2.0;
+    config.collision_world = world;
+    config.ground_query = ground;
+    auto network = std::make_shared<simcore_host::TrafficNetwork>(*config.traffic_network);
+    // Prefer the existing right-hand change. A late obstruction there leaves
+    // a fully authored left-hand alternative once the source anchor is reached.
+    network->lanes.front().lane_changes.push_back({25,5,90,5,90});
+    network->lanes.push_back({25,3.2,12,0,false,{{-3.2,-50,0},{-3.2,50,0}},{40}});
+    network->lanes.push_back({40,3.2,12,0,false,
+        {{-3.2,50,0},{-25,50,0},{-25,-50,0},{-3.2,-50,0}},{25}});
+    config.traffic_network = std::move(network);
+    return config;
+}
+
+struct InterruptedManeuverFixture {
+    // Only the test retains mutable ownership. As in the removable-wall
+    // fixture, replace collider contents between stopped/drained timer ticks;
+    // Barrier colliders have no independently retained breakable-wall proxy.
+    std::shared_ptr<simcore_host::CollisionWorld> world =
+        std::make_shared<simcore_host::CollisionWorld>();
+    std::shared_ptr<InterruptedManeuverGround> ground =
+        std::make_shared<InterruptedManeuverGround>();
+    SimulationHostConfig config = interrupted_maneuver_config(world, ground);
+    Harness harness{config};
+    Client client{harness};
+    simcore_host::ObbPrism anchor;
+    NpcNavigationSnapshot anchor_navigation;
+    std::optional<simcore_host::NpcLaneChangePlan> original_curve;
+
+    InterruptedManeuverFixture()
+    {
+        client.open();
+        client.control();
+    }
+
+    void tick()
+    {
+        const auto before = harness.body();
+        client.control();
+        harness.tick();
+        const auto body = harness.body();
+        require(std::hypot(body.center_enu.east_m-before.center_enu.east_m,
+                          body.center_enu.north_m-before.center_enu.north_m) < 0.10
+                    && std::abs(std::remainder(body.heading_rad-before.heading_rad,
+                        2.0*std::numbers::pi)) < 0.10,
+            "interrupted maneuvers must preserve continuous physical position and heading");
+        for (const auto& collider : world->static_colliders())
+            require(!simcore_host::intersect_obb_prisms(body, collider.shape),
+                "interrupted maneuver recovery must never penetrate a newly introduced blocker");
+        const simcore_host::ObbPrism ego{{0,0},0.85,0.0,2.15,1.0,0.75};
+        require(!simcore_host::intersect_obb_prisms(body, ego)
+                    && harness.navigation().collision_damage_percent == 0.0,
+            "interrupted maneuver recovery must remain clear of the original stationary Ego");
+    }
+
+    void begin_change(double minimum_east_m = 0.18, double maximum_progress_m = 4.0)
+    {
+        for (int index = 0; index < 480; ++index) {
+            const auto before = harness.navigation();
+            const auto body = harness.body();
+            tick();
+            const auto after = harness.navigation();
+            if (!before.changing_lane && after.changing_lane) {
+                anchor = body;
+                anchor_navigation = before;
+                original_curve = simcore_host::plan_npc_lane_change(
+                    *config.traffic_network, *ground, before.lane_id,
+                    before.lane_offset_m, 15, 12.0);
+                require(original_curve.has_value(),
+                    "fixture must reproduce the adopted low-speed twelve-metre change");
+            }
+            if (after.changing_lane && harness.body().center_enu.east_m > minimum_east_m) {
+                require(original_curve.has_value()
+                            && after.lane_offset_m-anchor_navigation.lane_offset_m < maximum_progress_m,
+                    "inject the interruption only after visible lateral motion at its intended curve station");
+                require_on_original_curve();
+                return;
+            }
+        }
+        require(false, "fixture must enter its preferred right-hand maneuver before interruption");
+    }
+
+    void require_on_original_curve() const
+    {
+        const auto sample = original_curve->sample(harness.navigation().lane_offset_m);
+        const auto body = harness.body();
+        require(sample.has_value()
+                    && std::hypot(body.center_enu.east_m-sample->position_enu.east_m,
+                                  body.center_enu.north_m-sample->position_enu.north_m) < 1.e-6
+                    && std::abs(body.heading_rad
+                        -sample->heading_deg*std::numbers::pi/180.0) < 1.e-6,
+            "recovery must retrace the retained curve rather than snap to the hidden source centerline");
+    }
+
+    simcore_host::StaticObbCollider front_blocker() const
+    {
+        const auto sample = original_curve->sample(harness.navigation().lane_offset_m + 3.5);
+        require(sample.has_value(), "front blocker must lie on the already active curve");
+        auto obstacle = barrier(sample->position_enu.east_m, sample->position_enu.north_m);
+        obstacle.shape.heading_rad = sample->heading_deg*std::numbers::pi/180.0;
+        obstacle.shape.half_length_m = 0.35;
+        obstacle.shape.half_width_m = 0.60;
+        require(!simcore_host::intersect_obb_prisms(harness.body(), obstacle.shape),
+            "introducing the new front obstacle must not itself create contact");
+        return obstacle;
+    }
+
+    void replace_obstacles(std::vector<simcore_host::StaticObbCollider> obstacles)
+    {
+        *world = simcore_host::CollisionWorld(std::move(obstacles));
+    }
+};
+
+class InterruptedBypassGround final : public simcore_host::GroundQuery {
+public:
+    std::optional<simcore_host::GroundHit> query_down(
+        const simcore_host::GroundQueryRequest& request) const override
+    {
+        auto hit = flat_.query_down(request);
+        if (hit) hit->surface_material_id = request.origin_enu.east_m <= 6.0
+                && request.origin_enu.east_m >= -4.8
+            ? simcore_host::GroundSurfaceMaterialId::Asphalt
+            : simcore_host::GroundSurfaceMaterialId::Rough;
+        return hit;
+    }
+private:
+    simcore_host::FlatGroundQuery flat_;
+};
+
+void test_interrupted_local_bypass_returns_without_crossing_centerline()
+{
+    auto config = ego_blocked_parallel_config();
+    config.physics_frequency_hz = 60.0;
+    config.npc_start_offset_m = 32.0;
+    config.npc_max_speed_mps = 2.0;
+    config.ground_query = std::make_shared<InterruptedBypassGround>();
+    auto network = std::make_shared<simcore_host::TrafficNetwork>(*config.traffic_network);
+    for (auto& lane : network->lanes) lane.lane_changes.clear();
+    network->lanes.push_back({40,3.2,6,0,true,{{-3.2,50,0},{-3.2,-50,0}},{}});
+    config.traffic_network = network;
+    const auto world = std::make_shared<simcore_host::CollisionWorld>();
+    config.collision_world = world;
+    Harness harness(config);
+    Client client{harness}; client.open(); client.control();
+    bool injected = false, reversed = false, returned = false, completed = false;
+    double anchor_distance = 0.0;
+    simcore_host::ObbPrism anchor;
+    for (int tick = 0; tick < 2300; ++tick) {
+        const auto before = harness.navigation();
+        const auto previous = harness.body();
+        client.control();
+        harness.tick();
+        const auto after = harness.navigation();
+        const auto body = harness.body();
+        require(std::hypot(body.center_enu.east_m-previous.center_enu.east_m,
+                          body.center_enu.north_m-previous.center_enu.north_m) < 0.1,
+            "interrupted local bypass must remain continuous in both directions");
+        for (const double front : {-body.half_length_m, body.half_length_m})
+            for (const double side : {-body.half_width_m, body.half_width_m})
+                require(body.center_enu.east_m+std::sin(body.heading_rad)*front
+                            +std::cos(body.heading_rad)*side >= -1.6-1.e-6,
+                    "the actual rotated body must not cross the two-way road centerline while recovering");
+        for (const auto& collider : world->static_colliders())
+            require(!simcore_host::intersect_obb_prisms(body, collider.shape),
+                "local bypass recovery must not penetrate its new persistent blocker");
+        const simcore_host::ObbPrism ego{{0,0},0.85,0.0,2.15,1.0,0.75};
+        require(!simcore_host::intersect_obb_prisms(body, ego)
+                    && after.collision_damage_percent == 0.0,
+            "local recovery must remain clear of the original stationary Ego");
+        if (!injected && !before.local_bypass_active && after.local_bypass_active) {
+            anchor = previous;
+            anchor_distance = before.route_distance_travelled_m;
+        }
+        if (!injected && after.local_bypass_active && body.center_enu.east_m > 0.2) {
+            require(after.route_distance_travelled_m-anchor_distance < 4.0,
+                "local recovery fixture must interrupt within the six-metre return allowance");
+            auto wall = barrier(2.0, body.center_enu.north_m+3.5);
+            wall.shape.heading_rad = 0.0;
+            wall.shape.half_length_m = 0.2;
+            wall.shape.half_width_m = 4.0;
+            require(!simcore_host::intersect_obb_prisms(body, wall.shape),
+                "introducing the local blocker must not create an initial contact");
+            *world = simcore_host::CollisionWorld({wall});
+            injected = true;
+        }
+        if (injected && !returned) {
+            reversed |= after.route_distance_travelled_m < before.route_distance_travelled_m-1.e-9;
+            if (!after.local_bypass_active) {
+                require(reversed && after.local_bypasses_completed == 0
+                            && after.lane_changes_completed == 0
+                            && std::hypot(body.center_enu.east_m-anchor.center_enu.east_m,
+                                          body.center_enu.north_m-anchor.center_enu.north_m) < 0.03,
+                    "local bypass may be discarded only at its physically recovered source anchor");
+                returned = true;
+                *world = simcore_host::CollisionWorld{};
+            }
+        }
+        if (returned && after.local_bypasses_completed != 0) {
+            completed = true;
+            break;
+        }
+    }
+    require(injected && reversed && returned && completed,
+        "an interrupted local bypass must safely return, replan and finish after the new obstruction clears");
+}
+
+void test_interrupted_maneuver_retraces_anchor_and_replans()
+{
+    InterruptedManeuverFixture fixture;
+    fixture.begin_change();
+    fixture.replace_obstacles({fixture.front_blocker()});
+    bool reversed = false, returned_to_anchor = false, passed = false;
+    double reverse_distance = 0.0;
+    for (int tick = 0; tick < 1600; ++tick) {
+        const auto before = fixture.harness.navigation();
+        fixture.tick();
+        const auto after = fixture.harness.navigation();
+        const auto body = fixture.harness.body();
+        const double retreat = before.route_distance_travelled_m-after.route_distance_travelled_m;
+        if (!returned_to_anchor && retreat > 1.e-9) {
+            reversed = true;
+            reverse_distance += retreat;
+            require(retreat <= 1.4/60.0 + 1.e-8,
+                "interrupted maneuver recovery must respect the bounded reverse station speed");
+            require(after.avoidance_reverse_remaining_m <= 0.5 + 1.e-8,
+                "each interrupted-maneuver reverse proposal must remain at most half a metre");
+            if (after.changing_lane) fixture.require_on_original_curve();
+        }
+        if (!returned_to_anchor && !after.changing_lane) {
+            require(reversed && reverse_distance > 0.5
+                        && after.lane_changes_completed == 0 && after.local_bypasses_completed == 0
+                        && std::hypot(body.center_enu.east_m-fixture.anchor.center_enu.east_m,
+                                      body.center_enu.north_m-fixture.anchor.center_enu.north_m) < 0.03,
+                "an interrupted plan may be discarded only after physically returning to its begin anchor");
+            returned_to_anchor = true;
+        }
+        if (returned_to_anchor && after.lane_changes_completed != 0) {
+            require(after.lane_id == 25 && body.center_enu.east_m < -3.1,
+                "replanning must adopt the clear authored left lane after the right corridor becomes blocked");
+            passed = body.center_enu.north_m > 5.0;
+            if (passed) break;
+        }
+    }
+    require(reversed && returned_to_anchor && reverse_distance < 6.0 && passed,
+        "a new persistent blocker must cause a real bounded retreat, replan and completed pass");
+}
+
+void test_interrupted_maneuver_waits_for_rear_clearance_and_resumes()
+{
+    InterruptedManeuverFixture fixture;
+    fixture.begin_change();
+    const auto front = fixture.front_blocker();
+    fixture.replace_obstacles({front});
+    int stopped_ticks = 0;
+    for (int tick = 0; tick < 180 && stopped_ticks < 3; ++tick) {
+        const auto before = fixture.harness.navigation();
+        fixture.tick();
+        const auto after = fixture.harness.navigation();
+        stopped_ticks = std::abs(after.route_distance_travelled_m
+            -before.route_distance_travelled_m) < 1.e-9 ? stopped_ticks+1 : 0;
+        require(after.changing_lane && after.route_distance_travelled_m
+                    >= before.route_distance_travelled_m-1.e-9,
+            "rear-space injection must occur after stopping but before recovery begins");
+    }
+    require(stopped_ticks == 3, "new front blocker must stop the active maneuver");
+    const auto stopped = fixture.harness.body();
+    const auto stopped_navigation = fixture.harness.navigation();
+    auto rear = barrier(stopped.center_enu.east_m, stopped.center_enu.north_m);
+    rear.collider_id = "interrupted-maneuver-rear-barrier";
+    rear.shape.heading_rad = stopped.heading_rad;
+    rear.shape.half_length_m = 0.35;
+    rear.shape.half_width_m = 1.2;
+    const double separation = stopped.half_length_m + rear.shape.half_length_m + 0.15;
+    rear.shape.center_enu.east_m -= std::sin(stopped.heading_rad)*separation;
+    rear.shape.center_enu.north_m -= std::cos(stopped.heading_rad)*separation;
+    require(!simcore_host::intersect_obb_prisms(stopped, rear.shape),
+        "rear blocker must occupy retreat space without intersecting the stopped body");
+    fixture.replace_obstacles({front, rear});
+    bool reported_rear_block = false;
+    for (int tick = 0; tick < 120; ++tick) {
+        fixture.tick();
+        const auto after = fixture.harness.navigation();
+        const auto body = fixture.harness.body();
+        reported_rear_block |= after.lane_change_wait_reason == "maneuver_recovery_rear_occupied";
+        require(after.changing_lane && after.lane_changes_completed == 0
+                    && after.destination_lane_id == stopped_navigation.destination_lane_id
+                    && std::hypot(body.center_enu.east_m-stopped.center_enu.east_m,
+                                  body.center_enu.north_m-stopped.center_enu.north_m) < 1.e-9
+                    && std::abs(body.heading_rad-stopped.heading_rad) < 1.e-9,
+            "occupied rear space must retain the unfinished plan and its exact stopped world pose");
+    }
+    require(reported_rear_block, "unsafe maneuver retreat must report occupied rear space");
+    fixture.replace_obstacles({rear});
+    bool completed = false;
+    for (int tick = 0; tick < 720; ++tick) {
+        const auto before = fixture.harness.navigation();
+        fixture.tick();
+        const auto after = fixture.harness.navigation();
+        require(after.route_distance_travelled_m >= before.route_distance_travelled_m-1.e-9,
+            "removing the front blocker must resume forward travel instead of a stale reverse");
+        if (after.changing_lane) fixture.require_on_original_curve();
+        if (after.lane_changes_completed != 0) {
+            require(after.lane_id == 15 && after.destination_lane_id == stopped_navigation.destination_lane_id,
+                "a cleared front corridor must complete the original right-hand plan");
+            completed = true;
+            break;
+        }
+    }
+    require(completed, "clearing only the front blocker must release the stopped maneuver");
+}
+
+void test_temporary_maneuver_interruptions_do_not_reverse()
+{
+    InterruptedManeuverFixture fixture;
+    fixture.begin_change();
+    fixture.replace_obstacles({fixture.front_blocker()});
+    for (int tick = 0; tick < 18; ++tick) {
+        const auto before = fixture.harness.navigation();
+        fixture.tick();
+        const auto after = fixture.harness.navigation();
+        require(after.changing_lane && after.avoidance_phase != "backing"
+                    && after.route_distance_travelled_m >= before.route_distance_travelled_m-1.e-9,
+            "a brief obstruction must retain the current maneuver without starting recovery");
+    }
+    fixture.replace_obstacles({});
+    fixture.ground->lose_change_support = true;
+    const auto frozen = fixture.harness.body();
+    for (int tick = 0; tick < 90; ++tick) {
+        fixture.tick();
+        const auto after = fixture.harness.navigation();
+        const auto body = fixture.harness.body();
+        require(after.changing_lane && after.avoidance_phase != "backing"
+                    && after.lane_changes_completed == 0
+                    && std::hypot(body.center_enu.east_m-frozen.center_enu.east_m,
+                                  body.center_enu.north_m-frozen.center_enu.north_m) < 1.e-9,
+            "ground loss alone must not be mistaken for a persistent physical maneuver obstruction");
+    }
+    require(fixture.ground->failed_queries > 0,
+        "ground-loss regression must actually reject support for the active curve");
+    fixture.ground->lose_change_support = false;
+    bool completed = false;
+    for (int tick = 0; tick < 720; ++tick) {
+        const auto before = fixture.harness.navigation();
+        fixture.tick();
+        const auto after = fixture.harness.navigation();
+        require(after.route_distance_travelled_m >= before.route_distance_travelled_m-1.e-9,
+            "restoring curve support must resume forward progress without spurious retreat");
+        if (after.lane_changes_completed != 0) {
+            completed = after.lane_id == 15;
+            break;
+        }
+    }
+    require(completed, "temporary stop and support loss must still allow the original maneuver to finish");
+}
+
+void test_interrupted_maneuver_beyond_retreat_limit_waits_and_resumes()
+{
+    InterruptedManeuverFixture fixture;
+    fixture.begin_change(1.9, 9.0);
+    require(fixture.harness.navigation().lane_offset_m
+                -fixture.anchor_navigation.lane_offset_m > 6.0,
+        "retreat-limit fixture must interrupt after the anchor is more than six metres behind");
+    fixture.replace_obstacles({fixture.front_blocker()});
+    int stopped_ticks = 0;
+    for (int tick = 0; tick < 180 && stopped_ticks < 3; ++tick) {
+        const auto before = fixture.harness.navigation();
+        fixture.tick();
+        const auto after = fixture.harness.navigation();
+        require(after.changing_lane && after.route_distance_travelled_m
+                    >= before.route_distance_travelled_m-1.e-9,
+            "a distant maneuver anchor must not authorize an over-budget retreat");
+        stopped_ticks = std::abs(after.route_distance_travelled_m
+            -before.route_distance_travelled_m) < 1.e-9 ? stopped_ticks+1 : 0;
+    }
+    require(stopped_ticks == 3, "late front blocker must stop the unfinished maneuver");
+    const auto stopped = fixture.harness.body();
+    bool reported_limit = false;
+    for (int tick = 0; tick < 120; ++tick) {
+        fixture.tick();
+        const auto after = fixture.harness.navigation();
+        const auto body = fixture.harness.body();
+        reported_limit |= after.lane_change_wait_reason == "maneuver_recovery_retreat_limit";
+        require(after.changing_lane && after.lane_changes_completed == 0
+                    && after.avoidance_phase != "backing"
+                    && std::hypot(body.center_enu.east_m-stopped.center_enu.east_m,
+                                  body.center_enu.north_m-stopped.center_enu.north_m) < 1.e-9,
+            "exceeding the retreat budget must preserve the stopped pose and unfinished plan");
+    }
+    require(reported_limit, "an unreachable recovery anchor must expose the explicit retreat-limit reason");
+    fixture.replace_obstacles({});
+    bool completed = false;
+    for (int tick = 0; tick < 720; ++tick) {
+        const auto before = fixture.harness.navigation();
+        fixture.tick();
+        const auto after = fixture.harness.navigation();
+        require(after.route_distance_travelled_m >= before.route_distance_travelled_m-1.e-9,
+            "clearing a late blocker must resume the retained curve without exceeding the reverse budget");
+        if (after.changing_lane) fixture.require_on_original_curve();
+        if (after.lane_changes_completed != 0) {
+            completed = after.lane_id == 15;
+            break;
+        }
+    }
+    require(completed, "removing an over-budget maneuver obstruction must permit ordinary completion");
 }
 
 SimulationHostConfig route_end_only_parallel_config()
@@ -722,7 +1161,7 @@ void test_deterministic_mixed_fleet_profiles_drive_distinct_host_physics()
         simcore_host::RuntimeVehicleClass::Compact,
         simcore_host::RuntimeVehicleClass::Truck,
         simcore_host::RuntimeVehicleClass::Motorcycle};
-    const std::array<double,4> half_lengths{2.20,1.75,3.65,1.10};
+    const std::array<double,4> half_lengths{2.20,1.75,3.10,1.10};
     const std::array<double,4> masses{1500.0,1050.0,6200.0,240.0};
     for (std::size_t index=0; index<4; ++index) {
         require(navigation[index].entity_id == npc_id + index
@@ -739,6 +1178,12 @@ void test_deterministic_mixed_fleet_profiles_drive_distinct_host_physics()
         require(std::abs(shape.half_length_m-half_lengths[index]) < 1.e-9
                     && std::abs(entity->collision_proxy.mass_kg-masses[index]) < 1.e-9,
             "each vehicle class must own its collision extent and inertial mass");
+        if (classes[index] == simcore_host::RuntimeVehicleClass::Truck) {
+            require(std::abs(shape.half_width_m - 1.05) < 1.e-9
+                        && std::abs(shape.half_height_m - 0.965) < 1.e-9
+                        && std::abs(shape.center_up_m - shape.half_height_m - 0.411071) < 1.e-6,
+                "NPC truck must match the authored body width, roof and underbody clearance");
+        }
     }
     Client client{harness}; client.open(); client.control();
     for (int tick=0; tick<60; ++tick) {
@@ -842,7 +1287,7 @@ void test_close_blocker_uses_only_the_available_retreat_needed_for_a_safe_pass()
         "an occupied six-metre rear envelope must not veto a shorter collision-free escape");
 }
 
-void test_downed_pedestrian_near_real_stopline(bool rear_occupied)
+void test_downed_pedestrian_near_real_stopline(bool rear_occupied, bool crashed_vehicle = false)
 {
     const CityFixture city;
     auto config = city_config(city);
@@ -852,17 +1297,27 @@ void test_downed_pedestrian_near_real_stopline(bool rear_occupied)
         [](const auto& lane) { return lane.id == 1010; });
     require(source != city.traffic->lanes.end() && source->lane_changes.size() == 2,
         "injured-pedestrian regression requires the actual three-lane city approach");
-    const double window_end = source->lane_changes.front().source_end_m;
     // Reproduce the queue beyond the authored lane-change window, not an
-    // obstacle on an unlimited synthetic straight. An 8m blend needs >12m
-    // retreat here; the previous generic 6m cap could never reach a valid start.
-    config.npc_start_offset_m = window_end + 4.5;
+    // obstacle on an unlimited synthetic straight. The remaining 8m blend
+    // requires more room than the former generic six-metre retreat cap.
+    double source_length = 0.0;
+    for (std::size_t point = 1; point < source->points.size(); ++point) {
+        const auto& a = source->points[point-1];
+        const auto& b = source->points[point];
+        source_length += std::hypot(std::hypot(b.east_m-a.east_m,b.north_m-a.north_m),b.up_m-a.up_m);
+    }
+    config.npc_start_offset_m = source_length - 3.5;
     const auto spawn = npc_spawn_anchor(config);
     const simcore_host::ObbPrism pedestrian{
-        {spawn.east_m + 4.0, spawn.north_m},0.3,std::numbers::pi/2.0,0.95,0.35,0.25};
-    simcore_host::RuntimeEntityState injured{3001,simcore_host::RuntimeEntityKind::Pedestrian,
-        {"navigation-stopline-injured-pedestrian",pedestrian,{},0.0,{0.7,0.0},80.0,30.0,15.0}};
-    injured.pedestrian_downed = true;
+        {spawn.east_m + (crashed_vehicle ? 5.4 : 4.0), spawn.north_m},
+        crashed_vehicle ? 0.85 : 0.3,std::numbers::pi/2.0,
+        crashed_vehicle ? 2.2 : 0.95,crashed_vehicle ? 1.0 : 0.35,crashed_vehicle ? 0.75 : 0.25};
+    simcore_host::RuntimeEntityState injured{3001,crashed_vehicle
+        ? simcore_host::RuntimeEntityKind::NpcVehicle : simcore_host::RuntimeEntityKind::Pedestrian,
+        {"navigation-stopline-accident-victim",pedestrian,{},0.0,{0.7,0.0},
+            crashed_vehicle ? 1500.0 : 80.0,crashed_vehicle ? 2600.0 : 30.0,15.0}};
+    injured.pedestrian_downed = !crashed_vehicle;
+    injured.damage_percent = 100.0f;
     injured.recovery_phase = static_cast<std::uint32_t>(simcore_host::ImpactRecoveryPhase::Disabled);
     config.runtime_entities.push_back(injured);
     const simcore_host::ObbPrism rear{
@@ -874,12 +1329,25 @@ void test_downed_pedestrian_near_real_stopline(bool rear_occupied)
     // Keep the exported lanes/stopline and initial all-red. A longer green
     // isolates the escape from waiting an additional complete signal cycle.
     auto traffic = std::make_shared<simcore_host::TrafficNetwork>(*city.traffic);
+    // Keep an authored clear lane deterministic and provide only that lane's
+    // movement with a long green after an initial all-red. This isolates the
+    // geometric escape from waiting a second complete junction cycle.
+    for (auto& lane : traffic->lanes) {
+        if (lane.id == 1010) std::stable_sort(lane.lane_changes.begin(),lane.lane_changes.end(),
+            [](const auto& a,const auto& b) {
+                return (a.target_lane_id == 1015) > (b.target_lane_id == 1015);
+            });
+    }
+    const auto passing_lane = std::find_if(traffic->lanes.begin(),traffic->lanes.end(),
+        [](const auto& lane) { return lane.id == 1015; });
+    require(passing_lane != traffic->lanes.end(), "real protected passing lane must exist");
     for (auto& plan : traffic->signal_plans) {
-        plan.cycle_ms = 0;
-        for (auto& phase : plan.phases) {
-            if (std::find(phase.green_groups.begin(), phase.green_groups.end(), 101)
-                != phase.green_groups.end()) phase.duration_ms = 60000;
-            plan.cycle_ms += phase.duration_ms;
+        if (std::find(plan.groups.begin(),plan.groups.end(),passing_lane->signal_group_id)
+            != plan.groups.end()) {
+            plan.phases = {{2000,{},{}},{20000,{source->signal_group_id},{}},
+                {2000,{},{}},{60000,{passing_lane->signal_group_id},{}}};
+            plan.offset_ms = 0;
+            plan.cycle_ms = 84000;
         }
     }
     config.traffic_network = traffic;
@@ -902,8 +1370,8 @@ void test_downed_pedestrian_near_real_stopline(bool rear_occupied)
         for (const auto& entity : harness.host.runtime_entities()) {
             if (entity.entity_id == npc_id) horns = entity.horn_event_sequence;
         }
-        require(horns <= 1,
-            "the same downed pedestrian must not receive repeated obstruction or TTC horns");
+        require(horns == 0,
+            "an already injured pedestrian must receive no obstruction or TTC horns");
         require(maximum_retreat <= 16.05,
             "injured-pedestrian escape must stay inside its sixteen-metre cap");
         require(!simcore_host::intersect_obb_prisms(body,pedestrian),
@@ -920,7 +1388,7 @@ void test_downed_pedestrian_near_real_stopline(bool rear_occupied)
             require(maximum_retreat < 0.05 && !navigation.changing_lane
                     && !simcore_host::intersect_obb_prisms(body,rear),
                 "a downed pedestrian cannot authorize reversing into a queued rear vehicle");
-        } else if (navigation.lane_changes_completed != 0
+        } else if ((navigation.lane_changes_completed != 0 || navigation.local_bypasses_completed != 0)
             && body.center_enu.east_m > pedestrian.center_enu.east_m + 3.5) {
             passed = true;
             break;
@@ -928,15 +1396,122 @@ void test_downed_pedestrian_near_real_stopline(bool rear_occupied)
         previous = body;
     }
     std::cout << "[NPC regression] downed_stopline rear_occupied=" << rear_occupied
+              << " crashed_vehicle=" << crashed_vehicle
               << " retreat_m=" << maximum_retreat << " passed=" << passed
               << " horns=" << horns << " lane=" << harness.navigation().lane_id
               << " wait=" << harness.navigation().lane_change_wait_reason << "\n";
     if (rear_occupied) {
-        require(rejected_rear && !backing && horns == 1,
-            "a blocked rear gap must remain safe with only one warning for the injured person");
+        require(rejected_rear && !backing && horns == 0,
+            "a blocked rear gap must remain safe and silent for the injured person");
     } else {
-        require(backing && maximum_retreat > 6.0 && passed,
-            "a stopline queue must retreat into the legal window and actually pass the injured person");
+        require(backing && maximum_retreat > 0.0 && maximum_retreat<=16.0 && passed,
+            "a stopline queue must reverse only for real turning room, then actually pass the injured person");
+    }
+}
+void test_actual_curve_truck_passes_without_an_authored_neighbour(bool close_blocker = false)
+{
+    const CityFixture city;
+    auto config=city_config(city);
+    config.physics_frequency_hz=60.0;
+    config.npc_route={3001,2020,2021,2024,3004,1010,1011,1014};
+    config.npc_start_offset_m=17.5126;
+    config.npc_spacing_m=35.0;
+    config.npc_count=3;
+    simcore_host::NpcLaneFollower reference;
+    reference.rebuild(*city.traffic,*city.package.ground_query,config.npc_route,true,87.5126);
+    const simcore_host::NpcRoutePlanner route_planner(*city.traffic);
+    const auto autonomous_route=route_planner.choose_destination(3001,1003,0);
+    require(autonomous_route.has_value(),"truck fixture must use its actual deterministic destination");
+    reference.reroute(*city.traffic,autonomous_route->lane_ids);
+    require(reference.state().lane_id==3001,"truck regression must use the actual reported lane and station");
+    const auto obstacle_sample=reference.sample_ahead(close_blocker ? 6.0 : 16.0);
+    require(obstacle_sample.has_value(),"the real curved road needs enough forward support");
+    const simcore_host::ObbPrism obstacle{{obstacle_sample->position_enu.east_m,obstacle_sample->position_enu.north_m},
+        obstacle_sample->position_enu.up_m+.85,obstacle_sample->heading_deg*std::numbers::pi/180.0,2.2,1.0,.75};
+    for (const bool closed_road : {false,true}) {
+        if (close_blocker) break;
+        auto barrier_box=obstacle;
+        if (closed_road) barrier_box.half_width_m=10.0;
+        const auto started=SimulationHost::Clock::now();
+        const auto plan=simcore_host::plan_npc_local_bypass(*city.traffic,*city.package.ground_query,
+            reference,22.0,{3.10,1.05,8.5},[&](const auto& sample,double) {
+                const simcore_host::ObbPrism body{{sample.position_enu.east_m,sample.position_enu.north_m},
+                    sample.position_enu.up_m+1.376071,sample.heading_deg*std::numbers::pi/180.0,3.22,1.17,.965};
+                if (simcore_host::intersect_obb_prisms(body,barrier_box)) return false;
+                return std::none_of(city.package.collision_world->static_colliders().begin(),
+                    city.package.collision_world->static_colliders().end(),[&](const auto& collider) {
+                        const double reach=body.half_length_m+body.half_width_m
+                            +collider.shape.half_length_m+collider.shape.half_width_m;
+                        if (std::abs(body.center_enu.east_m-collider.shape.center_enu.east_m)>reach
+                            || std::abs(body.center_enu.north_m-collider.shape.center_enu.north_m)>reach) return false;
+                        return simcore_host::intersect_obb_prisms(body,collider.shape).has_value();
+                    });
+            });
+        std::cout << "[NPC regression] v8_local_search closed_road=" << closed_road
+                  << " found=" << plan.has_value() << " search_ms="
+                  << std::chrono::duration<double,std::milli>(SimulationHost::Clock::now()-started).count() << "\n";
+        require(closed_road ? !plan.has_value() : plan.has_value(),
+            "the actual curved-road search must distinguish a parked car from a road-spanning solid barrier");
+        if (plan) {
+            require(!plan->borrows_opposing_space(),
+                "the real-curve truck must keep its bypass on the permitted side of the centreline");
+            for (double s=plan->begin_m();s<plan->end_m();s+=0.01)
+                require(plan->sample(s).has_value(),
+                    "centreline checks must not introduce holes between planned samples at curved lane joints");
+        }
+    }
+    simcore_host::RuntimeEntityState crashed{3001,simcore_host::RuntimeEntityKind::NpcVehicle,
+        {"local-bypass-curve-crash",obstacle,{},0,{.8,0},1500,2600,30}};
+    crashed.damage_percent=100;
+    crashed.collision_event_sequence=1;
+    crashed.recovery_phase=4;
+    config.runtime_entities.push_back(crashed);
+    Harness harness(std::move(config));
+    Client client{harness}; client.open(); client.control();
+    auto previous=harness.body(1003);
+    bool began=false,completed=false;
+    bool backed=false;
+    int first_reverse_tick=-1;
+    double minimum_station=87.5126;
+    double maximum_tick_ms=0.0;
+    for (int tick=0;tick<(close_blocker ? 3600 : 1800);++tick) {
+        if (tick%30==0) client.control();
+        const auto started=SimulationHost::Clock::now();
+        harness.tick();
+        maximum_tick_ms=std::max(maximum_tick_ms,
+            std::chrono::duration<double,std::milli>(SimulationHost::Clock::now()-started).count());
+        const auto body=harness.body(1003);
+        const auto navigation=harness.host.npc_navigation();
+        const auto truck=std::find_if(navigation.begin(),navigation.end(),[](const auto& state) { return state.entity_id==1003; });
+        require(truck!=navigation.end() && truck->vehicle_profile=="truck","the local host path must drive the real truck profile");
+        began|=truck->local_bypass_active;
+        if (!began && truck->lane_id==3001)
+            minimum_station=std::min(minimum_station,truck->lane_offset_m);
+        if (truck->avoidance_phase=="backing") {
+            backed=true;
+            if (first_reverse_tick<0) first_reverse_tick=tick;
+        }
+        require(std::hypot(body.center_enu.east_m-previous.center_enu.east_m,
+            body.center_enu.north_m-previous.center_enu.north_m)<.2,"truck local path must remain continuous");
+        require(!simcore_host::intersect_obb_prisms(body,obstacle),"truck must never clip its full hull through the blocked lead car");
+        for (const auto& collider:city.package.collision_world->static_colliders())
+            require(!simcore_host::intersect_obb_prisms(body,collider.shape),"truck local path must avoid the real curb and wall collision boxes");
+        if (truck->local_bypasses_completed!=0) { completed=true; break; }
+        previous=body;
+    }
+    const auto navigation=harness.host.npc_navigation();
+    const auto truck=std::find_if(navigation.begin(),navigation.end(),[](const auto& state) { return state.entity_id==1003; });
+    std::cout << "[NPC regression] local_curve_truck began=" << began << " completed=" << completed
+              << " max_tick_ms=" << maximum_tick_ms << " wait=" << truck->lane_change_wait_reason
+              << " lane=" << truck->lane_id << " station_m=" << truck->lane_offset_m
+              << " first_reverse_tick=" << first_reverse_tick
+              << " retreat_m=" << 87.5126-minimum_station << "\n";
+    require(began && completed,"the reported real-curve truck must pass and return without an authored adjacent lane");
+    if (close_blocker) {
+        require(backed && first_reverse_tick<90,
+            "a bumper-distance truck must promptly make rear space rather than wait for a complete forward path");
+        require(minimum_station<87.5126-0.4 && minimum_station>=87.5126-16.05,
+            "close-curve reverse must move physically and respect the bounded accident retreat allowance");
     }
 }
 } // namespace
@@ -944,6 +1519,29 @@ void test_downed_pedestrian_near_real_stopline(bool rear_occupied)
 int main(int argc, char** argv)
 {
     try {
+        if (argc == 2 && std::string(argv[1]) == "--interrupted-local-bypass") {
+            test_interrupted_local_bypass_returns_without_crossing_centerline();
+            return 0;
+        }
+        if (argc == 2 && std::string(argv[1]) == "--interrupted-maneuver") {
+            test_interrupted_maneuver_retraces_anchor_and_replans();
+            test_interrupted_maneuver_waits_for_rear_clearance_and_resumes();
+            test_temporary_maneuver_interruptions_do_not_reverse();
+            test_interrupted_maneuver_beyond_retreat_limit_waits_and_resumes();
+            return 0;
+        }
+        if (argc == 2 && std::string(argv[1]) == "--close-curve-truck") {
+            test_actual_curve_truck_passes_without_an_authored_neighbour(true);
+            return 0;
+        }
+        if (argc == 2 && std::string(argv[1]) == "--local-bypass") {
+            test_actual_curve_truck_passes_without_an_authored_neighbour();
+            return 0;
+        }
+        if (argc == 2 && std::string(argv[1]) == "--crashed-stopline") {
+            test_downed_pedestrian_near_real_stopline(false,true);
+            return 0;
+        }
         if (argc == 2 && std::string(argv[1]) == "--downed-stopline") {
             test_downed_pedestrian_near_real_stopline(false);
             return 0;

@@ -202,6 +202,28 @@ bool FSimCoreVehicleHornInputAndSpatializationTest::RunTest(const FString& Param
 	bOk &= TestTrue(TEXT("pawn binds H press to the horn component"), bExecuted);
 	bOk &= TestEqual(TEXT("immediate repeat is suppressed"),
 		Horn->GetAcceptedTriggerCount(), 1u);
+	bOk &= TestTrue(TEXT("H press sustains a held voice rather than starting a timed pulse"), Horn->IsManualHornHeld());
+	bool bReleaseExecuted = false;
+	for (int32 Index = 0; Index < Input->GetNumActionBindings(); ++Index)
+	{
+		FInputActionBinding& Binding = Input->GetActionBinding(Index);
+		if (Binding.GetActionName() == TEXT("Horn") && Binding.KeyEvent == IE_Released)
+		{
+			bOk &= TestTrue(TEXT("key-up remains available while paused"), Binding.bExecuteWhenPaused);
+			Binding.ActionDelegate.Execute(EKeys::H);
+			bReleaseExecuted = true;
+		}
+	}
+	bOk &= TestTrue(TEXT("H release stops the held voice"), bReleaseExecuted && !Horn->IsManualHornHeld());
+	bOk &= TestTrue(TEXT("new physical press works immediately after release without the NPC cooldown"), Horn->TriggerManualHorn());
+	const uint32 HeldCountBeforeSilence = Horn->GetAcceptedTriggerCount();
+	Horn->SilencePlayback();
+	Horn->SilencePlayback();
+	bOk &= TestTrue(TEXT("presentation silence releases a held horn without resetting accepted-trigger history"),
+		!Horn->IsManualHornHeld() && Horn->GetAcceptedTriggerCount() == HeldCountBeforeSilence);
+	bOk &= TestTrue(TEXT("a new press remains available after presentation silence"), Horn->TriggerManualHorn());
+	Horn->ResetHornState();
+	bOk &= TestFalse(TEXT("Play/reset cannot leave a held horn behind"), Horn->IsManualHornHeld());
 	World->DestroyWorld(false);
 	return bOk;
 }
@@ -254,14 +276,65 @@ bool FSimCoreVehicleHornProtocolAndLifecycleTest::RunTest(const FString& Paramet
 	Npc->ApplySnapshot(State, 0.0f, 0.0f, true, 0.05f, FVector::ZeroVector);
 	bOk &= TestEqual(TEXT("new event sounds exactly once"),
 		Horn->GetAcceptedTriggerCount(), 1u);
+	Horn->SilencePlayback();
+	Horn->SilencePlayback();
+	bOk &= TestTrue(TEXT("silencing playback keeps the already observed NPC event consumed"),
+		!Horn->ObserveAuthoritativeEvent(State.HornEventSequence)
+		&& Horn->GetAcceptedTriggerCount() == 1u);
+	Npc->FreezePresentation();
+	Npc->FreezePresentation();
+	bOk &= TestTrue(TEXT("stale NPC freeze preserves its accepted horn-event history"),
+		Npc->IsPresentationFrozen() && !Horn->IsManualHornHeld()
+		&& Horn->GetAcceptedTriggerCount() == 1u);
+	bOk &= TestTrue(TEXT("fresh same-event snapshot resumes the NPC without replaying its horn"),
+		Npc->ApplySnapshot(State, 0.0f, 0.0f, true, 0.05f, FVector::ZeroVector)
+		&& !Npc->IsPresentationFrozen() && Horn->GetAcceptedTriggerCount() == 1u);
+	Npc->FreezePresentation();
 	State = HornNpcState(TEXT("play-b"), 0);
 	Npc->ApplySnapshot(State, 0.0f, 0.0f, true, 0.05f, FVector::ZeroVector);
+	bOk &= TestTrue(TEXT("a new Play clears frozen state and silently establishes its own event baseline"),
+		!Npc->IsPresentationFrozen() && Horn->GetAcceptedTriggerCount() == 1u);
 	State.HornEventSequence = 1;
 	Npc->ApplySnapshot(State, 0.0f, 0.0f, true, 0.05f, FVector::ZeroVector);
 	bOk &= TestEqual(TEXT("new Play resets cooldown and accepts sequence one"),
 		Horn->GetAcceptedTriggerCount(), 2u);
 	World->DestroyWorld(false);
 	return bOk;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSimCoreVehicleHornHeldEnvelopeTest,
+	"DriveIntegration.Presentation.VehicleHorn.HoldReleaseAndNpcPulseIsolation",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSimCoreVehicleHornHeldEnvelopeTest::RunTest(const FString& Parameters)
+{
+	using namespace SimCoreVehicleHorn;
+	bool Ok = true;
+	for (int32 Rate : {8000, 48000, 96000})
+	{
+		FHeldEnvelope Held;
+		const float Delta = 1.0f / Rate;
+		float Previous = 0.0f;
+		for (int32 Frame = 0; Frame < Rate * 5; ++Frame)
+		{
+			const float Envelope = Held.Advance(Delta, true);
+			if (Frame > Rate / 20) Ok &= Envelope > 0.999f;
+			Ok &= FMath::IsFinite(Envelope) && Envelope >= Previous && Envelope <= 1.0f;
+			Previous = Envelope;
+		}
+		Ok &= TestTrue(TEXT("manual horn remains fully audible after five seconds held"), Previous > 0.999f);
+		for (int32 Frame = 0; Frame < Rate / 10; ++Frame)
+		{
+			const float Envelope = Held.Advance(Delta, false);
+			Ok &= Envelope <= Previous && Envelope >= 0.0f;
+			Previous = Envelope;
+		}
+		Ok &= TestEqual(TEXT("key-up releases smoothly to complete silence within 100ms"), Previous, 0.0f);
+		Ok &= TestEqual(TEXT("NPC event is still a bounded 380ms pulse"), EvaluateEnvelope(0.5f), 0.0f);
+		Held.Advance(0.1f, true);
+		Held.Reset();
+		Ok &= TestEqual(TEXT("lifecycle reset clears both attack and release tail"), Held.Advance(0.0f, false), 0.0f);
+	}
+	return Ok;
 }
 
 #endif

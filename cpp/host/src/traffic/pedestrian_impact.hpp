@@ -2,6 +2,7 @@
 
 #include "collision/collision_types.hpp"
 #include "traffic/impact_tumble.hpp"
+#include "traffic/pedestrian_profile.hpp"
 
 #include <cstdint>
 #include <limits>
@@ -35,6 +36,12 @@ public:
     static constexpr double contact_window_seconds = 0.25;
     static constexpr double knockdown_delta_v_mps = 1.5;
     static constexpr double knockdown_impulse_n_s = body_dimensions.mass_kg * knockdown_delta_v_mps;
+    void configure(std::uint32_t entity_id) noexcept {
+        const auto profile = pedestrian_profile(entity_id);
+        dimensions_ = {0.18 * profile.half_height_m / 0.9, profile.radius_m,
+            profile.half_height_m, profile.mass_kg, 0.25 * profile.half_height_m / 0.9};
+    }
+    [[nodiscard]] const ImpactTumbleDimensions& dimensions() const noexcept { return dimensions_; }
     void contact(std::uint32_t event, double impulse_n_s, CollisionVector2 direction,
                  double current_center_up_m, double ground_up_m,
                  const PedestrianImpactGeometry& geometry = {}) noexcept;
@@ -43,6 +50,7 @@ public:
               std::span<const PedestrianVehicleSurface> vehicles = {}) noexcept;
     [[nodiscard]] bool downed() const noexcept { return downed_; }
     [[nodiscard]] bool airborne() const noexcept { return airborne_; }
+    [[nodiscard]] bool ready_to_walk() const noexcept { return !downed_ && get_up_balance_seconds_ <= 0.0; }
     [[nodiscard]] bool settled() const noexcept;
     [[nodiscard]] double center_up_m() const noexcept { return center_up_m_; }
     [[nodiscard]] double vertical_velocity_mps() const noexcept { return vertical_velocity_mps_; }
@@ -51,8 +59,9 @@ public:
     [[nodiscard]] double pitch_rate_rad_s() const noexcept { return pitch_rate_rad_s_; }
     [[nodiscard]] ImpactTumbleSupport support() const noexcept;
     [[nodiscard]] const std::string& supported_vehicle_id() const noexcept { return supported_vehicle_id_; }
-    void reset() noexcept { *this = {}; }
+    void reset() noexcept { const auto dimensions = dimensions_; *this = {}; dimensions_ = dimensions; }
 private:
+    ImpactTumbleDimensions dimensions_ = body_dimensions;
     bool downed_ = false;
     bool airborne_ = false;
     std::uint32_t event_ = 0;
@@ -64,6 +73,7 @@ private:
     double pitch_rad_ = 0.0;
     double pitch_rate_rad_s_ = 0.0;
     double fall_direction_ = 1.0;
+    double get_up_balance_seconds_ = 0.0;
     std::string supported_vehicle_id_;
 };
 

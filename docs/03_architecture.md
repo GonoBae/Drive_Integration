@@ -908,6 +908,7 @@ schema-v2 `EntityState`의 기존 1~21번 필드 의미는 유지한다. runtime
 - E-stop은 process-lifetime latch다. `SimulationReset` 요청으로 해제하지 않으며 서버
   프로세스를 다시 시작해야 한다.
 - 250ms command 공백에서는 즉시 throttle을 해제하고 full brake·handbrake SafeStop을 적용하되 session과 socket은 유지한다. 100ms queue-age를 통과한 같은 session의 fresh command가 오면 즉시 다시 arm한다.
+- 9/17부터 queue-age는 직전 패킷의 지연 증가분만 비교하지 않고 세션 내 가장 신선한 시점 대비 누적 지연을 유지한다. 조금씩 늘어나는 FIFO 지연도 100ms를 넘으면 거절하며, 거절된 입력은 sequence·수신 시각·제어권을 갱신하지 않는다. 정상 입력이 따라잡으면 지연이 줄고, 재연결·새 Play에서는 기준을 초기화한다. 양쪽 절대 시계가 동기화되었다고 가정하지 않으며 첫 패킷의 절대 편도 지연을 알아내는 방식은 아니다.
 - command 공백이 1초를 넘을 때만 해당 session을 영구 폐기하고 1008로 연결을 닫으며, Unreal은 기본 0.5초 후 새 session으로 자동 재연결한다.
 - 위 250ms command SafeStop과 별개로, WebSocket server-initiated close에는 250ms transport
   grace deadline이 있다. peer close reply가 없거나 진행 중 write가 정체돼 graceful close가
@@ -1166,6 +1167,10 @@ SafeStop/reset을 다시 통과했다.
 계측하지 않는다. `analyze_performance.py`는 malformed/truncated/nonfinite data를 거부하고
 PIE/NullRHI·해상도/제한 설정 변경·짧은 기록을 정식 패키지 측정과 구분한다. 안정성·수동
 주행 인수는 자동 승인하지 않는다. 전체 자동 검증은 `scripts/check_core.py`로 수행한다.
+
+9/17에는 [별도 입력 반응 영상 측정](./input_latency_measurement.md)을 추가했다.
+물리 키 입력부터 화면 반응까지의 보수적 종단 지연이며, 서버가 어떤 sequence를 적용했는지
+직접 측정하는 지표는 아니다. frame/state 간격 분석과 결과를 섞지 않는다.
 
 ## 16. 배포 구성
 

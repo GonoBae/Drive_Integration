@@ -1803,6 +1803,8 @@ void test_airborne_throttle_does_not_store_hidden_wheel_spin()
         const auto airborne = vehicle.update(kDt);
         require(airborne.speed == 0.f,
                 "airborne throttle must not accelerate the chassis");
+        require(vehicle.ground_coverage_limited(),
+                "missing terrain must expose the coverage stop to bounded host diagnostics");
         for (const auto& wheel : airborne.wheels) {
             require(!wheel.in_contact,
                     "disabled ground must keep every tire airborne");
@@ -1813,6 +1815,8 @@ void test_airborne_throttle_does_not_store_hidden_wheel_spin()
 
     ground->set_enabled(true);
     const auto supported = vehicle.update(kDt);
+    require(!vehicle.ground_coverage_limited(),
+            "restored coverage must clear the diagnostic instead of retaining a stale stop");
     require(std::all_of(
                 supported.wheels.begin(), supported.wheels.end(),
                 [](const WheelState& wheel) { return wheel.in_contact; }),
@@ -2084,6 +2088,24 @@ void test_baked_surface_boundary_stops_at_last_supported_pose()
                 "; north delta=" + std::to_string(held.north - held_north)
                 + ", up delta="
                 + std::to_string(held.position_enu.z - held_up));
+    require(vehicle.ground_coverage_limited(),
+            "continued boundary input must retain the explicit coverage-stop diagnostic");
+    require(held.fuel == stopped.fuel
+            && held.damage_percent == stopped.damage_percent
+            && held.collision_event_sequence == stopped.collision_event_sequence,
+            "a rejected step must not commit fuel use or attempted collision damage");
+    require(held.rpm == VehicleParameters{}.idle_rpm,
+            "coverage-stop telemetry must remain idle instead of committing driveline RPM");
+    require(vehicle.get_last_resolved_dynamic_proxies().empty()
+            && vehicle.get_last_collision_contacts().empty()
+            && vehicle.get_last_runtime_proxy_contacts().empty(),
+            "a rejected step must not publish attempted dynamic contact feedback");
+    for (const auto& support : vehicle.get_wheel_contact_support_diagnostics()) {
+        require(support.suspension_normal_force_n == 0.f
+                && support.hard_stop_impulse_n_s == 0.0
+                && support.tire_hard_stop_normal_force_n == 0.f,
+                "coverage rollback must discard support histories from the attempted step");
+    }
 }
 
 void test_vehicle_suspension_force_respects_configured_bound()
@@ -4035,6 +4057,34 @@ void test_driveline_does_not_wind_up_at_speed_limiter()
     run_to_limiter(VehicleGear::Reverse);
 }
 
+void test_collision_center_offset_preserves_unobstructed_cg_motion()
+{
+    VehicleParameters centered_parameters;
+    auto offset_parameters = centered_parameters;
+    offset_parameters.collision_body_center_forward_offset_m = -0.15f;
+    const auto empty_world = std::make_shared<simcore_host::CollisionWorld>();
+    VehiclePhysics centered(kInitialLat, kInitialLon, 0.0, 0.f,
+        centered_parameters, {}, empty_world);
+    VehiclePhysics offset(kInitialLat, kInitialLon, 0.0, 0.f,
+        offset_parameters, {}, empty_world);
+    VehicleInput input;
+    input.throttle = 0.6f;
+    input.steering = 0.3f;
+    centered.set_input(input);
+    offset.set_input(input);
+    for (int step = 0; step < 360; ++step) {
+        const auto expected = centered.update(kDt);
+        const auto actual = offset.update(kDt);
+        require(std::hypot(actual.east - expected.east, actual.north - expected.north) < 1e-5
+                && std::abs(actual.position_enu.z - expected.position_enu.z) < 1e-5
+                && std::abs(actual.heading - expected.heading) < 1e-4f
+                && std::abs(actual.speed - expected.speed) < 1e-5f,
+            "moving the collision box behind the CG must not change unblocked turning dynamics");
+    }
+    require(std::abs(centered.get_state().heading) > 10.f,
+        "collision-offset regression must exercise a turning body, not only straight translation");
+}
+
 void test_authoritative_static_wall_blocks_vehicle_without_losing_ground()
 {
     VehicleParameters parameters;
@@ -4763,6 +4813,7 @@ int main(int argc, char** argv)
         test_contact_points_use_the_published_post_integration_pose();
         test_braking_settles_lateral_and_yaw_motion();
         test_driveline_does_not_wind_up_at_speed_limiter();
+        test_collision_center_offset_preserves_unobstructed_cg_motion();
         test_authoritative_static_wall_blocks_vehicle_without_losing_ground();
         test_curb_requires_authored_wheel_support_and_climbs_by_suspension();
         test_runtime_fallen_obstacles_support_tires_without_becoming_walls();

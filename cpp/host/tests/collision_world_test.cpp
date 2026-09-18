@@ -281,6 +281,110 @@ void test_excess_motion_fails_closed_at_substep_limit()
             "motion beyond the substep budget must not be integrated unchecked");
 }
 
+void test_offset_body_rotates_and_translates_about_its_center_of_mass()
+{
+    const auto overhead = make_collider(
+        "overhead", {1.0, 2.0}, 0.0, 10.0, 10.0, 5.0, 1.0);
+    const auto center_of_mass = [](const simcore_host::PlanarRigidBody& body) {
+        return simcore_host::CollisionVector2{
+            body.shape.center_enu.east_m
+                + std::sin(body.shape.heading_rad) * body.center_of_mass_forward_offset_m,
+            body.shape.center_enu.north_m
+                + std::cos(body.shape.heading_rad) * body.center_of_mass_forward_offset_m};
+    };
+    for (const double offset : {-0.15, 0.15}) {
+        for (const auto velocity : {simcore_host::CollisionVector2{},
+                 simcore_host::CollisionVector2{3.0, -2.0}}) {
+            auto body = make_body({1.0, 2.0}, velocity);
+            body.shape.heading_rad = 6.0;
+            body.heading_rate_rad_s = 4.0;
+            body.center_of_mass_forward_offset_m = offset;
+            const auto initial_com = center_of_mass(body);
+            // Exercise both the empty-world fast path and actual microsteps.
+            for (const auto& world : {simcore_host::CollisionWorld{},
+                     simcore_host::CollisionWorld({overhead})}) {
+                const auto result = world.integrate(body, 0.1);
+                const auto final_com = center_of_mass(result.body);
+                require(!result.motion_clamped && result.contacts.empty()
+                        && near(final_com.east_m, initial_com.east_m + velocity.east_m * 0.1)
+                        && near(final_com.north_m, initial_com.north_m + velocity.north_m * 0.1),
+                    "an offset OBB must rotate around its COM and translate the COM at its velocity");
+                require(near(result.body.shape.heading_rad,
+                            6.4 - 2.0 * std::numbers::pi_v<double>)
+                        && near(result.body.heading_rate_rad_s, 4.0),
+                    "offset integration must preserve angular velocity across heading wrap");
+            }
+        }
+    }
+}
+
+void test_offset_body_contact_through_center_of_mass_has_no_torque()
+{
+    auto body = make_body({-0.52, -0.15}, {0.5, 0.0});
+    body.center_of_mass_forward_offset_m = 0.15;
+    for (const double proxy_mass : {0.0, 80.0}) {
+        auto proxy = make_pedestrian_proxy("side-contact", {0.32, 0.0});
+        proxy.mass_kg = proxy_mass;
+        proxy.maximum_linear_speed_mps = proxy_mass > 0.0 ? 30.0 : 0.0;
+        const auto result = simcore_host::CollisionWorld{}.integrate(body, 0.1, {proxy});
+        require(result.contacts.size() == 1
+                && result.contacts.front().accumulated_normal_impulse_n_s > 0.0
+                && near(result.contacts.front().contact_point_enu.north_m, 0.0),
+            "the side capsule must actually strike the OBB on the COM's normal line");
+        require(near(result.body.heading_rate_rad_s, 0.0)
+                && near(result.body.shape.heading_rad, 0.0),
+            "kinematic and finite contact impulses through the COM must not create yaw torque");
+        const double expected_speed = proxy_mass > 0.0
+            ? body.mass_kg * 0.5 / (body.mass_kg + proxy_mass) : 0.0;
+        require(near(result.body.linear_velocity_enu_mps.east_m, expected_speed),
+            "a COM-centred frictionless hit must use only translational effective mass");
+    }
+}
+
+void test_offset_body_static_contact_uses_center_of_mass_lever_arm()
+{
+    const auto wall = make_collider("side-wall", {0.05, 0.0}, 0.0, 4.0, 0.05);
+    auto body = make_body({-0.52, -0.15}, {0.5, 0.0});
+    body.center_of_mass_forward_offset_m = 0.15;
+    const auto result = simcore_host::CollisionWorld({wall}).integrate(body, 0.1);
+    const double arm = 0.15;
+    const double expected_impulse = 0.5
+        / (1.0 / body.mass_kg + arm * arm / body.yaw_inertia_kg_m2);
+    require(result.contacts.size() == 1
+            && near(result.contacts.front().accumulated_normal_impulse_n_s, expected_impulse)
+            && near(result.body.heading_rate_rad_s,
+                arm * expected_impulse / body.yaw_inertia_kg_m2),
+        "a static side hit at the OBB centre must apply the offset COM's actual yaw lever arm");
+}
+
+void test_offset_body_rotation_contributes_to_translation_budget()
+{
+    auto body = make_body({0.0, 0.0}, {});
+    body.shape.half_length_m = 12.0;
+    body.center_of_mass_forward_offset_m = 10.0;
+    body.heading_rate_rad_s = 5.0;
+    const auto result = simcore_host::CollisionWorld{}.integrate(body, 0.1);
+    require(!result.motion_clamped && result.substep_count >= 50,
+        "rotation must budget the OBB centre's arc around an offset COM");
+}
+
+void test_offset_body_validation_fails_closed()
+{
+    for (const double offset : {std::numeric_limits<double>::quiet_NaN(),
+             std::numeric_limits<double>::infinity(),
+             -std::numeric_limits<double>::infinity()}) {
+        auto body = make_body({0.0, 0.0}, {});
+        body.center_of_mass_forward_offset_m = offset;
+        bool rejected = false;
+        try {
+            (void)simcore_host::CollisionWorld{}.integrate(body, 0.1);
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        require(rejected, "a non-finite COM offset must fail before collision integration");
+    }
+}
+
 void test_obb_capsule_narrow_phase_and_vertical_separation()
 {
     const simcore_host::ObbPrism body{
@@ -826,6 +930,11 @@ int main()
         test_collider_input_order_is_deterministic();
         test_empty_or_vertically_clear_world_preserves_motion();
         test_excess_motion_fails_closed_at_substep_limit();
+        test_offset_body_rotates_and_translates_about_its_center_of_mass();
+        test_offset_body_contact_through_center_of_mass_has_no_torque();
+        test_offset_body_static_contact_uses_center_of_mass_lever_arm();
+        test_offset_body_rotation_contributes_to_translation_budget();
+        test_offset_body_validation_fails_closed();
         test_obb_capsule_narrow_phase_and_vertical_separation();
         test_stationary_npc_obb_prevents_ego_penetration();
         test_stationary_pedestrian_capsule_prevents_ego_penetration();

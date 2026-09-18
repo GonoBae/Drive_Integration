@@ -10,6 +10,7 @@
 #include "traffic/npc_horn_policy.hpp"
 #include "traffic/npc_lane_follower.hpp"
 #include "traffic/npc_lane_change.hpp"
+#include "traffic/npc_local_bypass.hpp"
 #include "traffic/npc_route_planner.hpp"
 #include "traffic/impact_recovery.hpp"
 #include "traffic/impact_tumble.hpp"
@@ -106,6 +107,18 @@ struct NpcNavigationSnapshot {
     std::string avoidance_phase = "none";
     double avoidance_reverse_remaining_m = 0.0;
     std::string vehicle_profile = "sedan";
+    bool local_bypass_active = false;
+    std::uint64_t local_bypasses_completed = 0;
+    double local_bypass_offset_m = 0.0;
+    std::uint64_t search_steps = 0;
+    double next_reverse_probe_m = 0.0;
+    std::uint64_t local_search_samples = 0;
+    bool local_search_pending = false;
+    double local_search_max_slice_ms = 0.0;
+    double local_search_max_scene_ms = 0.0;
+    // Entries in the latest prepared occupancy/prediction scene, not a count
+    // of unique entities (reserved poses and prediction horizons also count).
+    std::uint64_t local_search_scene_shapes = 0;
 };
 
 // Application-level simulation coordinator. Network transports are injected as
@@ -197,21 +210,32 @@ private:
     void rebuild_lane_npc();
     void prepare_lane_npc(double dt_seconds, Clock::time_point now);
     struct LaneNpcRuntime;
+    static void clear_npc_avoidance_state(LaneNpcRuntime& npc);
     bool choose_npc_destination(LaneNpcRuntime& npc);
     void update_npc_navigation(LaneNpcRuntime& npc, double dt_seconds);
+    void update_npc_maneuver_recovery(LaneNpcRuntime& npc);
+    bool try_npc_route_detour(LaneNpcRuntime& npc);
     std::optional<simcore_host::NpcLaneSample> sample_lane_npc(
         const LaneNpcRuntime& npc, double distance_m) const;
     bool npc_sample_blocked(const LaneNpcRuntime& npc,
         const simcore_host::NpcLaneSample& sample, bool stationary_only = false,
         const simcore_host::ObbPrism* collision_shape = nullptr,
-        bool ignore_ego = false, std::uint32_t* downed_pedestrian_id = nullptr) const;
+        bool ignore_ego = false, std::uint32_t* accident_entity_id = nullptr) const;
     bool try_npc_lane_change(LaneNpcRuntime& npc, double retreat_m = 0.0, bool commit = true);
+    struct NpcLocalScene {
+        std::vector<simcore_host::KinematicProxyShape> occupied;
+        std::array<std::vector<simcore_host::KinematicProxyShape>,31> approaching_sweeps;
+    };
+    bool try_npc_local_bypass(LaneNpcRuntime& npc);
+    NpcLocalScene npc_local_obstacles(const LaneNpcRuntime& npc) const;
+    std::optional<simcore_host::NpcLaneSample> sample_lane_npc_behind(
+        const LaneNpcRuntime& npc, double distance_m) const;
     bool npc_reverse_path_clear(const LaneNpcRuntime& npc, double distance_m) const;
     bool begin_npc_escape_reverse(LaneNpcRuntime& npc, double obstruction_distance_m,
-        std::uint32_t downed_pedestrian_id = 0);
+        std::uint32_t accident_entity_id = 0);
     struct NpcRouteObstacle {
         double distance_m = 0.0;
-        std::uint32_t downed_pedestrian_id = 0;
+        std::uint32_t accident_entity_id = 0;
     };
     std::optional<NpcRouteObstacle> lane_npc_obstacle(
         const LaneNpcRuntime& npc, double lookahead_m, bool stationary_only = false,
@@ -253,6 +277,7 @@ private:
         double body_half_length_m = 2.2;
         double body_half_width_m = 1.0;
         double body_half_height_m = 0.75;
+        double body_ground_clearance_m = 0.10;
         double mass_kg = 1500.0;
         double yaw_inertia_kg_m2 = 2600.0;
         double maximum_reaction_speed_mps = 30.0;
@@ -275,11 +300,29 @@ private:
         double avoidance_reverse_remaining_m = 0.0;
         double avoidance_reverse_speed_mps = 0.0;
         double avoidance_reverse_total_m = 0.0;
+        // An interrupted lateral plan remains the pose authority until its
+        // beginning is reached by a checked reverse on the same current lane.
+        bool maneuver_recovery_active = false;
+        double maneuver_obstruction_seconds = 0.0;
+        double maneuver_recovery_anchor_m = 0.0;
         // Absolute travelled distance at which to wait, leaving steering room
         // around a persistent crash while an adjacent traffic gap opens.
         std::optional<double> avoidance_stop_distance_m;
         std::string lane_change_wait_reason;
         std::optional<simcore_host::NpcLaneChangePlan> lane_change;
+        std::optional<simcore_host::NpcLocalBypassPlan> local_bypass;
+        std::optional<simcore_host::NpcLocalBypassSearch> local_search;
+        double local_search_anchor_m = 0.0;
+        double local_search_observation_s = 0.0;
+        std::uint64_t local_search_samples = 0;
+        double local_search_max_slice_ms = 0.0;
+        double local_search_max_scene_ms = 0.0;
+        std::uint64_t local_search_scene_shapes = 0;
+        std::uint64_t local_bypasses_completed = 0;
+        double local_search_cooldown_s = 0.0;
+        bool navigation_search_requested = false;
+        double next_reverse_probe_m = 0.0;
+        std::uint64_t search_steps = 0;
         bool lane_change_fault_reported = false;
         std::vector<std::uint32_t> lane_change_route;
     };
@@ -298,7 +341,10 @@ private:
         simcore_host::PedestrianImpactState body;
     };
     std::vector<LaneNpcRuntime> lane_npcs_;
+    std::uint32_t npc_search_entity_id_ = 0;
+    std::uint32_t npc_search_after_entity_id_ = 0;
     std::optional<simcore_host::NpcRoutePlanner> npc_route_planner_;
+    std::shared_ptr<const simcore_host::NpcLocalRoadIndex> npc_local_road_index_;
     std::vector<PedestrianRuntime> pedestrians_;
     std::unordered_set<std::string> seen_play_sessions_;
     enum class ClientPayloadKind : std::uint8_t {
@@ -341,6 +387,8 @@ private:
     VehicleInput last_logged_input_;
     // Unlike last_logged_input_, this never drops sub-0.001 input changes.
     VehicleInput applied_input_;
+    double drive_stall_seconds_ = 0.0;
+    double drive_stall_next_log_s_ = 1.0;
     Clock::time_point last_control_change_time_ = Clock::time_point::min();
     std::uint64_t control_change_revision_ = 0;
     std::uint64_t reported_control_change_revision_ = 0;

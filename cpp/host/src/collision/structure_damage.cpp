@@ -534,6 +534,8 @@ void StructureDamageRuntime::apply_signal_faults(std::vector<TrafficSignalSnapsh
             if (signal.id == target.state.signal_id) {
                 signal.aspect = SignalAspect::Red;
                 signal.remaining_seconds = 0.0;
+                signal.left_aspect=signal.left_group_id ? SignalAspect::Red : SignalAspect::Unknown;
+                signal.left_remaining_seconds=0.0;
                 signal.out_of_service = true;
             }
         }

@@ -4,6 +4,9 @@ param([Parameter(Mandatory)][string]$PackageDirectory)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $bundle = (Resolve-Path -LiteralPath $PackageDirectory).Path
+. (Join-Path $PSScriptRoot 'package_windows.ps1')
+$verifiedFiles = Test-SimCorePackageIntegrity -PackageRoot $bundle
+Write-Host "[Package smoke] Verified $verifiedFiles files against the candidate manifest."
 $serverExe = Join-Path $bundle 'cpp\host\build\Release\simcore_publisher.exe'
 $clientExe = Join-Path $bundle 'Windows\DriveIntegration\Binaries\Win64\DriveIntegration.exe'
 $serverConfig = Join-Path $bundle 'cpp\host\config\signal_city_server.cfg'
@@ -41,7 +44,7 @@ try {
         if ($serverProcess.HasExited) { throw "Isolated server exited: $($serverProcess.ExitCode)" }
         if ($clientProcess.HasExited) { throw "Packaged client exited: $($clientProcess.ExitCode). Logs: $logRoot" }
         if (Test-Path -LiteralPath $clientLog) {
-            $text = Get-Content -LiteralPath $clientLog -Raw
+            [string]$text = Get-Content -LiteralPath $clientLog -Raw
             if ($text -match 'Fatal error:|LogSimCoreClient: Error:|SensorRig disabled:') {
                 throw "Packaged client reported a runtime/configuration error. Logs: $logRoot"
             }

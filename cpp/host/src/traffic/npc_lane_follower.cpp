@@ -1,4 +1,5 @@
 #include "traffic/npc_lane_follower.hpp"
+#include "traffic/signal_approach.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -15,6 +16,7 @@ namespace {
 
 constexpr double epsilon = 1e-8;
 constexpr double stop_epsilon_m = 1e-5;
+constexpr double maximum_heading_blend_m = 1.0;
 
 bool finite(const GroundPointEnu& p)
 {
@@ -25,6 +27,17 @@ double distance(const GroundPointEnu& a, const GroundPointEnu& b)
 {
     return std::hypot(std::hypot(b.east_m - a.east_m, b.north_m - a.north_m),
                       b.up_m - a.up_m);
+}
+
+double segment_heading(const std::vector<GroundPointEnu>& points, std::size_t segment)
+{
+    return std::atan2(points[segment + 1].east_m - points[segment].east_m,
+                      points[segment + 1].north_m - points[segment].north_m);
+}
+
+double blend_heading(double from, double to, double fraction)
+{
+    return from + std::remainder(to - from, 2.0 * std::numbers::pi) * fraction;
 }
 
 void require(bool condition, const char* message)
@@ -146,6 +159,9 @@ void NpcLaneFollower::rebuild(const TrafficNetwork& network, const GroundQuery& 
                     "NPC network has an invalid or duplicate signal head");
             if (groups.contains(signal.group_id)) {
                 signal_identities_.push_back({signal.id, signal.group_id});
+            }
+            if (signal.left_group_id != 0 && groups.contains(signal.left_group_id)) {
+                signal_identities_.push_back({signal.id, signal.left_group_id, true});
             }
         }
         for (const auto group : groups) {
@@ -284,7 +300,8 @@ bool NpcLaneFollower::complete_lane_change(
         replacement.rebuild(network, *ground_, std::move(target_route), false,
                             target_lane_offset_m, destination_end);
         require(replacement.state_.valid && replacement.state_.route_index == 0
-                    && replacement.route_.front().signal_group_id == source->signal_group_id,
+                    && same_signal_approach(network,
+                        replacement.route_.front().signal_group_id, source->signal_group_id),
                 "NPC lateral completion changed control identity or lacks ground");
         const double heading_delta = std::remainder(
             replacement.state_.heading_deg - state_.heading_deg, 360.0);
@@ -362,7 +379,37 @@ std::optional<NpcLaneSample> NpcLaneFollower::sample_at(double progress_m) const
     sample.position_enu = {a.east_m + (b.east_m - a.east_m) * t,
                            a.north_m + (b.north_m - a.north_m) * t,
                            a.up_m + (b.up_m - a.up_m) * t};
-    const double heading = std::atan2(b.east_m - a.east_m, b.north_m - a.north_m);
+    const double tangent = segment_heading(lane.points, p);
+    double entry_heading = tangent;
+    if (p > 0) {
+        entry_heading = blend_heading(segment_heading(lane.points, p - 1), tangent, 0.5);
+    } else if (index > 0 || loop_) {
+        const auto& previous = route_[(index + route_.size() - 1) % route_.size()];
+        entry_heading = blend_heading(
+            segment_heading(previous.points, previous.points.size() - 2), tangent, 0.5);
+    }
+    double exit_heading = tangent;
+    if (p + 2 < lane.points.size()) {
+        exit_heading = blend_heading(tangent, segment_heading(lane.points, p + 1), 0.5);
+    } else if (index + 1 < route_.size() || loop_) {
+        const auto& next = route_[(index + 1) % route_.size()];
+        exit_heading = blend_heading(tangent, segment_heading(next.points, 0), 0.5);
+    }
+    // Share the same heading on both sides of each vertex, including lane and
+    // loop joins. Short curve segments blend throughout their length; a long
+    // straight retains its authored tangent beyond 1m of either endpoint.
+    // Only orientation changes: position, arc progress and support queries
+    // still use the existing authored route and the final body footprint.
+    const double segment_length = lane.point_offsets_m[p + 1] - lane.point_offsets_m[p];
+    const double blend_distance = std::min(maximum_heading_blend_m, segment_length * 0.5);
+    const double from_start = offset - lane.point_offsets_m[p];
+    const double to_end = lane.point_offsets_m[p + 1] - offset;
+    double heading = tangent;
+    if (from_start < blend_distance) {
+        heading = blend_heading(entry_heading, tangent, from_start / blend_distance);
+    } else if (to_end < blend_distance) {
+        heading = blend_heading(tangent, exit_heading, 1.0 - to_end / blend_distance);
+    }
     sample.heading_deg = std::fmod(heading * 180.0 / std::numbers::pi + 360.0, 360.0);
     if (sample.heading_deg >= 360.0) { sample.heading_deg = 0.0; }
     sample.lane_id = lane.id;
@@ -417,9 +464,41 @@ std::optional<NpcLaneSample> NpcLaneFollower::sample_behind(double distance_m) c
     return sample;
 }
 
+std::uint32_t NpcLaneFollower::turn_signal_intent(double lookahead_m) const
+{
+    if (!state_.valid || route_.empty() || !std::isfinite(lookahead_m) || lookahead_m<0.0) return 0;
+    const double base=loop_ ? std::floor(progress_m_/route_length_m_)*route_length_m_ : 0.0;
+    for (int lap=loop_ ? -1 : 0;lap<=(loop_ ? 1 : 0);++lap) {
+        for (std::size_t index=0;index<route_.size();++index) {
+            const auto& approach=route_[index];
+            if (approach.signal_group_id==0 || (index+1==route_.size() && !loop_)) continue;
+            const auto& connector=route_[(index+1)%route_.size()];
+            const double entry=base+lap*route_length_m_+approach.start_m+approach.length_m;
+            if (progress_m_<entry-lookahead_m || progress_m_>=entry+connector.length_m-epsilon) continue;
+            const auto& a=approach.points[approach.points.size()-2];
+            const auto& b=approach.points.back();
+            const auto& c=connector.points[connector.points.size()-2];
+            const auto& d=connector.points.back();
+            const double change=std::remainder(std::atan2(d.east_m-c.east_m,d.north_m-c.north_m)
+                -std::atan2(b.east_m-a.east_m,b.north_m-a.north_m),2.0*std::numbers::pi);
+            constexpr double minimum_turn=30.0*std::numbers::pi/180.0;
+            return change< -minimum_turn ? 1U : change>minimum_turn ? 2U : 0U;
+        }
+    }
+    return 0;
+}
+
+bool NpcLaneFollower::can_retreat_from_current_lane() const noexcept
+{
+    return state_.valid && (!state_.stopline_committed
+        || (state_.lane_id == committed_lane_id_
+            && state_.route_index < route_.size()
+            && route_[state_.route_index].signal_group_id != 0));
+}
+
 bool NpcLaneFollower::retreat_for_obstacle(double distance_m)
 {
-    if (!state_.valid || !state_.stopped || state_.stopline_committed
+    if (!can_retreat_from_current_lane() || !state_.stopped
         || !std::isfinite(distance_m) || distance_m < 0.0) {
         return false;
     }
@@ -432,6 +511,14 @@ bool NpcLaneFollower::retreat_for_obstacle(double distance_m)
     state_.stopped = true;
     state_.stop_reason = NpcLaneStopReason::Blocked;
     state_.safety_clamped = false;
+    if (state_.stopline_committed
+        && progress_m_ + config_.front_extent_m + config_.stop_margin_m
+            <= committed_stopline_m_ + epsilon) {
+        committed_stopline_m_ = committed_until_m_ = -1.0;
+        committed_lane_id_ = 0;
+        state_.stopline_committed = false;
+        state_.committed_lane_id = 0;
+    }
     return true;
 }
 
@@ -440,7 +527,7 @@ bool NpcLaneFollower::green(std::uint32_t group_id,
                             double elapsed_seconds) const
 {
     for (const auto& sample : signals) {
-        if (sample.group_id == group_id
+        if ((sample.group_id == group_id || sample.left_group_id == group_id)
             && std::none_of(signal_identities_.begin(), signal_identities_.end(),
                             [&](const auto& expected) {
                                 return expected.id == sample.id && expected.group_id == group_id;
@@ -453,17 +540,20 @@ bool NpcLaneFollower::green(std::uint32_t group_id,
         for (const auto& signal : signals) {
             if (signal.id != expected.id) { continue; }
             ++matches;
-            if (signal.group_id != group_id) { return false; }
+            const auto actual_group = expected.protected_left ? signal.left_group_id : signal.group_id;
+            const auto aspect = expected.protected_left ? signal.left_aspect : signal.aspect;
+            const auto remaining = expected.protected_left
+                ? signal.left_remaining_seconds : signal.remaining_seconds;
+            if (actual_group != group_id) { return false; }
             if (signal.out_of_service) {
-                if (signal.aspect != SignalAspect::Red || signal.remaining_seconds != 0.0) {
+                if (aspect != SignalAspect::Red || remaining != 0.0) {
                     return false;
                 }
                 continue;
             }
             found_group = true;
-            if (signal.aspect != SignalAspect::Green
-                || !std::isfinite(signal.remaining_seconds)
-                || signal.remaining_seconds <= elapsed_seconds + epsilon) { return false; }
+            if (aspect != SignalAspect::Green || !std::isfinite(remaining)
+                || remaining <= elapsed_seconds + epsilon) { return false; }
         }
         if (matches != 1) { return false; }
     }
@@ -502,11 +592,15 @@ void NpcLaneFollower::stop(NpcLaneStopReason reason, bool safety_clamped) noexce
 
 const NpcLaneFollowerState& NpcLaneFollower::step(
     double dt_seconds, std::span<const TrafficSignalSnapshot> signals,
-    bool enabled, std::optional<double> blocked_distance_m)
+    bool enabled, std::optional<double> blocked_distance_m,
+    double local_speed_limit_mps, double extra_stop_margin_m)
 {
     state_.safety_clamped = false;
     if (route_.empty()) { stop(NpcLaneStopReason::Uninitialized, false); return state_; }
     if (!std::isfinite(dt_seconds) || dt_seconds < 0.0 || dt_seconds > 10.0
+        || !std::isfinite(local_speed_limit_mps) || local_speed_limit_mps <= 0.0
+        || !std::isfinite(extra_stop_margin_m) || extra_stop_margin_m < 0.0
+        || extra_stop_margin_m > 2.0
         || signals.size() > 64
         || (blocked_distance_m && (!std::isfinite(*blocked_distance_m) || *blocked_distance_m < 0.0))) {
         stop(NpcLaneStopReason::InvalidInput, true);
@@ -521,7 +615,7 @@ const NpcLaneFollowerState& NpcLaneFollower::step(
         stop(NpcLaneStopReason::NoGround, true);
         return state_;
     }
-    const double clearance = config_.front_extent_m + config_.stop_margin_m;
+    const double clearance = config_.front_extent_m + config_.stop_margin_m + extra_stop_margin_m;
     const double obstacle_stop = blocked_distance_m
         ? progress_m_ + std::max(0.0, *blocked_distance_m - clearance)
         : std::numeric_limits<double>::infinity();
@@ -533,6 +627,9 @@ const NpcLaneFollowerState& NpcLaneFollower::step(
             const double until_change = signal.remaining_seconds - elapsed;
             if (signal.aspect == SignalAspect::Green && std::isfinite(until_change)
                 && until_change > epsilon) { h = std::min(h, until_change); }
+            const double left_until_change = signal.left_remaining_seconds - elapsed;
+            if (signal.left_aspect == SignalAspect::Green && std::isfinite(left_until_change)
+                && left_until_change > epsilon) { h = std::min(h, left_until_change); }
         }
         double stop_at = obstacle_stop;
         NpcLaneStopReason reason = std::isfinite(stop_at) ? NpcLaneStopReason::Blocked
@@ -541,7 +638,8 @@ const NpcLaneFollowerState& NpcLaneFollower::step(
             stop_at = route_length_m_ - clearance;
             reason = NpcLaneStopReason::Terminal;
         }
-        double desired = std::min(config_.max_speed_mps, route_[state_.route_index].speed_limit_mps);
+        double desired = std::min({config_.max_speed_mps,
+            route_[state_.route_index].speed_limit_mps,local_speed_limit_mps});
         const double base = loop_ ? std::floor(progress_m_ / route_length_m_) * route_length_m_ : 0.0;
         for (std::size_t lap = 0; lap < (loop_ ? 2U : 1U); ++lap) {
             for (const auto& lane : route_) {

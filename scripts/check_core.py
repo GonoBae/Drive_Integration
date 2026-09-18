@@ -51,6 +51,8 @@ def child_environment():
                        if key.lower() != "path"}
         environment["Path"] = path_value
         environment["MSBUILDDISABLENODEREUSE"] = "1"
+    # Validation does not need the user's writable Zen service/profile cache.
+    environment["UE-LocalDataCachePath"] = str(ROOT / "runtime_tmp/ue-ddc")
     return environment
 
 
@@ -92,7 +94,9 @@ def make_steps(engine_root, output, skip_build=False, skip_unreal=False):
         Step("package-plan", ["powershell.exe", "-NoProfile", "-NonInteractive",
                               "-ExecutionPolicy", "Bypass", "-File",
                               str(ROOT / "scripts/test_package_windows.ps1")], ROOT),
-        Step("signal-city-wire", [python, str(ROOT / "scripts/smoke_signal_city.py")], ROOT, 120),
+        # Signal City's protected-left plan is 116s; leave room for startup,
+        # the complete cycle, SafeStop, reconnect and fresh-PIE reset checks.
+        Step("signal-city-wire", [python, str(ROOT / "scripts/smoke_signal_city.py")], ROOT, 180),
         Step("physics-replay-wire", [python, str(ROOT / "scripts/smoke_physics_replay.py")],
              ROOT, 180),
     ]
@@ -102,10 +106,12 @@ def make_steps(engine_root, output, skip_build=False, skip_unreal=False):
             for target in ("DriveIntegrationEditor", "DriveIntegration"):
                 steps.append(Step("ue-build-" + target,
                                   [str(dotnet), str(ubt), target, "Win64", "Development",
-                                   "-Project=" + str(project), "-WaitMutex", "-NoHotReloadFromIDE"],
+                                   "-Project=" + str(project), "-WaitMutex", "-NoHotReloadFromIDE",
+                                   "-Log=" + str(output / ("ubt-" + target + ".log"))],
                                   engine_root / "Engine/Source", 1800))
         common = [str(editor), str(project), "-unattended", "-nop4", "-NullRHI",
-                  "-NoSound", "-NoSplash", "-stdout", "-FullStdOutLogOutput"]
+                  "-NoSound", "-NoSplash", "-stdout", "-FullStdOutLogOutput",
+                  "-DDC=InstalledNoZenLocalFallback"]
         steps.append(Step("ue-automation", common + [
             "-ExecCmds=Automation RunTests DriveIntegration",
             "-TestExit=Automation Test Queue Empty",

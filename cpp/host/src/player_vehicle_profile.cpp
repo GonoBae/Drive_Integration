@@ -104,11 +104,15 @@ VehicleParameters make_player_vehicle_parameters(
         result.tire_friction = 0.95f;
         result.wheel_inertia_kg_m2 = 5.5f;
         result.wheel_free_spin_damping_n_m_s = 8.0f;
-        result.collision_body_overhang_m = 1.725f;
-        result.collision_body_side_padding_m = 0.27f;
-        result.collision_body_half_height_m = 1.25f;
-        result.chassis_shell_center_up_offset_m = 0.54f;
-        result.chassis_shell_half_height_m = 1.08f;
+        // Truck BODY authored bounds in metres: forward [-3.25, 2.95],
+        // right [-1.05, 1.05], up [-0.26, 1.67], relative to the player CG.
+        result.collision_body_overhang_m = 1.175f;
+        result.collision_body_side_padding_m = 0.10f;
+        result.collision_body_half_height_m = 0.965f;
+        result.collision_body_center_forward_offset_m = -0.15f;
+        result.collision_body_ground_clearance_m = 0.49f;
+        result.chassis_shell_center_up_offset_m = 0.705f;
+        result.chassis_shell_half_height_m = 0.965f;
         scale_suspension(result, sedan);
         break;
     case RuntimeVehicleClass::Motorcycle:

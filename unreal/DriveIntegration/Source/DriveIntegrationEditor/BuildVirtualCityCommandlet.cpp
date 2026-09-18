@@ -67,6 +67,7 @@ const FName SharedCollectorCurvesTag(TEXT("SimCore.SignalCity.SharedCollectorCur
 const FName SealedCollectorJointsTag(TEXT("SimCore.SignalCity.SealedCollectorJoints.v5"));
 const FName MinimumCollectorRadiusTag(TEXT("SimCore.SignalCity.MinimumCollectorRadius.v6"));
 const FName CollectorLaneMergesTag(TEXT("SimCore.SignalCity.CollectorLaneMerges.v7"));
+const FName KoreanNorthDistrictTag(TEXT("SimCore.SignalCity.KoreanNorthDistrict.v8"));
 
 FVector ToWorldCm(const FVector& EnuM)
 {
@@ -101,6 +102,7 @@ const TCHAR* PaletteName(SimCoreVirtualCity::EPalette Palette)
 	case EPalette::Yellow: return TEXT("Yellow");
 	case EPalette::Barrier: return TEXT("Barrier");
 	case EPalette::Grass: return TEXT("Grass");
+	case EPalette::SignBlue: return TEXT("SignBlue");
 	}
 	return TEXT("Ground");
 }
@@ -120,6 +122,7 @@ FLinearColor PaletteColor(SimCoreVirtualCity::EPalette Palette)
 	case EPalette::Yellow: return FLinearColor(1.0f, 0.61f, 0.025f);
 	case EPalette::Barrier: return FLinearColor(0.93f, 0.24f, 0.055f);
 	case EPalette::Grass: return FLinearColor(0.10f, 0.25f, 0.115f);
+	case EPalette::SignBlue: return FLinearColor(0.015f, 0.075f, 0.42f);
 	}
 	return FLinearColor::White;
 }
@@ -232,6 +235,7 @@ bool BuildScene(UWorld* World, const SimCoreVirtualCity::FLayout& Layout)
 		Ground->Tags.Add(SealedCollectorJointsTag);
 		Ground->Tags.Add(MinimumCollectorRadiusTag);
 		Ground->Tags.Add(CollectorLaneMergesTag);
+		Ground->Tags.Add(KoreanNorthDistrictTag);
 	}
 	USceneComponent* Root = NewObject<USceneComponent>(Ground, TEXT("GroundRoot"), RF_Transactional);
 	Ground->SetRootComponent(Root);
@@ -606,9 +610,10 @@ bool SyncSignalCityTrafficLanes(UWorld* World, const SimCoreVirtualCity::FLayout
 	for (TActorIterator<AActor> It(World); It; ++It) Actors.Add(It->GetFName(), *It);
 	AActor* Ground = Actors.FindRef(GroundName);
 	if (!Ground || !Ground->Tags.Contains(GeneratedTag)) return false;
-	if (Ground->Tags.Contains(CollectorLaneMergesTag)) return ValidateScene(World, Layout);
+	if (Ground->Tags.Contains(KoreanNorthDistrictTag)) return ValidateScene(World, Layout);
 	const auto Legacy = [&Ground]()
 	{
+		if (Ground->Tags.Contains(CollectorLaneMergesTag)) return SimCoreSignalCity::BuildSolidCollectorMergesV7Layout();
 		if (Ground->Tags.Contains(MinimumCollectorRadiusTag)) return SimCoreSignalCity::BuildUnmergedCollectorLanesV6Layout();
 		if (Ground->Tags.Contains(SealedCollectorJointsTag)) return SimCoreSignalCity::BuildSealedCollectorCurvesV5Layout();
 		if (Ground->Tags.Contains(SharedCollectorCurvesTag)) return SimCoreSignalCity::BuildUnsealedCollectorCurvesV4Layout();
@@ -766,6 +771,13 @@ bool SyncSignalCityTrafficLanes(UWorld* World, const SimCoreVirtualCity::FLayout
 	Ground->Tags.AddUnique(SealedCollectorJointsTag);
 	Ground->Tags.AddUnique(MinimumCollectorRadiusTag);
 	Ground->Tags.AddUnique(CollectorLaneMergesTag);
+	Ground->Tags.AddUnique(KoreanNorthDistrictTag);
+	auto* Exporter=Cast<AGroundCollisionExporter>(Actors.FindRef(FName(ExporterName)));
+	if(!Exporter) return false;
+	Exporter->Modify();
+	Exporter->ConfigureForAuthoring(Ground,PackageRelative,FVector::ZeroVector,
+		ToWorldCm(Layout.GroundCenterEnuM),Layout.GroundHalfExtentNorthEastM*100.0,
+		HeightfieldSampleSpacingCm,0.0f);
 	Ground->MarkPackageDirty();
 	World->UpdateWorldComponents(true, false);
 	UE_LOG(LogBuildVirtualCity, Display,

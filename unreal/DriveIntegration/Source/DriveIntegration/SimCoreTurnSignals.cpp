@@ -7,6 +7,108 @@
 #include "Materials/Material.h"
 #include "Materials/MaterialInstanceDynamic.h"
 
+double SimCoreTurnSignals::FPhaseClock::Update(SimCoreProtocol::ETurnIndicator Direction,
+	double TimeSeconds, bool bHazard)
+{
+	if (bHazard) Direction = SimCoreProtocol::ETurnIndicator::Off;
+	const bool bSelected = bHazard || Direction == SimCoreProtocol::ETurnIndicator::Left
+		|| Direction == SimCoreProtocol::ETurnIndicator::Right;
+	if (!FMath::IsFinite(TimeSeconds) || TimeSeconds < 0.0 || !bSelected)
+	{
+		Reset();
+		ElapsedSeconds = FMath::IsFinite(TimeSeconds) && TimeSeconds >= 0.0 ? 0.0 : -1.0;
+		return ElapsedSeconds;
+	}
+	const bool bClockRestarted = TimeSeconds < LastTimeSeconds - 0.25;
+	if (!bClockRestarted) TimeSeconds = FMath::Max(TimeSeconds, LastTimeSeconds);
+	if (SelectionTimeSeconds < 0.0 || Direction != SelectedDirection
+		|| bHazard != bSelectedHazard || bClockRestarted)
+	{
+		SelectionTimeSeconds = TimeSeconds;
+	}
+	SelectedDirection = Direction;
+	bSelectedHazard = bHazard;
+	LastTimeSeconds = TimeSeconds;
+	ElapsedSeconds = TimeSeconds - SelectionTimeSeconds;
+	return ElapsedSeconds;
+}
+
+void SimCoreTurnSignals::FPhaseClock::Reset()
+{
+	SelectedDirection = SimCoreProtocol::ETurnIndicator::Off;
+	bSelectedHazard = false;
+	SelectionTimeSeconds = LastTimeSeconds = -1.0;
+	ElapsedSeconds = 0.0;
+}
+
+bool SimCoreTurnSignals::FAutoCancel::Update(SimCoreProtocol::ETurnIndicator Direction,
+	bool bHazard, const SimCoreProtocol::FVehicleState& State, bool bFresh)
+{
+	using SimCoreProtocol::ETurnIndicator;
+	if (bHazard || (Direction != ETurnIndicator::Left && Direction != ETurnIndicator::Right)
+		|| !bFresh || State.PlaySessionId.IsEmpty()
+		|| !FMath::IsFinite(State.SteeringAngleRad) || !FMath::IsFinite(State.HeadingDegrees)
+		|| !FMath::IsFinite(State.LinearVelocityBody.X))
+	{
+		Reset();
+		return false;
+	}
+	if (Direction != SelectedDirection || State.PlaySessionId != PlaySessionId
+		|| (bHasSample && State.SimulationTimeNs < LastSimulationTimeNs))
+	{
+		Reset();
+		SelectedDirection = Direction;
+		PlaySessionId = State.PlaySessionId;
+	}
+	// Repeated render frames or pause cannot add turn evidence from one packet.
+	if (bHasSample && State.SimulationTimeNs == LastSimulationTimeNs) return false;
+	const double DeltaSeconds = bHasSample
+		? static_cast<double>(State.SimulationTimeNs - LastSimulationTimeNs) * 1.e-9 : 0.0;
+	const double HeadingChange = bHasSample
+		? FMath::FindDeltaAngleDegrees(LastHeadingDegrees, static_cast<double>(State.HeadingDegrees)) : 0.0;
+	LastSimulationTimeNs = State.SimulationTimeNs;
+	LastHeadingDegrees = State.HeadingDegrees;
+	bHasSample = true;
+	if (DeltaSeconds > 0.25 || FMath::Abs(HeadingChange) > 45.0)
+	{
+		Phase = EPhase::WaitingForTurn;
+		bSteeringSeen = false;
+		SelectedTurnDegrees = 0.0;
+		return false;
+	}
+	// Stationary steering, reverse manoeuvres and parked heading corrections
+	// are not a completed forward turn. A previously armed latch waits for motion.
+	if (State.LinearVelocityBody.X < 0.5) return false;
+	const double Side = Direction == ETurnIndicator::Left ? 1.0 : -1.0;
+	const double Steering = Side * State.SteeringAngleRad;
+	constexpr double TurnSteeringRad = 0.12;
+	constexpr double CentreSteeringRad = 0.035;
+	if (Phase == EPhase::WaitingForTurn)
+	{
+		if (Steering < -CentreSteeringRad)
+		{
+			bSteeringSeen = false;
+			SelectedTurnDegrees = 0.0;
+			return false;
+		}
+		bSteeringSeen |= Steering >= TurnSteeringRad;
+		// ENU compass heading increases right; the rack is FLU left-positive.
+		if (bSteeringSeen) SelectedTurnDegrees = FMath::Max(0.0, SelectedTurnDegrees - Side * HeadingChange);
+		if (bSteeringSeen && SelectedTurnDegrees >= 8.0) Phase = EPhase::WaitingForCentre;
+	}
+	if (Phase == EPhase::WaitingForCentre && FMath::Abs(Steering) <= CentreSteeringRad)
+	{
+		Reset();
+		return true;
+	}
+	return false;
+}
+
+void SimCoreTurnSignals::FAutoCancel::Reset()
+{
+	*this = FAutoCancel{};
+}
+
 USimCoreTurnSignals::USimCoreTurnSignals()
 {
 	PrimaryComponentTick.bCanEverTick = false;
@@ -47,7 +149,7 @@ bool USimCoreTurnSignals::IsLit(SimCoreProtocol::ETurnIndicator Direction,
 	if (!FMath::IsFinite(TimeSeconds) || TimeSeconds < 0.0) return false;
 	const bool bSelected = bHazard || (bLeft ? Direction == SimCoreProtocol::ETurnIndicator::Left
 		: Direction == SimCoreProtocol::ETurnIndicator::Right);
-	return bSelected && FMath::Fmod(TimeSeconds, 0.72) < 0.44;
+	return bSelected && FMath::Fmod(TimeSeconds + 1.e-9, SimCoreTurnSignals::PeriodSeconds) < SimCoreTurnSignals::OnSeconds;
 }
 
 void USimCoreTurnSignals::OnRegister()
@@ -92,8 +194,9 @@ void USimCoreTurnSignals::OnRegister()
 void USimCoreTurnSignals::UpdateSignal(SimCoreProtocol::ETurnIndicator Direction,
 	double TimeSeconds, bool bHazard)
 {
-	const bool bLeft = IsLit(Direction, true, TimeSeconds, bHazard);
-	const bool bRight = IsLit(Direction, false, TimeSeconds, bHazard);
+	const double PhaseTime = PhaseClock.Update(Direction, TimeSeconds, bHazard);
+	const bool bLeft = IsLit(Direction, true, PhaseTime, bHazard);
+	const bool bRight = IsLit(Direction, false, PhaseTime, bHazard);
 	bool bHasAuthoredLens = false;
 	// DeformableBody owns separate MIDs to avoid double WPO. Update its current
 	// materials as well as the source's; never replace the damage owner's MID.

@@ -111,11 +111,11 @@ bool FSignalCityGeometryContractTest::RunTest(const FString& Parameters)
 	bOk &= TestEqual(TEXT("versioned map identity"), FString(SimCoreSignalCity::MapId),
 		FString(TEXT("signal_city_v2")));
 	bOk &= TestTrue(TEXT("bounded code-generated scene"),
-		Layout.Boxes.Num() >= 180 && Layout.Boxes.Num() < 3000);
+		Layout.Boxes.Num() >= 180 && Layout.Boxes.Num() < 4000);
 	bOk &= TestTrue(TEXT("bounded dense QA route"),
-		Layout.DriveRoute.Num() >= 250 && Layout.DriveRoute.Num() < 700);
-	bOk &= TestTrue(TEXT("240m east x 200m north authoring bounds"),
-		Layout.GroundHalfExtentNorthEastM.Equals(FVector2D(100.0, 120.0), 1.0e-8));
+		Layout.DriveRoute.Num() >= 700 && Layout.DriveRoute.Num() < 1100);
+	bOk &= TestTrue(TEXT("240m east x 330m north authoring bounds"),
+		Layout.GroundHalfExtentNorthEastM.Equals(FVector2D(165.0, 120.0), 1.0e-8));
 
 	TSet<FName> Ids;
 	int32 GroundCount = 0;
@@ -150,15 +150,15 @@ bool FSignalCityGeometryContractTest::RunTest(const FString& Parameters)
 				FMath::Abs(Box.CenterEnuM.X) + EastExtent <= 120.01);
 			bOk &= TestTrue(FString::Printf(TEXT("%s remains inside north bounds"), *Id),
 				Box.CenterEnuM.Y - NorthExtent >= -20.01
-				&& Box.CenterEnuM.Y + NorthExtent <= 180.01);
+				&& Box.CenterEnuM.Y + NorthExtent <= 310.01);
 		}
 		GroundCount += Box.bGround ? 1 : 0;
 		StaticCount += Box.bStaticCollider ? 1 : 0;
 		BarrierCount += Box.Palette == EPalette::Barrier ? 1 : 0;
 	}
-	bOk &= TestTrue(TEXT("bounded dense curved ground support"), GroundCount > 100 && GroundCount < 1400);
+	bOk &= TestTrue(TEXT("bounded dense curved ground support"), GroundCount > 1400 && GroundCount < 1800);
 	bOk &= TestTrue(TEXT("curbs/buildings provide bounded static collision"),
-		StaticCount > 40 && StaticCount < 600);
+		StaticCount > 600 && StaticCount < 700);
 	bOk &= TestEqual(TEXT("no rectangular perimeter barrier"), BarrierCount, 0);
 	bOk &= TestTrue(TEXT("visual-only horizon and skyline hide the finite collision bake"),
 		BackdropCount >= 19 && FindBox(Layout, TEXT("Backdrop_HorizonGround")) != nullptr);
@@ -176,13 +176,19 @@ bool FSignalCityTopologyAndMarkingsTest::RunTest(const FString& Parameters)
 	int32 StopLineCount = 0;
 	int32 CrosswalkStripeCount = 0;
 	int32 ArrowStemCount = 0;
+	int32 NorthArrowStemCount = 0;
 	int32 NonCardinalRoadCount = 0;
 	for (const SimCoreVirtualCity::FBox& Box : Layout.Boxes)
 	{
 		IntersectionCount += IdContains(Box, TEXT("Road_Intersection_")) ? 1 : 0;
 		StopLineCount += IdContains(Box, TEXT("_StopLine")) ? 1 : 0;
 		CrosswalkStripeCount += IdContains(Box, TEXT("_Crosswalk_Stripe_")) ? 1 : 0;
-		ArrowStemCount += IdContains(Box, TEXT("_Arrow_Stem")) ? 1 : 0;
+		if(IdContains(Box,TEXT("_Arrow_Stem")))
+		{
+			const FString Id=Box.Id.ToString();
+			ArrowStemCount+=(Id.StartsWith(TEXT("Main_")) || Id.StartsWith(TEXT("Aux_")))?1:0;
+			NorthArrowStemCount+=(Id.StartsWith(TEXT("NorthAvenue_")) || Id.StartsWith(TEXT("NorthLoop_")))?1:0;
+		}
 		if (Box.Palette == EPalette::Road)
 		{
 			const double Normalized = FMath::Fmod(Box.HeadingDegrees + 360.0, 90.0);
@@ -193,6 +199,7 @@ bool FSignalCityTopologyAndMarkingsTest::RunTest(const FString& Parameters)
 	bOk &= TestEqual(TEXT("one stop line on every approach"), StopLineCount, 8);
 	bOk &= TestEqual(TEXT("one six-stripe crosswalk on every approach"), CrosswalkStripeCount, 48);
 	bOk &= TestEqual(TEXT("left straight right arrows on every approach"), ArrowStemCount, 24);
+	bOk &= TestEqual(TEXT("north avenue and return loop each mark both directions"),NorthArrowStemCount,4);
 	bOk &= TestTrue(TEXT("diagonal and asymmetric curved collectors prevent a rectangular topology"),
 		NonCardinalRoadCount >= 12);
 	EPalette MergeSurface = EPalette::Ground;
@@ -559,7 +566,7 @@ bool FSignalCityDriveRouteTest::RunTest(const FString& Parameters)
 			Length += Step;
 		}
 	}
-	bOk &= TestTrue(TEXT("short-city lap length is bounded"), Length > 430.0 && Length < 650.0);
+	bOk &= TestTrue(TEXT("expanded city lap includes the north loop"), Length > 900.0 && Length < 1100.0);
 	bOk &= TestTrue(TEXT("route traverses the central four-way intersection"), bSawMainIntersection);
 	bOk &= TestTrue(TEXT("route traverses the offset diagonal intersection"), bSawAuxiliaryIntersection);
 	bOk &= TestTrue(TEXT("route contains genuine non-cardinal travel"), bSawDiagonalHeading);
@@ -572,7 +579,9 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSignalCityCollectorLaneMergeTest,
 
 bool FSignalCityCollectorLaneMergeTest::RunTest(const FString& Parameters)
 {
-	const FLayout Layout = SimCoreSignalCity::BuildLayout();
+	// Retained exact v7 guide fixture; the current dashed paint is checked below
+	// against these continuous, noncrossing guides and their asphalt endpoints.
+	const FLayout Layout = SimCoreSignalCity::BuildSolidCollectorMergesV7Layout();
 	const FLayout Prior = SimCoreSignalCity::BuildUnmergedCollectorLanesV6Layout();
 	bool bOk = true;
 	for (const auto& Old : Prior.Boxes)
@@ -661,6 +670,112 @@ bool FSignalCityCollectorLaneMergeTest::RunTest(const FString& Parameters)
 	}
 	bOk &= TestEqual(TEXT("four joins each connect two lane dividers on both road sides"), Merges.Num(), 16);
 	return bOk;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSignalCityKoreanNorthDistrictTest,
+	"DriveIntegration.SignalCity.KoreanNorthDistrictAndDashedMerges",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSignalCityKoreanNorthDistrictTest::RunTest(const FString& Parameters)
+{
+	const FLayout Layout=SimCoreSignalCity::BuildLayout();
+	const FLayout Prior=SimCoreSignalCity::BuildSolidCollectorMergesV7Layout();
+	bool Ok=true;
+	int32 Dashes=0,Arrows=0,Signs=0;
+	for(const auto& Old:Prior.Boxes)
+	{
+		if(Old.Id==TEXT("Ground_Base") || Old.Id.ToString().Contains(TEXT("_Merge"))) continue;
+		const auto* Current=FindBox(Layout,Old.Id.ToString());
+		Ok &= TestTrue(TEXT("north addition preserves the complete tested v7 core"),Current
+			&& Current->CenterEnuM.Equals(Old.CenterEnuM,0.0) && Current->SizeM.Equals(Old.SizeM,0.0)
+			&& Current->HeadingDegrees==Old.HeadingDegrees && Current->Palette==Old.Palette
+			&& Current->bGround==Old.bGround && Current->bStaticCollider==Old.bStaticCollider);
+	}
+	TMap<FString,double> PaintedLengths,GuideLengths;
+	for(const auto& Box:Layout.Boxes)
+	{
+		const FString Id=Box.Id.ToString();
+		if(Id.Contains(TEXT("_AdvanceMerge_")) && Id.EndsWith(TEXT("_Stem"))) ++Arrows;
+		Signs+=Box.Palette==EPalette::SignBlue?1:0;
+		const int32 DashAt=Id.Find(TEXT("_Dash_"));
+		if(DashAt==INDEX_NONE || !Id.Contains(TEXT("_Merge"))) continue;
+		++Dashes;
+		const FString Prefix=Id.Left(DashAt);
+		Ok &= TestTrue(TEXT("change-permitted merge pieces are short white noncolliding dashes"),
+			Box.SizeM.X<=2.011 && Box.SizeM.Y==0.14 && Box.Palette==EPalette::Marking
+			&& !Box.bGround && !Box.bStaticCollider);
+		double Nearest=DBL_MAX,GuideStation=0,NearestStation=0;
+		for(int32 Index=0;Index<64;++Index)
+		{
+			const auto* Guide=FindBox(Prior,Prefix+FString::Printf(TEXT("_%02d"),Index));
+			if(!Guide) break;
+			const double Length=Guide->SizeM.X-0.08;
+			const FVector Half=ForwardEnu(Guide->HeadingDegrees)*(Length*0.5);
+			const FVector A=Guide->CenterEnuM-Half,B=Guide->CenterEnuM+Half;
+			const FVector Closest=FMath::ClosestPointOnSegment(Box.CenterEnuM,A,B);
+			const double Distance=FVector::Dist2D(Box.CenterEnuM,Closest);
+			if(Distance<Nearest) {Nearest=Distance;NearestStation=GuideStation+FVector::Dist2D(A,Closest);}
+			GuideStation+=Length;
+		}
+		GuideLengths.Add(Prefix,GuideStation);
+		PaintedLengths.FindOrAdd(Prefix)+=Box.SizeM.X-0.01;
+		Ok &= TestTrue(TEXT("dash lies on the verified continuous merge guide and painted half-cycle"),
+			Nearest<1.e-6 && FMath::Fmod(NearestStation,4.0)<=2.000001);
+		for(double Along:{-0.5,0.0,0.5})
+		{
+			double Top=0;
+			Ok &= TestTrue(TEXT("dash endpoints stay on actual asphalt"),QueryRoadTop(Layout,
+				Box.CenterEnuM+ForwardEnu(Box.HeadingDegrees)*((Box.SizeM.X-0.01)*Along),Top));
+		}
+	}
+	Ok &= TestTrue(TEXT("every merge guide has genuine visible gaps"),Dashes>200 && PaintedLengths.Num()==16);
+	for(const auto& Painted:PaintedLengths)
+	{
+		const double Length=GuideLengths.FindChecked(Painted.Key);
+		const double Expected=FMath::FloorToDouble(Length/4.0)*2.0+FMath::Min(FMath::Fmod(Length,4.0),2.0);
+		Ok &= TestTrue(TEXT("complete guide uses two-metre dash/two-metre gap without missing final sections"),
+			FMath::Abs(Painted.Value-Expected)<1.e-6 && Painted.Value<Length*0.7);
+	}
+	Ok &= TestEqual(TEXT("two disappearing lanes warned before each collector join"),Arrows,8);
+	Ok &= TestEqual(TEXT("both north district directions have blue guide boards"),Signs,2);
+	const auto Lane=SimCoreSignalCity::BuildNorthLoopLane();
+	Ok &= TestTrue(TEXT("north loop joins existing outbound and inbound endpoints exactly"),
+		Lane[0].Equals(FVector(2,168,0),0) && Lane.Last().Equals(FVector(-2,168,0),0));
+	double MaximumNorth=0;
+	for(int32 Index=1;Index<Lane.Num();++Index)
+	{
+		const FVector A=Lane[Index-1],B=Lane[Index];
+		const FVector Direction=(B-A).GetSafeNormal2D(),Right(Direction.Y,-Direction.X,0);
+		MaximumNorth=FMath::Max(MaximumNorth,B.Y);
+		for(double Step:{0.0,0.5,1.0}) for(double Side:{-1.6,0.0,1.6})
+		{
+			const FVector Point=FMath::Lerp(A,B,Step)+Right*Side;
+			EPalette Palette;
+			Ok &= TestTrue(TEXT("full 3.2m north traffic footprint has highest asphalt support, not a hidden kerb"),
+				QueryHighestGroundPalette(Layout,Point,Palette) && Palette==EPalette::Road);
+		}
+	}
+	Ok &= TestTrue(TEXT("new route genuinely travels beyond the old north boundary"),MaximumNorth>291.9);
+	int32 NorthCurbs=0;
+	for(const auto& Curb:Layout.Boxes)
+	{
+		if(!Curb.Id.ToString().StartsWith(TEXT("NorthLoop_")) || !Curb.bStaticCollider) continue;
+		++NorthCurbs;
+		for(double Along:{-0.30,0.0,0.30})
+		{
+			const FVector Center=Curb.CenterEnuM+ForwardEnu(Curb.HeadingDegrees)*Along;
+			for(double Reach:{0.47,1.11})
+			{
+				EPalette Left,Right;
+				const bool Both=QueryHighestGroundPalette(Layout,Center-RightEnu(Curb.HeadingDegrees)*Reach,Left)
+					&& QueryHighestGroundPalette(Layout,Center+RightEnu(Curb.HeadingDegrees)*Reach,Right);
+				Ok &= TestTrue(TEXT("every northern curb separates asphalt from raised support; no overlapping mouth sidewalks"),
+					Both && ((Left==EPalette::Road && Right==EPalette::Sidewalk)
+						|| (Right==EPalette::Road && Left==EPalette::Sidewalk)));
+			}
+		}
+	}
+	Ok &= TestEqual(TEXT("all 168 tangential north boundary sections tested"),NorthCurbs,168);
+	return Ok;
 }
 
 #endif

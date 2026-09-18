@@ -452,6 +452,7 @@ void USimCoreDriverPresentation::ApplyAuthoritativeState(
 	const SimCoreProtocol::FVehicleState& State)
 {
 	UpdateRiderState(State);
+	bPresentationFrozen = false;
 	const SimCoreDriverPresentation::FTarget Target =
 		SimCoreDriverPresentation::BuildTarget(State);
 	TargetInjuryAlpha = Target.InjuryAlpha;
@@ -587,7 +588,7 @@ void USimCoreDriverPresentation::TickComponent(const float DeltaTime,
 
 void USimCoreDriverPresentation::AdvancePresentation(const float DeltaTime)
 {
-	if (!bPresentationEnabled || !HasDriverAssets())
+	if (!bPresentationEnabled || bPresentationFrozen || !HasDriverAssets())
 	{
 		return;
 	}

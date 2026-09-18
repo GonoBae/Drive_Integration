@@ -9,23 +9,26 @@
 #include "SimCorePresentation.h"
 #include "SimCoreDeformableBody.h"
 #include "SimCoreDriverPresentation.h"
+#include "SimCoreSuspensionPresentation.h"
 #include "SimCoreTurnSignals.h"
 #include "SimCoreSedanVisualContract.h"
 #include "SimCoreTrafficSignalActor.h"
 #include "SimCoreVehicleHorn.h"
+#include "SimCoreVehicleVisualApplication.h"
 #include "SimCoreVehicleVisualProfile.h"
 #include "UObject/ConstructorHelpers.h"
 
 bool SimCoreNpcPresentation::BuildAuthoredModelOffset(
-	const FBox& Bounds, float ObbHalfHeightMeters, FVector& OutOffsetCm)
+	const FBox& Bounds, float ObbHalfHeightMeters, FVector& OutOffsetCm, float GroundClearanceCm)
 {
 	OutOffsetCm = FVector::ZeroVector;
 	if (!Bounds.IsValid || Bounds.Min.ContainsNaN() || Bounds.Max.ContainsNaN()
 		|| !FMath::IsFinite(ObbHalfHeightMeters) || ObbHalfHeightMeters <= 0.0f
+		|| !FMath::IsFinite(GroundClearanceCm) || GroundClearanceCm < 0.0f
 		|| Bounds.GetSize().GetMin() <= KINDA_SMALL_NUMBER) return false;
 	const FVector Centre = Bounds.GetCenter();
 	OutOffsetCm = FVector(-Centre.X, -Centre.Y,
-		-ObbHalfHeightMeters * 100.0 - ObbBottomAboveGroundCm - Bounds.Min.Z);
+		-ObbHalfHeightMeters * 100.0 - GroundClearanceCm - Bounds.Min.Z);
 	return !OutOffsetCm.ContainsNaN();
 }
 
@@ -54,6 +57,8 @@ ASimCoreNpcPresentationActor::ASimCoreNpcPresentationActor()
 	VehicleHorn->SetRelativeLocation(FVector(185.0, 0.0, 20.0));
 	DriverPresentation = CreateDefaultSubobject<USimCoreDriverPresentation>(TEXT("DriverPresentation"));
 	DriverPresentation->SetupAttachment(ModelRoot);
+	SuspensionPresentation = CreateDefaultSubobject<USimCoreSuspensionPresentation>(TEXT("SuspensionPresentation"));
+	SuspensionPresentation->SetupAttachment(ModelRoot);
 	static ConstructorHelpers::FObjectFinder<UStaticMesh> Cube(TEXT("/Engine/BasicShapes/Cube.Cube"));
 	UStaticMesh* SedanDriverDoor = nullptr;
 	if (FPackageName::DoesPackageExist(
@@ -111,6 +116,7 @@ ASimCoreNpcPresentationActor::ASimCoreNpcPresentationActor()
 		Wheel->SetStaticMesh(SharedWheelMesh);
 		Wheel->SetVisibility(bHasAuthoredSedan);
 		Wheels.Add(Wheel);
+		SuspensionPresentation->SetWheelHub(Index, Wheel);
 		if (bHasAuthoredSedan)
 		{
 			const FBox WheelBounds = SharedWheelMesh->GetBoundingBox();
@@ -159,29 +165,18 @@ void ASimCoreNpcPresentationActor::EndPlay(const EEndPlayReason::Type EndPlayRea
 bool ASimCoreNpcPresentationActor::ConfigureVehicleClass(
 	SimCoreProtocol::ERuntimeVehicleClass VehicleClass)
 {
-	if (VehicleClass == SimCoreProtocol::ERuntimeVehicleClass::Unspecified)
-	{
-		VehicleClass = SimCoreProtocol::ERuntimeVehicleClass::Sedan;
-	}
-	UStaticMesh* TargetBody = nullptr;
-	switch (VehicleClass)
-	{
-	case SimCoreProtocol::ERuntimeVehicleClass::Sedan: TargetBody = SedanBodyMesh; break;
-	case SimCoreProtocol::ERuntimeVehicleClass::Compact: TargetBody = CompactBodyMesh; break;
-	case SimCoreProtocol::ERuntimeVehicleClass::Truck: TargetBody = TruckBodyMesh; break;
-	case SimCoreProtocol::ERuntimeVehicleClass::Motorcycle: TargetBody = MotorcycleBodyMesh; break;
-	default: return false;
-	}
+	const SimCoreVehicleVisualApplication::FBodySelection Selection =
+		SimCoreVehicleVisualApplication::SelectBody(VehicleClass,
+			{SedanBodyMesh, CompactBodyMesh, TruckBodyMesh, MotorcycleBodyMesh});
+	VehicleClass = Selection.VehicleClass;
+	UStaticMesh* TargetBody = Selection.BodyMesh;
 	if (!TargetBody || !SharedWheelMesh) return false;
 	if (RuntimeVehicleClass == VehicleClass && Body->GetStaticMesh() == TargetBody)
 	{
 		return true;
 	}
 
-	Body->EmptyOverrideMaterials();
-	Body->SetStaticMesh(TargetBody);
-	Body->SetRelativeTransform(FTransform::Identity);
-	Body->SetVisibility(true);
+	SimCoreVehicleVisualApplication::ReplaceBodyMesh(*Body, *TargetBody);
 	DeformableBody->ClearAllMeshSections();
 	DeformableBody->SetVisibility(false);
 	DamageMaterials.Reset();
@@ -190,6 +185,7 @@ bool ASimCoreNpcPresentationActor::ConfigureVehicleClass(
 	SimCoreVehicleVisualProfile::FProfile Profile;
 	if (!SimCoreVehicleVisualProfile::Resolve(VehicleClass, Profile)) return false;
 	PresentationHalfHeightMeters = Profile.HalfHeightMeters;
+	PresentationGroundClearanceCm = Profile.NpcCollisionGroundClearanceMeters * 100.0f;
 
 	AuthoredBounds = TargetBody->GetBoundingBox();
 	for (int32 Index = 0; Index < Wheels.Num(); ++Index)
@@ -209,18 +205,21 @@ bool ASimCoreNpcPresentationActor::ConfigureVehicleClass(
 		* Profile.WheelScales[0].Z * 0.01);
 	VehicleHorn->SetRelativeLocation(FVector(AuthoredBounds.Max.X - 18.0, 0.0,
 		FMath::Clamp(AuthoredBounds.GetCenter().Z, 18.0, 80.0)));
-	TurnSignals->SetLampPositions(MakeArrayView(Profile.LampLocationsCm));
-	DriverPresentation->ConfigureVehicleClass(VehicleClass);
+	SimCoreVehicleVisualApplication::ConfigureAttachments(
+		Profile, *TurnSignals, *DriverPresentation, *SuspensionPresentation);
 	RuntimeVehicleClass = VehicleClass;
 	return AuthoredBounds.IsValid != 0;
 }
 
 bool ASimCoreNpcPresentationActor::ApplySnapshot(const SimCoreProtocol::FVehicleState& State,
 	float SnapshotAgeSeconds, float DeltaSeconds, bool bMotionAllowed,
-	float MaxExtrapolationSeconds, const FVector& PresentationOffsetCm)
+	float MaxExtrapolationSeconds, const FVector& PresentationOffsetCm,
+	SimCoreNpcPresentation::EPoseOrigin PoseOrigin)
 {
 	const bool bValid = GetWorld() && GetWorld()->IsGameWorld()
 		&& State.EntityKind == SimCoreProtocol::EEntityKind::NpcVehicle && State.EntityId != 0
+		&& (PoseOrigin == SimCoreNpcPresentation::EPoseOrigin::NpcCollisionCenter
+			|| PoseOrigin == SimCoreNpcPresentation::EPoseOrigin::PlayerCenterOfMass)
 		&& FMath::IsFinite(SnapshotAgeSeconds) && SnapshotAgeSeconds >= 0.0f
 		&& SnapshotAgeSeconds <= SimCoreTrafficSignals::SnapshotFreshnessSeconds
 		&& FMath::IsFinite(DeltaSeconds) && DeltaSeconds >= 0.0f
@@ -245,13 +244,17 @@ bool ASimCoreNpcPresentationActor::ApplySnapshot(const SimCoreProtocol::FVehicle
 		SetActorHiddenInGame(true);
 		return false;
 	}
+	// The authored rig is already CG-local. Only NPC collision-center poses need
+	// recentering; applying that shift to a player replay would lower the whole car.
 	FVector ModelOffset = FVector::ZeroVector;
-	if (!SimCoreNpcPresentation::BuildAuthoredModelOffset(
-		AuthoredBounds, PresentationHalfHeightMeters, ModelOffset))
+	if (PoseOrigin == SimCoreNpcPresentation::EPoseOrigin::NpcCollisionCenter
+		&& !SimCoreNpcPresentation::BuildAuthoredModelOffset(
+			AuthoredBounds, PresentationHalfHeightMeters, ModelOffset, PresentationGroundClearanceCm))
 	{
 		SetActorHiddenInGame(true);
 		return false;
 	}
+	bPresentationFrozen = false;
 	EntityId = State.EntityId;
 	SetActorHiddenInGame(false);
 	SetActorLocationAndRotation(Sample.ActorLocation, Sample.ActorRotation, false, nullptr, ETeleportType::TeleportPhysics);
@@ -315,7 +318,18 @@ bool ASimCoreNpcPresentationActor::ApplySnapshot(const SimCoreProtocol::FVehicle
 			}
 		}
 	}
+	SuspensionPresentation->UpdateLinks();
 	return true;
+}
+
+void ASimCoreNpcPresentationActor::FreezePresentation()
+{
+	if (bPresentationFrozen) return;
+	bPresentationFrozen = true;
+	DriverPresentation->FreezePresentation();
+	// Preserve the observed sequence/anti-spam gate so recovery cannot replay
+	// the same horn event. Lamps, wheel steer/spin and damage stay as displayed.
+	VehicleHorn->SilencePlayback();
 }
 
 void ASimCoreNpcPresentationActor::UpdateDamage(const SimCoreProtocol::FVehicleState& State)

@@ -46,7 +46,7 @@ bool FSimCoreSignalCityTrafficTopologyTest::RunTest(const FString& Parameters)
 		ValidateTrafficLayout(Layout, Error));
 	if (!bOk) { AddError(Error); return false; }
 	bOk &= TestEqual(TEXT("two independent controllers"), Layout.SignalPlans.Num(), 2);
-	bOk &= TestEqual(TEXT("base topology plus dedicated three-lane approaches"), Layout.Lanes.Num(), 58);
+	bOk &= TestEqual(TEXT("base topology plus dedicated approaches and north return loop"), Layout.Lanes.Num(), 59);
 	bOk &= TestEqual(TEXT("vehicle and pedestrian heads at both intersections"), Layout.Signals.Num(), 16);
 	int32 PedestrianHeads = 0;
 	for (const auto& Signal : Layout.Signals)
@@ -70,7 +70,7 @@ bool FSimCoreSignalCityTrafficTopologyTest::RunTest(const FString& Parameters)
 	bOk &= TestEqual(TEXT("all four approaches at both intersections are controlled"),
 		ControlledApproaches, 24);
 	bOk &= TestTrue(TEXT("groups are globally distinct per controller"),
-		Groups.Num() == 8 && Groups.Contains(101) && Groups.Contains(102) && Groups.Contains(103) && Groups.Contains(104)
+		Groups.Num() == 16 && Groups.Contains(101) && Groups.Contains(102) && Groups.Contains(103) && Groups.Contains(104)
 		&& Groups.Contains(201) && Groups.Contains(202) && Groups.Contains(203) && Groups.Contains(204));
 	bOk &= TestTrue(TEXT("clockwise collector loop crosses both signalized streets"),
 		IsClosedRoute(Layout, {1010,1011,1014,3001,2020,2021,2024,3004}));
@@ -100,7 +100,8 @@ bool FSimCoreSignalCityTrafficRejectionTest::RunTest(const FString& Parameters)
 	bOk &= TestFalse(TEXT("one group cannot be green and yellow together"),
 		ValidateTrafficLayout(Changed, Error));
 	Changed = Source;
-	Changed.SignalPlans[1].OffsetMs = 72000;
+	Changed.SignalPlans[1].OffsetMs=0;
+	for(const auto& Phase:Changed.SignalPlans[1].Phases) Changed.SignalPlans[1].OffsetMs+=Phase.DurationMs;
 	bOk &= TestFalse(TEXT("offset must remain inside its cycle"),
 		ValidateTrafficLayout(Changed, Error));
 	Changed = Source;
@@ -119,6 +120,12 @@ bool FSimCoreSignalCityTrafficRejectionTest::RunTest(const FString& Parameters)
 	Changed = Source;
 	Changed.Lanes[0].LaneChanges.Reset();
 	bOk &= TestFalse(TEXT("one-sided lane-change permission is rejected"), ValidateTrafficLayout(Changed, Error));
+	Changed=Source;
+	Changed.SignalPlans[0].Phases[1].GreenGroups.Add(107);
+	bOk &= TestFalse(TEXT("straight and protected-left permissions cannot overlap"),ValidateTrafficLayout(Changed,Error));
+	Changed=Source;
+	Changed.Signals[0].LeftGroupId=101;
+	bOk &= TestFalse(TEXT("left lens cannot alias straight permission"),ValidateTrafficLayout(Changed,Error));
 	return bOk;
 }
 
@@ -189,7 +196,7 @@ bool FSimCoreSignalCityPassingApproachesTest::RunTest(const FString& Parameters)
 		bOk &= TestTrue(TEXT("change corridor excludes entry fan and stopline approach"),
 			Change.SourceBeginM >= 14.0 && Change.TargetBeginM >= 14.0
 			&& Change.SourceEndM - Change.SourceBeginM >= 8.0);
-		bOk &= TestEqual(TEXT("neighbor uses same stopline signal"), Source->SignalGroupId, Neighbor->SignalGroupId);
+		bOk &= TestEqual(TEXT("left lane uses independently protected movement"), Neighbor->SignalGroupId,Source->SignalGroupId+6);
 		const int32 Mid = Source->PointsEnuM.Num() / 2;
 		bOk &= TestTrue(TEXT("actual centers, not just painted arrows, are 3.3m apart"),
 			FMath::IsNearlyEqual(FVector::Dist2D(Source->PointsEnuM[Mid], Neighbor->PointsEnuM[Mid]), 3.3, 1.e-6));
@@ -199,17 +206,24 @@ bool FSimCoreSignalCityPassingApproachesTest::RunTest(const FString& Parameters)
 	}
 	for (const FSignalPlan& Plan : Layout.SignalPlans)
 	{
+		uint32 CycleMs=0;
 		for (const FSignalPhase& Phase : Plan.Phases)
 		{
+			CycleMs+=Phase.DurationMs;
 			int32 VehicleGreen = 0, PedestrianGreen = 0;
 			for (const FTrafficSignal& Signal : Layout.Signals)
 			{
-				if (Signal.ControllerId != Plan.Id || !Phase.GreenGroups.Contains(Signal.GroupId)) continue;
-				Signal.Kind == ETrafficSignalKind::Vehicle ? ++VehicleGreen : ++PedestrianGreen;
+				if (Signal.ControllerId != Plan.Id) continue;
+				if(Phase.GreenGroups.Contains(Signal.GroupId))
+					Signal.Kind == ETrafficSignalKind::Vehicle ? ++VehicleGreen : ++PedestrianGreen;
+				if(Signal.LeftGroupId && Phase.GreenGroups.Contains(Signal.LeftGroupId)) ++VehicleGreen;
 			}
 			bOk &= TestTrue(TEXT("protected approach never conflicts with opposing turns or WALK"),
 				VehicleGreen <= 1 && !(VehicleGreen > 0 && PedestrianGreen > 0));
+			if(PedestrianGreen>0) bOk &= TestTrue(TEXT("WALK covers the full 23m crossing at 1m/s plus entry margin"),
+				Phase.DurationMs>=24000);
 		}
+		bOk &= TestEqual(TEXT("protected vehicle movements and accessible WALK total 116 seconds"),CycleMs,116000u);
 	}
 	return bOk;
 }

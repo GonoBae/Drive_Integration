@@ -28,6 +28,7 @@ import math
 from pathlib import Path
 import re
 import socket
+import struct
 import time
 import uuid
 
@@ -43,9 +44,41 @@ FIRST_NPC_ID = 1001
 FIRST_PEDESTRIAN_ID = 2001
 EXPECTED_NPC_COUNT = 10
 EXPECTED_PEDESTRIAN_COUNT = 8
-PEDESTRIAN_RADIUS_M = 0.35
-PEDESTRIAN_HALF_HEIGHT_M = 0.9
-PEDESTRIAN_MAX_SPEED_MPS = 1.36
+
+
+@dataclass(frozen=True)
+class PedestrianProfile:
+    half_height_m: float
+    radius_m: float
+    walking_speed_mps: float
+
+
+# Independent ID-based contract, matching pedestrian_profile.hpp. A received
+# shape must not redefine the expected body size or walking speed.
+PEDESTRIAN_PROFILES = (
+    PedestrianProfile(0.9, 0.35, 1.35),
+    PedestrianProfile(0.625, 0.22, 1.10),
+    PedestrianProfile(0.825, 0.28, 1.00),
+)
+
+
+def pedestrian_profile(entity_id):
+    require(FIRST_PEDESTRIAN_ID <= entity_id < FIRST_PEDESTRIAN_ID + EXPECTED_PEDESTRIAN_COUNT,
+            f"unexpected pedestrian entity ID {entity_id}")
+    return PEDESTRIAN_PROFILES[entity_id % len(PEDESTRIAN_PROFILES)]
+
+
+def validate_pedestrian_profile(entity):
+    profile = pedestrian_profile(entity.entity_id)
+    speed_limit = profile.walking_speed_mps + 0.01
+    require(0 <= entity.speed <= speed_limit,
+            f"pedestrian {entity.entity_id} exceeded walking speed: "
+            f"{entity.speed:.6f} m/s > {speed_limit:.6f} m/s")
+    require(abs(entity.collision_radius - profile.radius_m) < 1e-5
+            and abs(entity.collision_half_height - profile.half_height_m) < 1e-5
+            and abs(entity.collision_half_length) < 1e-8
+            and abs(entity.collision_half_width) < 1e-8,
+            f"pedestrian {entity.entity_id} collision shape changed")
 
 
 @dataclass(frozen=True)
@@ -61,7 +94,7 @@ class NpcVehicleProfile:
 NPC_VEHICLE_PROFILES = (
     NpcVehicleProfile(pb.RUNTIME_VEHICLE_CLASS_SEDAN, (2.20, 1.00, 0.75), 1.00),
     NpcVehicleProfile(pb.RUNTIME_VEHICLE_CLASS_COMPACT, (1.75, 0.86, 0.70), 1.08),
-    NpcVehicleProfile(pb.RUNTIME_VEHICLE_CLASS_TRUCK, (3.65, 1.22, 1.25), 0.72),
+    NpcVehicleProfile(pb.RUNTIME_VEHICLE_CLASS_TRUCK, (3.10, 1.05, 0.965), 0.72),
     NpcVehicleProfile(pb.RUNTIME_VEHICLE_CLASS_MOTORCYCLE, (1.10, 0.42, 0.68), 1.12),
 )
 
@@ -94,6 +127,18 @@ class Crossing:
     end: tuple
 
 
+def validate_walk_windows(crossings, plans):
+    slowest = min(profile.walking_speed_mps for profile in PEDESTRIAN_PROFILES)
+    for (controller, group), crossing in crossings.items():
+        required_seconds = math.dist(crossing.start[:2], crossing.end[:2]) / slowest + 0.2
+        phases = plans[controller][1]
+        longest_seconds = max((duration / SECOND_NS for duration, green, _ in phases
+                               if group in green), default=0.0)
+        require(longest_seconds >= required_seconds,
+                f"crossing {(controller, group)} WALK window {longest_seconds:.2f}s "
+                f"cannot serve the slowest pedestrian; needs {required_seconds:.2f}s")
+
+
 @dataclass(frozen=True)
 class SignalCitySpec:
     runtime_config: Path
@@ -113,6 +158,7 @@ class SignalCitySpec:
     authored_segments: tuple = ()
     lane_change_cells: tuple = ()
     authored_segment_index: object = None
+    measured_road: object = None
 
     @property
     def npc_ids(self):
@@ -321,9 +367,12 @@ def build_spec(runtime_config):
             f"{len(crossings) * 2}")
     require(set(crossings).issubset(expected_traffic.group_keys),
             "each pedestrian crossing must belong to its authored controller/group")
+    validate_walk_windows(crossings, expected_traffic.plans)
     for plan in network.get("signal_plans", []):
         vehicle_groups = {head["group_id"] for head in network["signals"]
                           if head["controller_id"] == plan["id"] and head["kind"] == "vehicle"}
+        vehicle_groups |= {head["left_group_id"] for head in network["signals"]
+                           if head["controller_id"] == plan["id"] and head.get("left_group_id", 0)}
         pedestrian_groups = {key[1] for key in crossings if key[0] == plan["id"]}
         for phase in plan["phases"]:
             active = set(phase["green_groups"]) | set(phase["yellow_groups"])
@@ -369,6 +418,8 @@ def build_spec(runtime_config):
 
     require(hasattr(pb.TrafficSignalState(), "signal_kind"),
             "Python protobuf is stale; regenerate vehicle_pb2.py")
+    require(hasattr(pb.EntityState(), "npc_local_bypass_active"),
+            "Python protobuf lacks local-bypass state; regenerate vehicle_pb2.py")
     authored_segments = tuple((start, end) for points in lanes.values()
                               for start, end in zip(points, points[1:]))
     lane_change_cells = (build_lane_change_cells(network, lanes)
@@ -378,7 +429,8 @@ def build_spec(runtime_config):
                           tuple(route_segments), npc_count, npc_max_speed,
                           soft_timeout, hard_timeout, map_id, npc_autonomous,
                           authored_segments, lane_change_cells,
-                          build_segment_index(authored_segments) if npc_autonomous else None)
+                          build_segment_index(authored_segments) if npc_autonomous else None,
+                          MeasuredRoad((map_package / "ground_heightfield.bin").read_bytes()))
 
 
 def position(entity):
@@ -434,6 +486,26 @@ def point_near_route(point, segments, index=None):
             continue
         if distance_to_segment(point, start, end) < PATH_TOLERANCE_M:
             return True
+    return False
+
+
+def within_route_distance(point, segments, index, maximum_distance):
+    """Exact distance gate with the existing conservative segment broadphase."""
+    if index is None:
+        return any(distance_to_segment(point, start, end) <= maximum_distance
+                   for start, end in segments)
+    x0 = math.floor((point[0] - maximum_distance) / SEGMENT_INDEX_CELL_M)
+    x1 = math.floor((point[0] + maximum_distance) / SEGMENT_INDEX_CELL_M)
+    y0 = math.floor((point[1] - maximum_distance) / SEGMENT_INDEX_CELL_M)
+    y1 = math.floor((point[1] + maximum_distance) / SEGMENT_INDEX_CELL_M)
+    visited = set()
+    for x in range(x0, x1 + 1):
+        for y in range(y0, y1 + 1):
+            for segment in index.get((x, y), ()):
+                if segment not in visited:
+                    visited.add(segment)
+                    if distance_to_segment(point, *segment) <= maximum_distance:
+                        return True
     return False
 
 
@@ -560,7 +632,102 @@ def lane_change_velocity_bounded(entity, cells, longitudinal_limit):
     return False
 
 
+class MeasuredRoad:
+    """Read the baked SIMGHF2 triangles used by the host, not lane-width guesses."""
+    def __init__(self, data):
+        require(len(data) >= 80, "measured road header is truncated")
+        (magic, version, header, self.columns, self.rows, sample_stride, cell_stride,
+         self.east, self.north, self.ce, self.cn, self.re, self.rn) = struct.unpack_from(
+             "<8s6I6d", data)
+        require((magic, version, header, sample_stride, cell_stride)
+                == (b"SIMGHF2\0", 2, 80, 20, 12), "unsupported measured road layout")
+        require(self.columns >= 2 and self.rows >= 2
+                and self.columns * self.rows <= 2_000_000, "invalid measured road grid")
+        self.cell_offset = 80 + self.columns * self.rows * 20
+        require(len(data) == self.cell_offset + (self.columns - 1) * (self.rows - 1) * 12,
+                "measured road payload size mismatch")
+        self.determinant = self.ce * self.rn - self.cn * self.re
+        require(all(math.isfinite(value) for value in
+                    (self.east, self.north, self.ce, self.cn, self.re, self.rn))
+                and abs(self.determinant) > 1e-12, "invalid measured road basis")
+        self.data = data
+
+    def support(self, east, north):
+        if not math.isfinite(east) or not math.isfinite(north):
+            return None
+        de, dn = east - self.east, north - self.north
+        u = (de * self.rn - dn * self.re) / self.determinant
+        v = (self.ce * dn - self.cn * de) / self.determinant
+        u = round(u) if abs(u - round(u)) <= 1e-9 else u
+        v = round(v) if abs(v - round(v)) <= 1e-9 else v
+        if not (0 <= u <= self.columns - 1 and 0 <= v <= self.rows - 1):
+            return None
+        col, row = min(math.floor(u), self.columns - 2), min(math.floor(v), self.rows - 2)
+        flags, material, friction = struct.unpack_from(
+            "<IIf", self.data, self.cell_offset + (row * (self.columns - 1) + col) * 12)
+        if flags != 1 or material not in (1, 2) or not math.isfinite(friction):
+            return None
+        u, v = u - col, v - row
+        if v <= u:
+            triangle, weights = ((0, 0), (1, 0), (1, 1)), (1-u, u-v, v)
+        else:
+            triangle, weights = ((0, 0), (1, 1), (0, 1)), (1-v, u, v-u)
+        height, normal = 0.0, [0.0, 0.0, 0.0]
+        for (dc, dr), weight in zip(triangle, weights):
+            valid, z, ne, nn, nz = struct.unpack_from(
+                "<I4f", self.data, 80 + ((row + dr) * self.columns + col + dc) * 20)
+            length = math.hypot(ne, nn, nz)
+            if (valid != 1 or not all(math.isfinite(value) for value in (z, ne, nn, nz))
+                    or length <= 1e-12 or nz <= 0):
+                return None
+            height += weight * z
+            for axis, value in enumerate((ne, nn, nz)):
+                normal[axis] += weight * value / length
+        length = math.hypot(*normal)
+        return (height, normal[2] / length) if length > 1e-12 else None
+
+
+def validate_local_bypass(entity, spec):
+    require(spec.npc_autonomous, "local bypass requires autonomous NPC navigation")
+    validate_npc_profile(entity)
+    values = (*position(entity), entity.heading, entity.speed,
+              entity.linear_velocity_enu.x, entity.linear_velocity_enu.y,
+              entity.linear_velocity_enu.z)
+    require(all(math.isfinite(value) for value in values), "local-bypass pose/velocity must be finite")
+    speed_limit = spec.npc_max_speed_mps * npc_vehicle_profile(entity.entity_id).speed_scale + 0.05
+    require(0 <= entity.speed <= speed_limit,
+            f"NPC {entity.entity_id} exceeded configured speed during local bypass")
+    require(abs(math.hypot(entity.linear_velocity_enu.x, entity.linear_velocity_enu.y)
+                - entity.speed) < 0.0002, "local-bypass speed disagrees with velocity")
+    require(within_route_distance(position(entity), spec.authored_segments,
+                                 getattr(spec, "authored_segment_index", None), 5.28),
+            f"NPC {entity.entity_id} local bypass exceeded its 5.25m offset envelope")
+    road = getattr(spec, "measured_road", None)
+    require(road is not None, "local bypass requires measured road support")
+    east, north, up = position(entity)
+    half_length, half_width, half_height = npc_vehicle_profile(entity.entity_id).half_extents_m
+    ground_height = up - half_height - 0.10
+    centre = road.support(east, north)
+    require(centre is not None and abs(centre[0] - ground_height) <= 0.02,
+            f"NPC {entity.entity_id} local-bypass centre lost measured road support")
+    heading = math.radians(entity.heading)
+    # At most 0.5m spacing across the real body, including all edges/midpoints.
+    rows, columns = math.ceil(half_length * 4), math.ceil(half_width * 4)
+    for row in range(rows + 1):
+        forward = half_length * (2 * row / rows - 1)
+        for column in range(columns + 1):
+            side = half_width * (2 * column / columns - 1)
+            support = road.support(east + math.sin(heading) * forward + math.cos(heading) * side,
+                                   north + math.cos(heading) * forward - math.sin(heading) * side)
+            require(support is not None and support[1] >= 0.85
+                    and abs(support[0] - ground_height) <= 0.18,
+                    f"NPC {entity.entity_id} local-bypass body left measured asphalt support")
+
+
 def validate_npc_path(entity, spec):
+    if getattr(entity, "npc_local_bypass_active", False):
+        validate_local_bypass(entity, spec)
+        return
     point = position(entity)
     if spec.npc_autonomous:
         on_lane = point_near_route(point, spec.authored_segments,
@@ -620,15 +787,49 @@ def runtime_entities(message, spec):
         else:
             require(entity.entity_kind == pb.ENTITY_KIND_PEDESTRIAN,
                     f"entity {entity.entity_id} is not a pedestrian")
-            require(0 <= entity.speed <= PEDESTRIAN_MAX_SPEED_MPS,
-                    f"pedestrian {entity.entity_id} exceeded walking speed: "
-                    f"{entity.speed:.6f} m/s > {PEDESTRIAN_MAX_SPEED_MPS:.6f} m/s")
-            require(abs(entity.collision_radius - PEDESTRIAN_RADIUS_M) < 1e-5
-                    and abs(entity.collision_half_height - PEDESTRIAN_HALF_HEIGHT_M) < 1e-5
-                    and abs(entity.collision_half_length) < 1e-8
-                    and abs(entity.collision_half_width) < 1e-8,
-                    f"pedestrian {entity.entity_id} collision shape changed")
+            require(not entity.npc_local_bypass_active,
+                    "pedestrian cannot publish NPC local-bypass state")
+            validate_pedestrian_profile(entity)
     return {entity.entity_id: entity for entity in entities}
+
+
+class NpcBypassContinuity:
+    def __init__(self, spec):
+        self.spec = spec
+        self.previous = None
+        self.started_ns = {}
+
+    def observe(self, play_id, time_ns, entities):
+        previous = self.previous
+        if previous is not None and previous[0] != play_id:
+            self.started_ns.clear()
+            previous = None
+        if previous is not None:
+            require(time_ns >= previous[1], "NPC movement time regressed within the same Play")
+        for identity in self.spec.npc_ids:
+            entity = entities[identity]
+            active = entity.npc_local_bypass_active
+            profile = npc_vehicle_profile(identity)
+            speed_limit = self.spec.npc_max_speed_mps * profile.speed_scale + 0.05
+            if previous is not None:
+                old_point, was_active = previous[2][identity]
+                if active or was_active:
+                    dt = (time_ns - previous[1]) / SECOND_NS
+                    require(planar_distance(position(entity), old_point) <= speed_limit * dt + 0.02,
+                            f"NPC {identity} local-bypass pose jumped between atomic states")
+            if active:
+                since = self.started_ns.setdefault(identity, time_ns)
+                # Entry keeps the original braking model; only the settled
+                # detour is capped at 3m/s, not the very first active frame.
+                braking = (3.0, 3.4, 2.2, 4.0)[(identity - FIRST_NPC_ID) % 4]
+                settling = max(0.0, (speed_limit - 3.0) / braking) + 0.15
+                if (time_ns - since) / SECOND_NS > settling:
+                    require(entity.speed <= 3.05, f"NPC {identity} local-bypass speed did not settle")
+            else:
+                self.started_ns.pop(identity, None)
+        self.previous = (play_id, time_ns, {
+            identity: (position(entities[identity]), entities[identity].npc_local_bypass_active)
+            for identity in self.spec.npc_ids})
 
 
 def validate_signal_kinds(message, spec):
@@ -688,6 +889,9 @@ class SignalCityController(TrafficController):
         super().__init__(connection, play_id, expected_source, spec.expected_traffic)
         self.session = "signal-city-" + uuid.uuid4().hex
         self.spec = spec
+        self.bypass_continuity = NpcBypassContinuity(spec)
+        self._validated_message = None
+        self._validated_entities = None
 
     def envelope(self):
         message = super().envelope()
@@ -720,12 +924,23 @@ class SignalCityController(TrafficController):
     async def receive_state(self):
         message = await super().receive_state()
         validate_signal_kinds(message, self.spec)
-        runtime_entities(message, self.spec)
+        entities = runtime_entities(message, self.spec)
+        self.bypass_continuity.observe(message.play_session_id, message.simulation_time_ns, entities)
+        self._validated_message = message
+        self._validated_entities = entities
         return message
+
+    def validated_entities(self, message):
+        # Callers inspect the immutable snapshot already checked on receipt.
+        # Never trust a sequence-only cache or silently accept another frame.
+        require(message is self._validated_message,
+                "runtime entities requested for an unvalidated snapshot")
+        return self._validated_entities
 
 
 async def observe_active_cycle(controller, baseline, assignments, spec):
     seen = {identity: set() for identity in spec.signal_kinds}
+    seen_left = {identity: set() for identity in spec.expected_traffic.left_groups}
     moved_npcs = set()
     moved_pedestrians = set()
     previous_moving = {identity: False for identity in spec.pedestrian_ids}
@@ -743,11 +958,13 @@ async def observe_active_cycle(controller, baseline, assignments, spec):
                 continue
             require(message.world_state.health.status == "active",
                     "20Hz heartbeat failed to maintain the control lease")
-            entities = runtime_entities(message, spec)
+            entities = controller.validated_entities(message)
             require_pedestrians_on_crossings(entities, assignments, spec)
             aspects = crossing_aspects(message)
             for head in message.world_state.traffic_signals:
                 seen[head.signal_id].add(head.aspect)
+                if head.signal_id in seen_left:
+                    seen_left[head.signal_id].add(head.left_aspect)
             for identity in spec.npc_ids:
                 if planar_distance(position(entities[identity]), baseline[identity]) > 0.05:
                     moved_npcs.add(identity)
@@ -779,11 +996,13 @@ async def observe_active_cycle(controller, baseline, assignments, spec):
                 f"signal {identity} did not publish its complete vehicle R/Y/G or pedestrian STOP/WALK cycle")
     require(moved_npcs == set(spec.npc_ids),
             f"not all configured NPCs moved: {sorted(moved_npcs)}")
+    require(all(aspects == {pb.TRAFFIC_SIGNAL_RED, pb.TRAFFIC_SIGNAL_YELLOW, pb.TRAFFIC_SIGNAL_GREEN}
+                for aspects in seen_left.values()), "protected-left arrow did not complete its own R/Y/G cycle")
     require(moved_pedestrians == set(spec.pedestrian_ids),
             f"not all configured pedestrians moved: {sorted(moved_pedestrians)}")
     print(f"PASS full Signal City cycle: {frames} atomic states; "
           f"NPCs={len(moved_npcs)}, pedestrians={len(moved_pedestrians)}, "
-          f"vehicle/pedestrian heads=8/8", flush=True)
+          f"vehicle/pedestrian heads=8/8; protected-left={len(seen_left)}", flush=True)
 
 
 async def verify_safe_stop_and_recovery(controller, assignments, spec):
@@ -796,14 +1015,14 @@ async def verify_safe_stop_and_recovery(controller, assignments, spec):
     require(all(head.aspect == pb.TRAFFIC_SIGNAL_RED
                 for head in safe.world_state.traffic_signals),
             "SafeStop did not force every vehicle/pedestrian signal red")
-    entities = runtime_entities(safe, spec)
+    entities = controller.validated_entities(safe)
     require_pedestrians_on_crossings(entities, assignments, spec)
     frozen = {identity: position(entity) for identity, entity in entities.items()}
     for _ in range(4):
         message = await asyncio.wait_for(controller.receive_state(), 1)
         require(message.world_state.health.status == "safe_stop",
                 "SafeStop did not remain observable during the freeze check")
-        current = runtime_entities(message, spec)
+        current = controller.validated_entities(message)
         for identity, entity in current.items():
             require(entity.speed == 0
                     and abs(entity.linear_velocity_enu.x) < 1e-10
@@ -825,7 +1044,7 @@ async def verify_safe_stop_and_recovery(controller, assignments, spec):
                 message = await controller.receive_state()
                 require(message.world_state.health.status == "active",
                         "recovered control lease became inactive")
-                current = runtime_entities(message, spec)
+                current = controller.validated_entities(message)
                 if any(planar_distance(position(entity), frozen[identity]) > 0.02
                        for identity, entity in current.items()):
                     return message
@@ -850,7 +1069,7 @@ async def exercise(url, process, source, spec):
         await reset_to_all_red(controller)
         initial = await wait_state(
             controller, lambda message: message.world_state.health.status == "awaiting_control")
-        initial_entities = runtime_entities(initial, spec)
+        initial_entities = controller.validated_entities(initial)
         require(all(entity.speed == 0 for entity in initial_entities.values()),
                 "new PIE dynamic entities must start stationary")
         baseline = {identity: position(entity)
@@ -875,7 +1094,7 @@ async def exercise(url, process, source, spec):
         await reset_to_all_red(controller)
         reset = await wait_state(
             controller, lambda message: message.world_state.health.status == "awaiting_control")
-        reset_entities = runtime_entities(reset, spec)
+        reset_entities = controller.validated_entities(reset)
         for identity, entity in reset_entities.items():
             require(entity.speed == 0 and all(abs(actual - expected) < 1e-6
                     for actual, expected in zip(position(entity), baseline[identity])),

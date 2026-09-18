@@ -182,6 +182,27 @@ void shared_contact_policy_agrees_across_tick_rates()
         }
     }
 }
+void varied_profiles_keep_matching_mass_and_support()
+{
+    for (const std::uint32_t id : {2001u, 2002u, 2003u}) {
+        const auto profile = simcore_host::pedestrian_profile(id);
+        simcore_host::PedestrianImpactState body;
+        body.configure(id);
+        require(std::abs(body.support().support_height_m - profile.half_height_m) < 1e-9,
+            "standing support must match the selected capsule height");
+        body.contact(1, profile.mass_kg, {0,1}, profile.half_height_m, 0);
+        require(!body.downed(), "one m/s shove remains below each profile's balance threshold");
+        body.contact(2, profile.mass_kg * 4.0, {0,1}, profile.half_height_m, 0);
+        require(body.downed(), "profile mass scales the collision momentum needed to fall");
+        for (int i = 0; i < 720; ++i) body.tick(1.0 / 120.0, 0, false);
+        for (int i = 0; i < 720; ++i) body.tick(1.0 / 120.0, 0, true);
+        require(!body.downed() && std::abs(body.center_up_m() - profile.half_height_m) < 1e-6,
+            "get-up returns each profile to its own standing centre, not the adult height");
+        body.reset();
+        require(std::abs(body.dimensions().mass_kg - profile.mass_kg) < 1e-9,
+            "reset preserves the assigned profile mass");
+    }
+}
 }
 int main()
 {
@@ -190,6 +211,7 @@ int main()
         elevated_body_falls_under_gravity_and_anchors_to_ground();
         shared_contact_policy_agrees_across_tick_rates();
         contact_height_and_vehicle_support();
+        varied_profiles_keep_matching_mass_and_support();
         std::cout << "pedestrian_impact_tests: passed\n"; return 0;
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }
