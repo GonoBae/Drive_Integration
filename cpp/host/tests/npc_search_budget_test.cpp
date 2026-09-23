@@ -96,7 +96,7 @@ struct Harness {
             simcore::Envelope frame;
             require(frame.ParseFromString(bytes) && frame.has_world_state(), "host must publish atomic world state");
             health = frame.world_state().health().status();
-        }, {}, {}}) {}
+        }, {}}) {}
 
     simcore::Envelope envelope()
     {

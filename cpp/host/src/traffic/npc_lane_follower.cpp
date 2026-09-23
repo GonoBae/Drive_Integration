@@ -593,7 +593,8 @@ void NpcLaneFollower::stop(NpcLaneStopReason reason, bool safety_clamped) noexce
 const NpcLaneFollowerState& NpcLaneFollower::step(
     double dt_seconds, std::span<const TrafficSignalSnapshot> signals,
     bool enabled, std::optional<double> blocked_distance_m,
-    double local_speed_limit_mps, double extra_stop_margin_m)
+    double local_speed_limit_mps, double extra_stop_margin_m,
+    NpcLongitudinalDynamics* dynamics)
 {
     state_.safety_clamped = false;
     if (route_.empty()) { stop(NpcLaneStopReason::Uninitialized, false); return state_; }
@@ -616,6 +617,12 @@ const NpcLaneFollowerState& NpcLaneFollower::step(
         return state_;
     }
     const double clearance = config_.front_extent_m + config_.stop_margin_m + extra_stop_margin_m;
+    const double braking_limit = dynamics
+        ? dynamics->braking_limit_mps2(config_.braking_mps2) : config_.braking_mps2;
+    if (!std::isfinite(braking_limit) || braking_limit <= 0.0) {
+        stop(NpcLaneStopReason::InvalidInput, true);
+        return state_;
+    }
     const double obstacle_stop = blocked_distance_m
         ? progress_m_ + std::max(0.0, *blocked_distance_m - clearance)
         : std::numeric_limits<double>::infinity();
@@ -649,7 +656,7 @@ const NpcLaneFollowerState& NpcLaneFollower::step(
                 const double upcoming_limit = std::min(config_.max_speed_mps, lane.speed_limit_mps);
                 if (start > progress_m_ + epsilon && upcoming_limit < desired) {
                     desired = std::min(desired, braking_envelope(start - progress_m_,
-                        upcoming_limit, config_.braking_mps2, h));
+                        upcoming_limit, braking_limit, h));
                 }
                 if (lane.signal_group_id != 0 && end > committed_stopline_m_ + epsilon
                     && !green(lane.signal_group_id, signals, elapsed)) {
@@ -660,18 +667,24 @@ const NpcLaneFollowerState& NpcLaneFollower::step(
         }
         const double remaining = stop_at - progress_m_;
         if (std::isfinite(stop_at)) {
-            desired = std::min(desired, braking_envelope(remaining, 0.0, config_.braking_mps2, h));
+            desired = std::min(desired, braking_envelope(remaining, 0.0, braking_limit, h));
         }
         const double old_speed = state_.speed_mps;
-        const double rate = desired >= old_speed ? config_.acceleration_mps2 : config_.braking_mps2;
-        double next_speed = old_speed + std::clamp(desired - old_speed, -rate * h, rate * h);
+        const double rate = desired >= old_speed ? config_.acceleration_mps2 : braking_limit;
+        double next_speed = dynamics
+            ? dynamics->speed_after_step(old_speed, desired, config_.acceleration_mps2, braking_limit, h)
+            : old_speed + std::clamp(desired - old_speed, -rate * h, rate * h);
+        if (!std::isfinite(next_speed) || next_speed < 0.0) {
+            stop(NpcLaneStopReason::InvalidInput, true);
+            break;
+        }
         double advance = next_speed * h;
         bool at_stop = false;
         if (std::isfinite(stop_at) && (advance >= remaining || remaining <= stop_epsilon_m)) {
             advance = std::max(0.0, remaining);
             next_speed = 0.0;
             at_stop = true;
-            if (old_speed > config_.braking_mps2 * h + epsilon) { state_.safety_clamped = true; }
+            if (old_speed > braking_limit * h + epsilon) { state_.safety_clamped = true; }
         }
         const auto next = sample_at(progress_m_ + advance);
         if (!next) { stop(NpcLaneStopReason::NoGround, true); break; }
@@ -685,7 +698,16 @@ const NpcLaneFollowerState& NpcLaneFollower::step(
         state_.stopline_committed = committed_lane_id_ != 0 && progress_m_ < committed_until_m_ - epsilon;
         state_.committed_lane_id = state_.stopline_committed ? committed_lane_id_ : 0;
         elapsed += h;
-        if (at_stop) { break; }
+        if (at_stop) {
+            // No route progress remains, but a running engine still idles for
+            // the unused part of this tick. Never skip fuel time at a stopline.
+            while (dynamics && elapsed < dt_seconds - epsilon) {
+                const double idle_step = std::min(dt_seconds - elapsed, 1.0 / 60.0);
+                dynamics->speed_after_step(0.0, 0.0, config_.acceleration_mps2, braking_limit, idle_step);
+                elapsed += idle_step;
+            }
+            break;
+        }
     }
     return state_;
 }

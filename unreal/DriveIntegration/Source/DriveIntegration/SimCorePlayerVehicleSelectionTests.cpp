@@ -8,6 +8,7 @@
 #include "Misc/AutomationTest.h"
 #include "SimCoreClientComponent.h"
 #include "SimCoreDriverPresentation.h"
+#include "SimCoreVehicleVisualProfile.h"
 
 namespace
 {
@@ -136,6 +137,18 @@ bool FSimCorePlayerVehicleHelloValidationTest::RunTest(const FString& Parameters
 		Client->ValidateServerHello(Hello, Error));
 	Ok &= TestTrue(TEXT("rejection identifies the missing selection capability"),
 		Error.Contains(TEXT("player-vehicle-selection.v1")));
+	Hello.Capabilities.Add(TEXT("player-vehicle-selection.v1"));
+	FString CatalogCapability;
+	Ok &= TestTrue(TEXT("client catalog capability available"),
+		SimCoreVehicleVisualProfile::CatalogCapability(CatalogCapability, Error));
+	Hello.Capabilities.Add(CatalogCapability);
+	Ok &= TestTrue(TEXT("matching shared catalog accepted"), Client->ValidateServerHello(Hello, Error));
+	Hello.Capabilities.Last() = TEXT("vehicle-catalog-fnv1a64-0000000000000000");
+	Ok &= TestFalse(TEXT("mismatched catalog rejected before controls"), Client->ValidateServerHello(Hello, Error));
+	Ok &= TestTrue(TEXT("catalog mismatch explained"), Error.Contains(TEXT("vehicle catalog")));
+	Hello.Capabilities.Last() = CatalogCapability;
+	Hello.Capabilities.Add(TEXT("vehicle-catalog-fnv1a64-1111111111111111"));
+	Ok &= TestFalse(TEXT("multiple catalog identities rejected"), Client->ValidateServerHello(Hello, Error));
 	return Ok;
 }
 

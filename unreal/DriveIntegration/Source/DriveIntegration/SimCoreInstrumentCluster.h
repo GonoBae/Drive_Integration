@@ -6,6 +6,8 @@
 #include "SimCoreProtocol.h"
 #include "SimCoreInstrumentCluster.generated.h"
 
+class AExternalVehiclePawn;
+
 namespace SimCoreInstrumentCluster
 {
 	struct FLayout
@@ -61,6 +63,10 @@ public:
 
 private:
 	void DrawCluster(const SimCoreInstrumentCluster::FDisplayState& Display);
+	void DrawGarage(const AExternalVehiclePawn& Vehicle);
+	void DrawGarageText(const FString& Text, const FLinearColor& Color,
+		float X, float Y, float Width, UFont* Font, float Scale,
+		float LineHeight, int32 MaxLines = 1);
 	void DrawCenteredText(
 		const FString& Text,
 		const FLinearColor& Color,

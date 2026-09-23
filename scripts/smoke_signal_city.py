@@ -35,6 +35,7 @@ import uuid
 import websockets
 
 from smoke_host import child_host, connect_child
+from runtime_vehicle_catalog import checked_catalog_capability
 from smoke_traffic import (SECOND_NS, ROOT, TrafficController, heartbeat,
                            network_expectations, pb, require,
                            reset_to_all_red, wait_state)
@@ -915,6 +916,7 @@ class SignalCityController(TrafficController):
         request.hello.build = "signal-city-smoke-v2"
         request.hello.schema = server.hello.schema
         request.hello.capabilities.extend([
+            checked_catalog_capability(server.hello.capabilities),
             "world-state.v2", "control.v2", "simulation-reset.v1",
             "map-package-checksum.v1", "world-health.v1", "traffic-signals.v1",
             "pedestrian-signals.v1",

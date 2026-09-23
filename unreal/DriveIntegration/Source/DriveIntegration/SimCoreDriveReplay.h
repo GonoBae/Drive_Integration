@@ -10,7 +10,8 @@ class ASimCoreNpcPresentationActor;
 namespace SimCoreDriveReplay
 {
 	inline constexpr int32 MaxFrames = 36000;
-	inline constexpr TCHAR FormatName[] = TEXT("simcore-drive-replay-v2");
+	inline constexpr TCHAR FormatName[] = TEXT("simcore-drive-replay-v3");
+	inline constexpr TCHAR LegacyV2FormatName[] = TEXT("simcore-drive-replay-v2");
 	inline constexpr TCHAR LegacyFormatName[] = TEXT("simcore-drive-replay-v1");
 
 	struct FFrame
@@ -34,9 +35,12 @@ namespace SimCoreDriveReplay
 	{
 		FString MapChecksum;
 		FString PlaySessionId;
+		FString VehicleCatalogChecksum;
+		FString VehicleLoadoutId;
 		TArray<FFrame> Frames;
 
 		void Reset();
+		bool MatchesRecordingIdentity(const SimCoreProtocol::FVehicleState& State) const;
 		bool Capture(const SimCoreProtocol::FVehicleState& State);
 		double DurationSeconds() const;
 	};
@@ -47,6 +51,8 @@ namespace SimCoreDriveReplay
 	DRIVEINTEGRATION_API FString SerializeCsv(const FTrack& Track);
 	DRIVEINTEGRATION_API bool ParseCsv(
 		const FString& Csv, FTrack& OutTrack, FString& OutError);
+	DRIVEINTEGRATION_API bool ValidateCatalogIdentity(
+		const FTrack& Track, const FString& CurrentChecksum, FString& OutError);
 }
 
 /** Records accepted authoritative snapshots and replays them as a visual ghost. */

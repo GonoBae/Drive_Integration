@@ -386,6 +386,21 @@ void test_optional_lane_npc_options_are_strict_and_overridable()
 
 } // namespace
 
+void test_vehicle_catalog_path_precedence()
+{
+    TemporaryConfig configured(replace_config_value(read_file(SIMCORE_TEST_RUNTIME_CONFIG_PATH),
+        "vehicle_catalog", "profiles/catalog.json"));
+    const auto loaded = simcore_host::parse_runtime_options({"--runtime-config", configured.path.string()}, defaults());
+    require(loaded.vehicle_catalog_path == (configured.path.parent_path() / "profiles/catalog.json").lexically_normal(),
+            "vehicle catalog must resolve relative to runtime config, not cwd");
+    const auto overridden = simcore_host::parse_runtime_options(
+        {"--runtime-config", configured.path.string(), "--vehicle-catalog", "custom/catalog.json"}, defaults());
+    require(overridden.vehicle_catalog_path == std::filesystem::path("custom/catalog.json"),
+            "explicit catalog CLI must override configured path");
+    require_rejected([] { (void)simcore_host::parse_runtime_options(
+        {"--vehicle-catalog", "a", "--vehicle-catalog", "b"}, defaults()); }, "duplicate catalogs must fail");
+}
+
 int main()
 {
     try {
@@ -399,6 +414,7 @@ int main()
         test_help_is_available_and_not_mixed_with_runtime_changes();
         test_optional_traffic_config_and_cli();
         test_optional_lane_npc_options_are_strict_and_overridable();
+        test_vehicle_catalog_path_precedence();
         std::cout << "Runtime options tests passed\n";
         return 0;
     } catch (const std::exception& error) {

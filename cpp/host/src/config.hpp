@@ -7,10 +7,6 @@ namespace Config {
     // Protocol
     inline constexpr const char* SOURCE_ID = "simcore-cpp-host";
 
-    // Optional ZMQ observer (→ frozen Python Relay). The default build does
-    // not compile or bind this transport.
-    inline constexpr const char* ZMQ_BIND_ADDR = "tcp://localhost:5555";
-
     // WebSocket Server (← Unreal input)
     inline constexpr unsigned short WS_PORT = 9000;
 

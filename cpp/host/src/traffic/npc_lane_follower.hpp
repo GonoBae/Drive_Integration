@@ -57,6 +57,16 @@ struct NpcLaneFollowerState : NpcLaneSample {
     bool safety_clamped = false;
 };
 
+// Optional propulsion authority. Route/signal/obstacle constraints still own
+// the target speed and emergency stop; an engine can only provide less motion.
+class NpcLongitudinalDynamics {
+public:
+    virtual ~NpcLongitudinalDynamics() = default;
+    [[nodiscard]] virtual double braking_limit_mps2(double requested) const = 0;
+    virtual double speed_after_step(double current_speed, double desired_speed,
+        double acceleration_limit, double braking_limit, double dt_seconds) = 0;
+};
+
 // Pure deterministic kinematic route controller: no sockets, clock, SDK,
 // threads, random selection, collision ownership or Ego physics dependencies.
 class NpcLaneFollower {
@@ -104,7 +114,8 @@ public:
         double dt_seconds, std::span<const TrafficSignalSnapshot> signals,
         bool enabled = true,
         std::optional<double> blocked_distance_m = std::nullopt,
-        double local_speed_limit_mps = 55.6, double extra_stop_margin_m = 0.0);
+        double local_speed_limit_mps = 55.6, double extra_stop_margin_m = 0.0,
+        NpcLongitudinalDynamics* dynamics = nullptr);
 
     [[nodiscard]] const NpcLaneFollowerState& state() const noexcept { return state_; }
     [[nodiscard]] const NpcLaneFollowerConfig& config() const noexcept { return config_; }

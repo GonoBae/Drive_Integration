@@ -14,7 +14,8 @@
 증빙에 개인 결제정보·계정 토큰을 포함하지 않는다. 공개 문서에는 출처와 허용 범위만
 남기고 영수증 등 개인정보는 별도 비공개 위치로 관리한다.
 
-배경 범위와 작업 순서는 [배경 제작 계획](../04_environment_plan.md)을 따른다.
+배경의 현재 범위는 [시스템 구조](../architecture.md), 수정 절차는
+[Signal City 안내](../guides/signal_city_quickstart.md)를 따른다.
 
 ## 자체 제작 blockout — 2026-08-31
 
@@ -42,7 +43,7 @@ Editor/Game compile, geometry Automation, 저장 에셋 재로드 검증과 실�
 cook/패키징과 최종 1080p 성능 인수는 남아 있다. 실내·유리·문·기능성 등화류는
 9/4 후속에서 구현했으며 아래에 현재 상태를 기록한다.
 수동 편집 모델은 generator로 덮어쓰지 않는다.
-[제작·재현·검증 안내](../vehicle_driving_refinement.md).
+[기존 제작·검증 기록의 보관 위치](../README.md#이전-자료).
 
 ## 현재 차량 에셋 — 2026-09-04~05
 
@@ -75,7 +76,7 @@ NPC뿐 아니라 9/5부터 플레이어 차종 선택에도 사용합니다. 현
 | 항목 | 기록 |
 |---|---|
 | 제공자·이름 | Epic Games, UE 5.6 Manny/Quinn mannequin |
-| 설치 원본 | `B:/Epic Games/UE_5.6/Templates/TemplateResources/High/Characters/Content/Mannequins` |
+| 설치 원본 | `<UE_5.6>/Templates/TemplateResources/High/Characters/Content/Mannequins` (`<UE_5.6>`은 엔진 설치 폴더) |
 | 프로젝트 경로 | `/Game/Characters/Mannequins` |
 | 반입 범위 | 25개 `.uasset`, 약 80MB. 선택 메시·공유 스켈레톤·rig/PhysicsAsset·재질/텍스처·idle/forward walk 의존성 |
 | 원본 변경 | 출처 기록 기준 원본 파일을 그대로 복사했습니다. template 맵·게임플레이 코드는 반입하지 않았습니다. |
@@ -93,5 +94,5 @@ Samples·Templates 콘텐츠를 Examples로 정의하고, 5(b)에서 소스·오
 
 9/5까지 Editor 빌드·자동 검사는 통과했으나, 최신 차종의 비율·문과 손발 동작·충돌 후
 표시 자연스러움은 최종 플레이 확인이 남아 있습니다. 자동 검사 통과와 배포·성능 인수는
-별도로 관리합니다. [9/4 작업 기록](../worklogs/2026-09-04.md),
-[9/5 작업 기록](../worklogs/2026-09-05.md).
+별도로 관리합니다. [현재 검증 상태](../status.md),
+[이전 제작 기록](../README.md#이전-자료)을 참고합니다.

@@ -30,6 +30,7 @@ const std::unordered_map<std::string, CliSpecification>& cli_specifications()
         {"--record-ticks", {"record_ticks", true}},
         {"--verify-physics-replay", {"verify_physics_replay", true}},
         {"--vehicle-config", {"vehicle_config", true}},
+        {"--vehicle-catalog", {"vehicle_catalog", true}},
         {"--map-package", {"map_package", true}},
         {"--traffic-network", {"traffic_network", true}},
         {"--npc-route", {"npc_route", true}},
@@ -118,6 +119,8 @@ void apply_cli_option(RuntimeOptions& options, const CliOption& option)
     if (option.canonical_key == "vehicle_config") {
         options.vehicle_config_path = require_nonempty_path(
             "vehicle_config", require_value());
+    } else if (option.canonical_key == "vehicle_catalog") {
+        options.vehicle_catalog_path = require_nonempty_path("vehicle_catalog", require_value());
     } else if (option.canonical_key == "record_physics") {
         options.record_physics_path = require_nonempty_path("record_physics", require_value());
     } else if (option.canonical_key == "verify_physics_replay") {

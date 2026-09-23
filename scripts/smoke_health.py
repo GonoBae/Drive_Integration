@@ -10,7 +10,6 @@ import asyncio
 from datetime import datetime
 from pathlib import Path
 import socket
-import sys
 import time
 import uuid
 
@@ -18,10 +17,10 @@ import websockets
 from websockets.exceptions import ConnectionClosed
 
 from smoke_host import child_host, connect_child
+from generated import vehicle_pb2 as pb
+from runtime_vehicle_catalog import checked_catalog_capability
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "python" / "relay_server" / "generated"))
-import vehicle_pb2 as pb  # noqa: E402
 
 
 def require(condition, message):
@@ -39,6 +38,7 @@ class Controller:
         self.checksum = ""
         self.last_world_sequence = 0
         self.last_control_sent_at = 0
+        self.server_capabilities = []
 
     def envelope(self):
         self.sequence += 1
@@ -59,20 +59,25 @@ class Controller:
         require(server.source_id == self.expected_source, "port does not belong to our isolated host")
         require(server.schema_version == 2, "schema mismatch")
         require("world-health.v1" in server.hello.capabilities, "Health capability missing")
+        self.server_capabilities = list(server.hello.capabilities)
         self.checksum = server.map_package_checksum
         request = self.envelope()
         request.hello.build = "health-smoke-v1"
         request.hello.schema = server.hello.schema
         request.hello.capabilities.extend([
+            checked_catalog_capability(server.hello.capabilities),
             "world-state.v2", "control.v2", "simulation-reset.v1",
             "map-package-checksum.v1", "world-health.v1",
+            "vehicle-loadout.v1",
+            "vehicle-parts.v1",
         ])
         await self.ws.send(request.SerializeToString())
 
-    async def reset(self):
+    async def reset(self, loadout_id=""):
         request = self.envelope()
         request.simulation_reset.play_session_id = self.play_id
         request.simulation_reset.client_time_ns = time.monotonic_ns()
+        request.simulation_reset.requested_loadout_id = loadout_id
         await self.ws.send(request.SerializeToString())
 
     async def control(self, estop=False):
@@ -170,10 +175,52 @@ async def exercise(url, process, expected_source):
         print("PASS EStop remains latched after normal input")
 
 
+async def exercise_loadouts(url, process, expected_source):
+    play_id = "garage-play-" + uuid.uuid4().hex
+    initial_fuel = None
+    # Exact same Play/loadout is a reconnect, while a new Play replaces parts.
+    # Frozen catalog fixture: standard preset with only its front tire replaced
+    # by the comfort tire. C++ and Unreal tests share this versioned encoding.
+    custom = "parts_v1_01_0504070401080002"
+    selections = (("sedan_modular_standard", False), ("sedan_modular_standard", True),
+                  (custom, False), (custom, True), ("sedan_modular_comfort", False), ("", False))
+    for loadout, reconnect in selections:
+        if not reconnect:
+            play_id = "garage-play-" + uuid.uuid4().hex
+        connection = await connect_child(url, process, close_timeout=10)
+        try:
+            controller = Controller(connection, play_id, expected_source)
+            await controller.hello()
+            require("vehicle-loadout.v1" in controller.server_capabilities, "loadout capability missing")
+            if loadout.startswith("parts_v1_"):
+                require("vehicle-parts.v1" in controller.server_capabilities, "individual parts capability missing")
+            await controller.reset(loadout)
+            await controller.wait_status("awaiting_control")
+            await controller.control()
+            await controller.wait_status("active")
+            state = await asyncio.wait_for(controller.receive_state(), 3)
+            while state.play_session_id != play_id:
+                state = await asyncio.wait_for(controller.receive_state(), 3)
+            ego = next(entity for entity in state.world_state.entities
+                       if entity.entity_kind == pb.ENTITY_KIND_EGO_VEHICLE)
+            require(ego.vehicle_loadout_id == loadout, "server did not acknowledge selected loadout")
+            if loadout:
+                require(69.9 <= ego.fuel <= 70, "modular fuel must use the selected tank")
+                if reconnect:
+                    require(ego.fuel <= initial_fuel, "reconnect refilled the fuel tank")
+                initial_fuel = ego.fuel
+            else:
+                require(ego.fuel == 100, "default selection did not restore legacy fuel")
+            print(f"PASS loadout={loadout or 'default'} reconnect={reconnect} fuel={ego.fuel:.5f}%")
+        finally:
+            await connection.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--map-package", type=Path, default=ROOT / "map_packages/landscape_local_v1")
     parser.add_argument("--host", type=Path, default=ROOT / "cpp/host/build/Release/simcore_publisher.exe")
+    parser.add_argument("--vehicle-loadouts", action="store_true", help="check garage selection and reconnect over real WebSocket")
     args = parser.parse_args()
     require(args.host.is_file(), f"build the host first: {args.host}")
     require((args.map_package / "manifest.cfg").is_file(), "map package manifest missing")
@@ -194,8 +241,9 @@ def main():
             (log_dir / (stem + ".stderr.log")).open("wb") as stderr, \
             child_host(command, cwd=ROOT, stdout=stdout, stderr=stderr) as process:
         print(f"Isolated server PID={process.pid} port={port}; logs={log_dir / stem}")
-        asyncio.run(exercise(f"ws://127.0.0.1:{port}", process, expected_source))
-        print("PASS Health WebSocket smoke (isolated child only)")
+        check = exercise_loadouts if args.vehicle_loadouts else exercise
+        asyncio.run(check(f"ws://127.0.0.1:{port}", process, expected_source))
+        print("PASS WebSocket smoke (isolated child only)")
 
 
 if __name__ == "__main__":

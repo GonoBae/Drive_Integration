@@ -6,13 +6,14 @@ Unreal `/Game/SignalCity/Maps/L_SignalCity`에서 측정한 로컬 ENU MapPackag
 데이터로 간주하지 않는다.
 
 실행·생성·수동 인수 절차는
-[signal city 빠른 시작](../../docs/signal_city_quickstart.md), traffic schema와 fail-closed
-규칙은 [차선·신호 계약](../../docs/traffic_network_signals.md)을 따른다.
+[signal city 빠른 시작](../../docs/guides/signal_city_quickstart.md), traffic schema와 fail-closed
+규칙은 [차선·신호 계약](../../docs/reference/traffic_network_signals.md)을 따른다.
 
 ## 검증된 생성물
 
 2026-09-08 v7 원본 검사·백업 후 북부 확장 v8 저장, Ground Bake와 traffic export로 생성한 값이다.
-차량·보행자 전체 자동/PIE 인수는 해당 실행의 작업일지에서 별도로 확인한다.
+현재 자동 검증·수동 인수 상태는 [검증 현황](../../docs/status.md)에서 확인하며,
+당시 실행의 작업일지는 [이전 자료](../../docs/README.md#이전-자료)에 보관한다.
 
 | 항목 | 값 |
 |---|---:|
@@ -88,12 +89,13 @@ ValidateOnly**다.
   종료하지 않는다.
 
 전체 복사 가능한 명령은
-[빠른 시작의 빌드와 생성 순서](../../docs/signal_city_quickstart.md#빌드와-생성-순서)에만
+[빠른 시작의 빌드와 생성 순서](../../docs/guides/signal_city_quickstart.md#빌드와-생성-순서)에만
 유지한다.
 
 ## 최초 생성 검증 이력 (2026-09-02)
 
-재생성 결과는 다음 로그에서 확인했다.
+재생성 결과는 다음 로그에서 확인했다. 아래는 실행 당시의 경로이며,
+과거 로그의 보관 위치는 [이전 자료](../../docs/README.md#이전-자료)에서 확인한다.
 
 - `runtime_logs/ue-signal-city-create-20260902-r4.log`
 - `runtime_logs/ue-signal-city-traffic-export-20260902-r4.log`

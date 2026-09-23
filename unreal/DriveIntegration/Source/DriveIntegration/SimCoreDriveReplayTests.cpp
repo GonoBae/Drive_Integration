@@ -88,7 +88,172 @@ bool FSimCoreDriveReplayRoundTripTest::RunTest(const FString& Parameters)
 		Legacy.Frames.IsValidIndex(0) ? Legacy.Frames[0].RuntimeVehicleClass
 			: SimCoreProtocol::ERuntimeVehicleClass::Unspecified,
 		SimCoreProtocol::ERuntimeVehicleClass::Sedan);
+	Track.VehicleCatalogChecksum = TEXT("fnv1a64:0123456789abcdef");
+	FTrack WithCatalog;
+	bOk &= TestTrue(TEXT("catalog-aware v3 header parses"), ParseCsv(SerializeCsv(Track), WithCatalog, Error));
+	bOk &= TestEqual(TEXT("recorded catalog identity retained"), WithCatalog.VehicleCatalogChecksum, Track.VehicleCatalogChecksum);
+	bOk &= TestTrue(TEXT("same catalog may replay"), ValidateCatalogIdentity(WithCatalog, Track.VehicleCatalogChecksum, Error));
+	bOk &= TestFalse(TEXT("changed catalog cannot silently reinterpret old poses"),
+		ValidateCatalogIdentity(WithCatalog, TEXT("fnv1a64:ffffffffffffffff"), Error));
+	bOk &= TestTrue(TEXT("old track remains explicitly unverifiable but readable"),
+		ValidateCatalogIdentity(Legacy, Track.VehicleCatalogChecksum, Error));
+	bOk &= TestTrue(TEXT("v1 replay defaults to the catalog loadout"), Legacy.VehicleLoadoutId.IsEmpty());
+	const FString LegacyV2Row = TEXT("1000000000,10,0,0,0.5,20,10,0,359,0,0,22,2.2,1,0.75,3\n");
+	for (const FString& Header : {
+		FString(TEXT("simcore-drive-replay-v2,fnv1a64:0123456789abcdef,legacy-play\n")),
+		FString(TEXT("simcore-drive-replay-v2,fnv1a64:0123456789abcdef,legacy-play,fnv1a64:0123456789abcdef\n"))})
+	{
+		FTrack LegacyV2;
+		bOk &= TestTrue(TEXT("v2 replay with or without catalog remains readable"), ParseCsv(Header + LegacyV2Row, LegacyV2, Error));
+		bOk &= TestTrue(TEXT("v2 replay defaults to the catalog loadout"), LegacyV2.VehicleLoadoutId.IsEmpty());
+		bOk &= TestTrue(TEXT("v2 selected class is preserved"), LegacyV2.Frames.Num() == 1
+			&& LegacyV2.Frames[0].RuntimeVehicleClass == SimCoreProtocol::ERuntimeVehicleClass::Truck);
+	}
 	return bOk;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSimCoreDriveReplayLoadoutIdentityTest,
+	"DriveIntegration.Replay.ImmutableLoadoutIdentity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FSimCoreDriveReplayLoadoutIdentityTest::RunTest(const FString& Parameters)
+{
+	using namespace SimCoreDriveReplay;
+	SimCoreProtocol::FVehicleState State;
+	State.Sequence = 1;
+	State.SimulationTimeNs = 1'000'000'000;
+	State.MapPackageChecksum = TEXT("fnv1a64:0123456789abcdef");
+	State.PlaySessionId = TEXT("loadout-replay-session");
+	State.VehicleLoadoutId = TEXT("sedan_comfort");
+	State.RuntimeVehicleClass = SimCoreProtocol::ERuntimeVehicleClass::Sedan;
+	State.CollisionHalfLengthMeters = 2.2f;
+	State.CollisionHalfWidthMeters = 1.0f;
+	State.CollisionHalfHeightMeters = .75f;
+	FTrack Track;
+	Track.VehicleCatalogChecksum = TEXT("fnv1a64:abcdef0123456789");
+	bool Ok = TestTrue(TEXT("first loadout frame captured"), Track.Capture(State));
+	++State.Sequence;
+	State.SimulationTimeNs += 100'000'000;
+	Ok &= TestTrue(TEXT("same loadout continues recording"), Track.MatchesRecordingIdentity(State));
+	Ok &= TestTrue(TEXT("second loadout frame captured"), Track.Capture(State));
+	const FString Csv = SerializeCsv(Track);
+	FTrack Loaded;
+	FString Error;
+	Ok &= TestTrue(TEXT("v3 loadout recording roundtrips"), ParseCsv(Csv, Loaded, Error));
+	Ok &= TestEqual(TEXT("authoritative loadout ID survives persistence"), Loaded.VehicleLoadoutId, State.VehicleLoadoutId);
+	SimCoreProtocol::FVehicleState Sampled;
+	Ok &= TestTrue(TEXT("loadout recording samples"), Sample(Loaded, .05, Sampled));
+	Ok &= TestEqual(TEXT("ghost state receives recorded loadout"), Sampled.VehicleLoadoutId, State.VehicleLoadoutId);
+	FTrack Other = Track;
+	Other.VehicleLoadoutId = TEXT("sedan_sport");
+	FTrack OtherLoaded;
+	Ok &= TestTrue(TEXT("second loadout with same catalog roundtrips"), ParseCsv(SerializeCsv(Other), OtherLoaded, Error));
+	Ok &= TestEqual(TEXT("runtime selection does not change catalog identity"), OtherLoaded.VehicleCatalogChecksum, Loaded.VehicleCatalogChecksum);
+	Ok &= TestNotEqual(TEXT("same catalog retains distinct selected loadouts"), OtherLoaded.VehicleLoadoutId, Loaded.VehicleLoadoutId);
+	Ok &= TestTrue(TEXT("catalog validation accepts either selection's catalog"),
+		ValidateCatalogIdentity(OtherLoaded, Loaded.VehicleCatalogChecksum, Error));
+
+	++State.Sequence;
+	State.SimulationTimeNs += 100'000'000;
+	State.VehicleLoadoutId = TEXT("sedan_sport");
+	Ok &= TestFalse(TEXT("same-class loadout change signals recording finalization"), Track.MatchesRecordingIdentity(State));
+	Ok &= TestFalse(TEXT("different loadout cannot enter the same track"), Track.Capture(State));
+	State.VehicleLoadoutId = Track.VehicleLoadoutId;
+	State.PlaySessionId = TEXT("new-loadout-session");
+	Ok &= TestFalse(TEXT("new reset session signals recording finalization"), Track.MatchesRecordingIdentity(State));
+	Ok &= TestFalse(TEXT("new reset session cannot enter the same track"), Track.Capture(State));
+	State.PlaySessionId = Track.PlaySessionId;
+	State.MapPackageChecksum = TEXT("fnv1a64:ffffffffffffffff");
+	Ok &= TestFalse(TEXT("map change signals recording finalization"), Track.MatchesRecordingIdentity(State));
+	Ok &= TestEqual(TEXT("session changes retain the completed track"), Track.Frames.Num(), 2);
+
+	const FString InvalidIds[] = {TEXT("Sedan_comfort"), TEXT("1_sedan"), TEXT("sedan-comfort"),
+		TEXT("sedan,comfort"), TEXT("sedan\ncomfort"), FString::ChrN(65, TEXT('a'))};
+	for (const FString& Id : InvalidIds)
+	{
+		FTrack Invalid = Track;
+		Invalid.VehicleLoadoutId = Id;
+		Ok &= TestTrue(TEXT("writer rejects malformed loadout IDs"), SerializeCsv(Invalid).IsEmpty());
+		FTrack Rejected = Track;
+		Ok &= TestFalse(TEXT("parser rejects malformed loadout IDs"),
+			ParseCsv(Csv.Replace(TEXT("sedan_comfort"), *Id), Rejected, Error));
+		Ok &= TestTrue(TEXT("invalid loadout clears partial parsed track"),
+			Rejected.Frames.IsEmpty() && Rejected.VehicleLoadoutId.IsEmpty());
+		FTrack Empty;
+		State.VehicleLoadoutId = Id;
+		Ok &= TestFalse(TEXT("capture rejects malformed authoritative loadout ID"), Empty.Capture(State));
+	}
+	Track.Reset();
+	Ok &= TestTrue(TEXT("reset clears previous loadout identity"), Track.VehicleLoadoutId.IsEmpty());
+	return Ok;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSimCoreDriveReplayCustomPartsCatalogIdentityTest,
+	"DriveIntegration.Replay.CustomPartsRequireCatalogIdentity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FSimCoreDriveReplayCustomPartsCatalogIdentityTest::RunTest(const FString& Parameters)
+{
+	using namespace SimCoreDriveReplay;
+	const FString CatalogChecksum = TEXT("fnv1a64:abcdef0123456789");
+	SimCoreProtocol::FVehicleState State;
+	State.Sequence = 1;
+	State.SimulationTimeNs = 1'000'000'000;
+	State.MapPackageChecksum = TEXT("fnv1a64:0123456789abcdef");
+	State.PlaySessionId = TEXT("custom-parts-replay");
+	State.VehicleLoadoutId = TEXT("parts_v1_00_0102030405060708");
+	State.RuntimeVehicleClass = SimCoreProtocol::ERuntimeVehicleClass::Sedan;
+	State.CollisionHalfLengthMeters = 2.2f;
+	State.CollisionHalfWidthMeters = 1.f;
+	State.CollisionHalfHeightMeters = .75f;
+	FTrack Track;
+	Track.VehicleCatalogChecksum = CatalogChecksum;
+	bool Ok = TestTrue(TEXT("custom recording captures with valid catalog identity"), Track.Capture(State));
+	const FString Csv = SerializeCsv(Track);
+	Ok &= TestFalse(TEXT("custom track with catalog identity serializes"), Csv.IsEmpty());
+	FTrack Loaded;
+	FString Error;
+	Ok &= TestTrue(TEXT("custom track with catalog identity parses"), ParseCsv(Csv, Loaded, Error));
+	Ok &= TestEqual(TEXT("custom part selection survives persistence"), Loaded.VehicleLoadoutId, State.VehicleLoadoutId);
+	Ok &= TestTrue(TEXT("custom replay accepts the matching catalog"), ValidateCatalogIdentity(Loaded, CatalogChecksum, Error));
+	Ok &= TestFalse(TEXT("custom replay rejects a different catalog's slot indices"),
+		ValidateCatalogIdentity(Loaded, TEXT("fnv1a64:ffffffffffffffff"), Error));
+	SimCoreProtocol::FVehicleState Sampled;
+	Ok &= TestTrue(TEXT("custom track with catalog identity can be sampled"), Sample(Loaded, 0, Sampled));
+	Ok &= TestEqual(TEXT("sample retains the custom part selection"), Sampled.VehicleLoadoutId, State.VehicleLoadoutId);
+
+	for (const FString& MissingOrInvalid : {FString(), FString(TEXT("invalid-checksum"))})
+	{
+		FTrack Recording;
+		Recording.VehicleCatalogChecksum = MissingOrInvalid;
+		Ok &= TestFalse(TEXT("custom recording rejects missing or malformed catalog identity"), Recording.Capture(State));
+		Ok &= TestTrue(TEXT("failed custom capture does not publish identity or frames"),
+			Recording.Frames.IsEmpty() && Recording.VehicleLoadoutId.IsEmpty());
+		FTrack Invalid = Track;
+		Invalid.VehicleCatalogChecksum = MissingOrInvalid;
+		Ok &= TestTrue(TEXT("custom CSV cannot omit or corrupt its catalog identity"), SerializeCsv(Invalid).IsEmpty());
+		FTrack Rejected = Track;
+		Ok &= TestFalse(TEXT("custom CSV parser rejects missing or malformed catalog identity"),
+			ParseCsv(Csv.Replace(*CatalogChecksum, *MissingOrInvalid), Rejected, Error));
+		Ok &= TestTrue(TEXT("invalid custom header clears any previously loaded track"),
+			Rejected.Frames.IsEmpty() && Rejected.VehicleLoadoutId.IsEmpty() && Rejected.VehicleCatalogChecksum.IsEmpty());
+		Ok &= TestFalse(TEXT("custom replay validation cannot substitute the current catalog for missing history"),
+			ValidateCatalogIdentity(Invalid, CatalogChecksum, Error));
+		Ok &= TestFalse(TEXT("custom replay rejection explains the catalog requirement"), Error.IsEmpty());
+		Ok &= TestFalse(TEXT("in-memory custom sampling cannot bypass missing catalog identity"), Sample(Invalid, 0, Sampled));
+	}
+	for (const FString& LegacyId : {FString(), FString(TEXT("sedan_modular_standard"))})
+	{
+		FTrack Legacy;
+		State.VehicleLoadoutId = LegacyId;
+		Ok &= TestTrue(TEXT("default and named recording retain optional catalog compatibility"), Legacy.Capture(State));
+		FTrack ParsedLegacy;
+		Ok &= TestTrue(TEXT("default and named CSV retain optional catalog compatibility"),
+			ParseCsv(SerializeCsv(Legacy), ParsedLegacy, Error));
+		Ok &= TestTrue(TEXT("default and named replay retain optional catalog compatibility"),
+			ValidateCatalogIdentity(ParsedLegacy, CatalogChecksum, Error));
+	}
+	return Ok;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSimCoreDriveReplayPoseOriginTest,

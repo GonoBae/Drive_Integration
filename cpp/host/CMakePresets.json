@@ -9,24 +9,12 @@
     {
       "name": "release",
       "displayName": "SimCore Host Release",
-      "description": "Shared release configuration for macOS, Linux, and Windows",
+      "description": "Windows development Release build and test configuration",
       "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
         "BUILD_TESTING": "ON",
         "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/vcpkg/scripts/buildsystems/vcpkg.cmake",
-        "SIMCORE_ENABLE_ZMQ_OBSERVER": "OFF"
-      }
-    },
-    {
-      "name": "release-zmq-observer",
-      "displayName": "SimCore Host Release with optional ZMQ observer",
-      "description": "Opt-in build for the frozen Python observer transport",
-      "inherits": "release",
-      "binaryDir": "${sourceDir}/build-zmq-observer",
-      "cacheVariables": {
-        "SIMCORE_ENABLE_ZMQ_OBSERVER": "ON",
-        "VCPKG_MANIFEST_FEATURES": "zmq-observer"
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/vcpkg/scripts/buildsystems/vcpkg.cmake"
       }
     }
   ],
@@ -34,11 +22,6 @@
     {
       "name": "release",
       "configurePreset": "release",
-      "configuration": "Release"
-    },
-    {
-      "name": "release-zmq-observer",
-      "configurePreset": "release-zmq-observer",
       "configuration": "Release"
     }
   ],

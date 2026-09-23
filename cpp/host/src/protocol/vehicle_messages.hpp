@@ -26,6 +26,7 @@ struct EnvelopeMetadata {
     std::string_view map_package_checksum;
     std::string_view play_session_id;
     std::string_view session_id;
+    std::string_view vehicle_loadout_id;
 };
 
 enum class HealthStatus : std::uint8_t {
@@ -75,6 +76,12 @@ enum class RuntimeVehicleClass : std::uint8_t {
 // physics and wire publication; entity_id is the stable protocol identity.
 // A tilted NPC's yaw-aligned proxy holds conservative projected extents, not
 // the unrotated visual mesh dimensions. Body attitude is published separately.
+struct RuntimeVehicleModuleTelemetry {
+    float rpm = 0.f;
+    float fuel_percent = 100.f;
+    VehicleGear gear = VehicleGear::Drive;
+};
+
 struct RuntimeEntityState {
     std::uint32_t entity_id = 0;
     RuntimeEntityKind kind = RuntimeEntityKind::NpcVehicle;
@@ -101,6 +108,8 @@ struct RuntimeEntityState {
     std::uint32_t horn_event_sequence = 0;
     RuntimeVehicleClass vehicle_class = RuntimeVehicleClass::Unspecified;
     bool npc_local_bypass_active = false;
+    std::string vehicle_loadout_id;
+    std::optional<RuntimeVehicleModuleTelemetry> vehicle_module_telemetry;
 };
 
 struct ParsedControlCommand {
@@ -121,7 +130,10 @@ struct ParsedSimulationReset {
     std::string map_package_checksum;
     std::string play_session_id;
     RuntimeVehicleClass requested_vehicle_class = RuntimeVehicleClass::Unspecified;
+    std::string requested_loadout_id;
 };
+
+[[nodiscard]] bool valid_vehicle_loadout_id(std::string_view id);
 
 using ParsedClientMessage = std::variant<ParsedHello,
                                           ParsedControlCommand,

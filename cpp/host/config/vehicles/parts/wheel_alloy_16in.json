@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "id": "wheel_alloy_16in",
+  "name": "Reference 16 inch alloy wheel",
+  "kind": "wheel",
+  "interface_id": "wheel_hub_sedan",
+  "mass": {
+    "mass_kg": 8.0,
+    "center_of_mass_m": [0.0, 0.0, 0.0],
+    "inertia_diagonal_kg_m2": [0.4, 0.7, 0.4]
+  },
+  "specification": {
+    "rim_diameter_m": 0.4064,
+    "rim_width_m": 0.18,
+    "rotational_inertia_kg_m2": 0.7
+  }
+}

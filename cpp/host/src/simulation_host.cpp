@@ -185,6 +185,16 @@ SimulationHost::SimulationHost(boost::asio::io_context& ioc,
                      config_.hard_command_timeout)
     , timer_(ioc)
 {
+    if (!config_.vehicle_catalog) {
+        config_.vehicle_catalog = std::make_shared<const simcore_host::RuntimeVehicleCatalog>(
+            simcore_host::default_runtime_vehicle_catalog());
+    }
+    for (const auto& profile : config_.vehicle_catalog->fleet()) {
+        (void)config_.vehicle_catalog->player_parameters(base_vehicle_parameters_, profile.vehicle_class);
+    }
+    config_.vehicle_parameters = config_.vehicle_catalog->player_parameters(
+        base_vehicle_parameters_, simcore_host::RuntimeVehicleClass::Sedan);
+    physics_.replace_parameters(config_.vehicle_parameters);
     if (!is_log_safe_identifier(
             config_.source_id, kMaxLifecycleIdentifierBytes)
         || !is_log_safe_identifier(
@@ -351,15 +361,9 @@ void SimulationHost::queue_map_package_reload(
 
 void SimulationHost::publish_current_state()
 {
-    const auto state = physics_.get_state();
     if (callbacks_.broadcast_world_state) {
         callbacks_.broadcast_world_state(
             serialize_current_world_state(Clock::now()));
-    }
-    if (callbacks_.publish_observer_state) {
-        callbacks_.publish_observer_state(
-            simcore_host::serialize_entity_state_packet(
-                state, active_vehicle_class_));
     }
 }
 
@@ -563,6 +567,8 @@ simcore_host::EnvelopeMetadata SimulationHost::make_metadata()
         config_.source_id,
         config_.map_package_checksum,
         active_play_session_id_,
+        {},
+        active_vehicle_loadout_id_,
     };
 }
 
@@ -707,8 +713,7 @@ void SimulationHost::run_tick()
     }
     advance_runtime_entities(dt_seconds);
     if (structures_enabled) {
-        const auto parameters = simcore_host::make_player_vehicle_parameters(
-            config_.vehicle_parameters, active_vehicle_class_);
+        const auto& parameters = config_.vehicle_parameters;
         const double heading_rad = state.heading * std::numbers::pi / 180.0;
         const double body_offset_m = parameters.collision_body_center_forward_offset_m;
         const simcore_host::ObbPrism impact_body{
@@ -764,11 +769,6 @@ void SimulationHost::run_tick()
     if (callbacks_.broadcast_world_state) {
         callbacks_.broadcast_world_state(
             serialize_current_world_state(started_at));
-    }
-    if (callbacks_.publish_observer_state) {
-        callbacks_.publish_observer_state(
-            simcore_host::serialize_entity_state_packet(
-                state, active_vehicle_class_));
     }
 }
 

@@ -1,0 +1,161 @@
+{
+  "schema_version": 1,
+  "id": "truck_standard",
+  "vehicle_class": 3,
+  "player_overrides": {
+    "mass_kg": 6200,
+    "wheelbase_m": 3.85,
+    "max_steering_angle_rad": 0.4886922,
+    "steering_rate_rad_s": 1.25,
+    "steering_return_rate_rad_s": 1.55,
+    "max_drive_force_n": 18000,
+    "max_reverse_force_n": 11000,
+    "max_drive_power_w": 180000,
+    "drive_force_rise_rate_n_per_s": 30000,
+    "drive_force_fall_rate_n_per_s": 50000,
+    "max_service_brake_n": 65000,
+    "max_handbrake_force_n": 72000,
+    "drivetrain_drag_n_per_mps": 100,
+    "drag_coefficient": 0.58,
+    "frontal_area_m2": 7.2,
+    "tire_radius_m": 0.39,
+    "max_forward_speed_mps": 28,
+    "max_reverse_speed_mps": 6,
+    "front_track_m": 1.9,
+    "rear_track_m": 1.9,
+    "cg_height_m": 0.75,
+    "front_static_load_fraction": 0.58,
+    "yaw_inertia_kg_m2": 14500,
+    "pitch_inertia_kg_m2": 12000,
+    "roll_inertia_kg_m2": 4500,
+    "front_tire_corner_stiffness_n_rad": 180000,
+    "rear_tire_corner_stiffness_n_rad": 160000,
+    "tire_longitudinal_stiffness_n": 260000,
+    "tire_friction": 0.95,
+    "wheel_inertia_kg_m2": 5.5,
+    "wheel_free_spin_damping_n_m_s": 8,
+    "collision_body_overhang_m": 1.175,
+    "collision_body_side_padding_m": 0.1,
+    "collision_body_half_height_m": 0.965,
+    "collision_body_center_forward_offset_m": -0.15,
+    "collision_body_ground_clearance_m": 0.49,
+    "chassis_shell_center_up_offset_m": 0.705,
+    "chassis_shell_half_height_m": 0.965
+  },
+  "scale_suspension_by_mass": true,
+  "rest_length_cg_tire_offset_m": null,
+  "npc": {
+    "name": "truck",
+    "half_length_m": 3.1,
+    "half_width_m": 1.05,
+    "half_height_m": 0.965,
+    "mass_kg": 6200,
+    "yaw_inertia_kg_m2": 14500,
+    "maximum_reaction_speed_mps": 20,
+    "speed_scale": 0.72,
+    "acceleration_mps2": 0.85,
+    "braking_mps2": 2.2,
+    "tumble_contact_below_cg_m": 0.65,
+    "ground_clearance_m": 0.411071,
+    "minimum_turn_radius_m": 8.5
+  },
+  "visual": {
+    "wheel_origins_cm": [
+      [
+        190,
+        -102,
+        -28
+      ],
+      [
+        190,
+        102,
+        -28
+      ],
+      [
+        -195,
+        -102,
+        -28
+      ],
+      [
+        -195,
+        102,
+        -28
+      ]
+    ],
+    "wheel_scales": [
+      [
+        1.22,
+        1.08,
+        1.22
+      ],
+      [
+        1.22,
+        1.08,
+        1.22
+      ],
+      [
+        1.22,
+        1.08,
+        1.22
+      ],
+      [
+        1.22,
+        1.08,
+        1.22
+      ]
+    ],
+    "lamp_locations_cm": [
+      [
+        240,
+        -96,
+        58
+      ],
+      [
+        240,
+        96,
+        58
+      ],
+      [
+        -294,
+        -96,
+        64
+      ],
+      [
+        -294,
+        96,
+        64
+      ]
+    ],
+    "exhaust_location_cm": [
+      -290,
+      86,
+      -15
+    ],
+    "driver_translation_cm": [
+      110,
+      0,
+      62
+    ],
+    "driver_scale": [
+      0.8,
+      1,
+      1
+    ],
+    "half_height_m": 0.965,
+    "cg_height_m": 0.75,
+    "collision_body_forward_offset_m": -0.15,
+    "collision_ground_clearance_m": 0.49,
+    "npc_collision_ground_clearance_m": 0.411071
+  },
+  "axle_modules": {
+    "front": {
+      "tire": null,
+      "suspension": null
+    },
+    "rear": {
+      "tire": null,
+      "suspension": null
+    }
+  },
+  "powertrain_modules": null
+}

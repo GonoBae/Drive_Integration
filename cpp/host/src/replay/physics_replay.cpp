@@ -1,6 +1,7 @@
 #include "replay/physics_replay.hpp"
 
 #include "player_vehicle_profile.hpp"
+#include "vehicle_catalog/runtime_vehicle_catalog.hpp"
 
 #include <algorithm>
 #include <array>
@@ -327,7 +328,7 @@ void PhysicsReplayRecorder::write_line(const std::string& line)
 }
 
 void PhysicsReplayRecorder::event(
-    PhysicsReplayEvent event, RuntimeVehicleClass vehicle_class)
+    PhysicsReplayEvent event, RuntimeVehicleClass vehicle_class, std::string_view loadout_id)
 {
     if (complete_ || invalid_) return;
     require(events_ < kMaximumEvents, "event limit exceeded");
@@ -337,8 +338,10 @@ void PhysicsReplayRecorder::event(
                 && vehicle_class <= RuntimeVehicleClass::Motorcycle,
                 "RESET requires a supported vehicle class");
         line += " " + std::to_string(static_cast<unsigned>(vehicle_class));
+        require(valid_vehicle_loadout_id(loadout_id), "invalid RESET loadout ID");
+        if (!loadout_id.empty()) line += " LOADOUT " + std::string(loadout_id);
     } else {
-        require(vehicle_class == RuntimeVehicleClass::Unspecified,
+        require(vehicle_class == RuntimeVehicleClass::Unspecified && loadout_id.empty(),
                 "vehicle class is only valid for RESET");
     }
     write_line(line);
@@ -391,7 +394,8 @@ void PhysicsReplayRecorder::invalidate(std::string_view reason)
 
 PhysicsReplayVerification verify_physics_replay(const std::filesystem::path& path,
     const PhysicsReplayIdentity& expected_identity, const VehicleParameters& parameters,
-    std::shared_ptr<const GroundQuery> ground, std::shared_ptr<const CollisionWorld> collision)
+    std::shared_ptr<const GroundQuery> ground, std::shared_ptr<const CollisionWorld> collision,
+    const RuntimeVehicleCatalog* vehicle_catalog)
 {
     validate_identity(expected_identity);
     Reader reader(path);
@@ -399,8 +403,14 @@ PhysicsReplayVerification verify_physics_replay(const std::filesystem::path& pat
     // Canonical max_digits10 formatting gives an exact, locale-independent
     // scalar/config/map/executable match, not a permissive approximate one.
     require(reader.line() == identity_line(expected_identity), "build/config/map/spawn/tick identity mismatch");
+    const auto& catalog = vehicle_catalog ? *vehicle_catalog : default_runtime_vehicle_catalog();
+    if (vehicle_catalog) {
+        require(expected_identity.vehicle_checksum.ends_with("+" + catalog.checksum()),
+                "resolved runtime catalog does not match replay identity");
+    }
     VehiclePhysics physics(expected_identity.origin_lat, expected_identity.origin_lon,
-        expected_identity.origin_alt, expected_identity.spawn_heading, parameters,
+        expected_identity.origin_alt, expected_identity.spawn_heading,
+        catalog.player_parameters(parameters, RuntimeVehicleClass::Sedan),
         std::move(ground), std::move(collision));
     PhysicsReplayVerification result;
     while (true) {
@@ -438,12 +448,27 @@ PhysicsReplayVerification verify_physics_replay(const std::filesystem::path& pat
                     input >> std::ws;
                     if (!input.eof()) input >> encoded_class;
                 }
+                std::string loadout_id;
+                if (!input.eof()) {
+                    input >> std::ws;
+                    if (!input.eof()) {
+                        std::string marker;
+                        input >> marker >> loadout_id;
+                        require(marker == "LOADOUT" && !loadout_id.empty()
+                            && valid_vehicle_loadout_id(loadout_id), "invalid RESET loadout ID");
+                    }
+                }
                 end_line(input);
                 require(encoded_class >= static_cast<unsigned>(RuntimeVehicleClass::Sedan)
                         && encoded_class <= static_cast<unsigned>(RuntimeVehicleClass::Motorcycle),
                         "invalid RESET vehicle class");
-                physics.replace_parameters(make_player_vehicle_parameters(
-                    parameters, static_cast<RuntimeVehicleClass>(encoded_class)));
+                // Indexed part selections are meaningful only within the exact
+                // catalog snapshot, including callers using the default catalog.
+                if (loadout_id.starts_with("parts_v1_"))
+                    require(expected_identity.vehicle_checksum.ends_with("+" + catalog.checksum()),
+                        "custom parts require matching recorded catalog identity");
+                physics.replace_parameters(catalog.player_parameters(
+                    parameters, static_cast<RuntimeVehicleClass>(encoded_class), loadout_id));
                 ++result.resets;
             } else {
                 end_line(input);

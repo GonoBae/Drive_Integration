@@ -13,6 +13,7 @@ inline constexpr std::uint32_t kRuntimeConfigFormatVersion = 1;
 
 struct RuntimeOptions {
     std::filesystem::path vehicle_config_path;
+    std::optional<std::filesystem::path> vehicle_catalog_path;
     std::filesystem::path map_package_path;
     // Optional additive v1 key; old runtime configs remain valid.
     std::optional<std::filesystem::path> traffic_network_path;

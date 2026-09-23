@@ -21,6 +21,88 @@ function Get-SimCorePackageFileHash {
     }
 }
 
+function Get-SimCoreRuntimeVehiclePackageFiles {
+    param([Parameter(Mandatory)][string]$RepositoryRoot)
+    $catalogRoot = [IO.Path]::GetFullPath((Join-Path $RepositoryRoot 'unreal/DriveIntegration/Config/VehicleCatalog'))
+    $manifest = Get-Content -LiteralPath (Join-Path $catalogRoot 'catalog.json') -Raw | ConvertFrom-Json
+    $relativeFiles = @('catalog.json', 'profiles/sedan.json', 'profiles/compact.json',
+        'profiles/truck.json', 'profiles/motorcycle.json')
+    if ($manifest.PSObject.Properties['parts']) {
+        if ($manifest.parts -isnot [Array] -or $manifest.parts.Count -gt 64) {
+            throw 'Vehicle catalog parts must be an array of at most 64 relative JSON paths.'
+        }
+        $relativeFiles += @($manifest.parts)
+    }
+    if ($manifest.PSObject.Properties['loadouts']) {
+        if ($manifest.loadouts -isnot [Array] -or $manifest.loadouts.Count -gt 64) {
+            throw 'Vehicle catalog loadouts must be an array of at most 64 relative JSON paths.'
+        }
+        $relativeFiles += @($manifest.loadouts)
+    }
+    $seen = @{}
+    foreach ($relative in $relativeFiles) {
+        if ($relative -isnot [string] -or $relative -notmatch '^[A-Za-z0-9_./-]+\.json$' -or
+            $relative.StartsWith('/') -or $relative.Contains('//') -or
+            @($relative.Split('/') | Where-Object { $_ -eq '.' -or $_ -eq '..' }).Count -gt 0) {
+            throw 'Vehicle catalog source must be a relative JSON path below its catalog directory.'
+        }
+        $source = [IO.Path]::GetFullPath((Join-Path $catalogRoot $relative))
+        if (-not $source.StartsWith($catalogRoot + '\', [StringComparison]::OrdinalIgnoreCase) -or $seen.ContainsKey($source)) {
+            throw "Duplicate or escaping vehicle catalog file: $relative"
+        }
+        $seen[$source] = $true
+        $walk = $catalogRoot
+        foreach ($segment in $relative.Split('/')) {
+            $walk = Join-Path $walk $segment
+            $item = Get-Item -LiteralPath $walk -ErrorAction Stop
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw "Vehicle catalog packaging does not follow linked files or directories: $relative"
+            }
+        }
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            throw "Vehicle catalog source is not a file: $relative"
+        }
+        $sourceRelative = "unreal/DriveIntegration/Config/VehicleCatalog/$relative"
+        [pscustomobject]@{
+            SourceRelative = $sourceRelative
+            Source = $source
+            PackageRelative = "Windows/DriveIntegration/Config/VehicleCatalog/$relative"
+        }
+    }
+}
+
+function ConvertTo-SimCorePackagedRuntimeConfig {
+    param([Parameter(Mandatory)][string]$Content)
+    $pattern = '(?m)^[ \t]*vehicle_catalog[ \t]*=[ \t]*(?<path>[^\r\n]*)'
+    $entries = [regex]::Matches($Content, $pattern)
+    if ($entries.Count -ne 1 -or $entries[0].Groups['path'].Value.Trim() -ne
+        '../../../unreal/DriveIntegration/Config/VehicleCatalog/catalog.json') {
+        throw 'Packaging requires exactly one vehicle_catalog entry pointing to the shared Unreal source catalog.'
+    }
+    return [regex]::Replace($Content, $pattern,
+        'vehicle_catalog=../../../Windows/DriveIntegration/Config/VehicleCatalog/catalog.json')
+}
+
+function Test-SimCorePackagedVehicleCatalog {
+    param(
+        [Parameter(Mandatory)][string]$RepositoryRoot,
+        [Parameter(Mandatory)][string]$PackageRoot
+    )
+    $verified = 0
+    foreach ($file in @(Get-SimCoreRuntimeVehiclePackageFiles -RepositoryRoot $RepositoryRoot)) {
+        $destination = Join-Path $PackageRoot $file.PackageRelative
+        if (-not (Test-Path -LiteralPath $destination -PathType Leaf)) {
+            throw "Required packaged vehicle catalog file missing: $($file.PackageRelative)"
+        }
+        if ((Get-SimCorePackageFileHash -LiteralPath $file.Source) -ne
+            (Get-SimCorePackageFileHash -LiteralPath $destination)) {
+            throw "Packaged vehicle catalog differs from its source: $($file.PackageRelative)"
+        }
+        $verified++
+    }
+    return $verified
+}
+
 function Get-SimCoreWindowsPackagePlan {
     param(
         [Parameter(Mandatory)][string]$RepositoryRoot,
@@ -39,6 +121,7 @@ function Get-SimCoreWindowsPackagePlan {
         Uat = Join-Path $engine 'Engine\Build\BatchFiles\RunUAT.bat'
         Project = $project
         ServerBuild = Join-Path $repository 'cpp\host\build\Release'
+        VehicleCatalogFiles = @(Get-SimCoreRuntimeVehiclePackageFiles -RepositoryRoot $repository)
         UatArguments = @(
             'BuildCookRun', "-project=$project", '-noP4', '-unattended', '-utf8output',
             '-platform=Win64', '-clientconfig=Development', '-build', '-cook',
@@ -172,6 +255,8 @@ If changing the port, also update cpp\host\config\signal_city_server.cfg.
 Only loopback WebSocket addresses are supported for this release.
 Keep map_packages and SimCoreClient.ini together: relative map paths are
 resolved from the INI, not from the shell working directory.
+The server and client share Windows\DriveIntegration\Config\VehicleCatalog.
+Keep all five JSON files together; no source checkout is required.
 
 Optional 30-minute frame/state capture (does not certify manual driving):
   powershell -NoProfile -ExecutionPolicy Bypass -File .\StartClient.ps1 -PerformanceCapture
@@ -206,6 +291,7 @@ function Invoke-SimCoreWindowsPackage {
         (Join-Path $plan.Repository 'scripts\run_signal_city_server.ps1'),
         (Join-Path $plan.Repository 'scripts\server_launcher_common.ps1'))
     $requiredFiles += @($mapRelativeFiles | ForEach-Object { Join-Path $mapSource $_ })
+    $requiredFiles += @($plan.VehicleCatalogFiles | ForEach-Object { $_.Source })
     foreach ($requiredFile in $requiredFiles) {
         if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
             throw "Packaging input missing: $requiredFile"
@@ -218,6 +304,8 @@ function Invoke-SimCoreWindowsPackage {
     [void](Get-Command cmake -ErrorAction Stop)
     . (Join-Path $plan.Repository 'scripts\server_launcher_common.ps1')
     $serverPort = Get-SimCoreConfiguredPort -RuntimeConfigPath (Join-Path $configSource 'signal_city_server.cfg')
+    $packagedRuntimeConfig = ConvertTo-SimCorePackagedRuntimeConfig -Content `
+        (Get-Content -LiteralPath (Join-Path $configSource 'signal_city_server.cfg') -Raw)
 
     Write-Host "[Package] Destination: $($plan.Destination)"
     Write-Host '[Package] C++ Release server + UE 5.6 Windows Development / L_SignalCity'
@@ -292,6 +380,7 @@ function Invoke-SimCoreWindowsPackage {
         (Get-SimCorePackageFileHash -LiteralPath $sensorConfigDestination)) {
         throw "Packaged SensorRig config differs from its source: $sensorConfigDestination"
     }
+    [void](Test-SimCorePackagedVehicleCatalog -RepositoryRoot $plan.Repository -PackageRoot $plan.Destination)
     foreach ($binary in @('simcore_publisher.exe', 'libprotobuf.dll', 'abseil_dll.dll')) {
         if (-not (Test-Path -LiteralPath (Join-Path $plan.ServerBuild $binary) -PathType Leaf)) {
             throw "Release server binary missing: $binary"
@@ -310,9 +399,11 @@ function Invoke-SimCoreWindowsPackage {
     Get-ChildItem -LiteralPath $plan.ServerBuild -Filter '*.dll' -File | ForEach-Object {
         Copy-Item -LiteralPath $_.FullName -Destination $serverDestination
     }
-    foreach ($config in @('signal_city_server.cfg', 'vehicle_sedan.cfg')) {
-        Copy-Item -LiteralPath (Join-Path $configSource $config) -Destination $configDestination
-    }
+    Copy-Item -LiteralPath (Join-Path $configSource 'vehicle_sedan.cfg') -Destination $configDestination
+    # Both processes read the very same staged JSON bytes. Do not copy a second
+    # catalog beside the server or retain a path into the development checkout.
+    [IO.File]::WriteAllText((Join-Path $configDestination 'signal_city_server.cfg'),
+        $packagedRuntimeConfig, [Text.UTF8Encoding]::new($false))
     foreach ($mapFile in $mapRelativeFiles) {
         Copy-Item -LiteralPath (Join-Path $mapSource $mapFile) -Destination $mapDestination
     }

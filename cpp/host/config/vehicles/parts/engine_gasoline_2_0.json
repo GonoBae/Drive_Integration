@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "engine_gasoline_2_0",
+  "name": "Reference 2.0 litre gasoline engine",
+  "kind": "engine",
+  "interface_id": "engine_sedan",
+  "mass": {
+    "mass_kg": 160.0,
+    "center_of_mass_m": [0.0, 0.0, 0.0],
+    "inertia_diagonal_kg_m2": [10.0, 14.0, 14.0]
+  },
+  "specification": {
+    "idle_rpm": 800.0,
+    "max_rpm": 6500.0,
+    "rotational_inertia_kg_m2": 0.22,
+    "response_time_s": 0.15,
+    "idle_fuel_lph": 0.8,
+    "bsfc_g_per_kwh": 270.0,
+    "fuel_type": "gasoline",
+    "torque_curve": [
+      {"rpm": 800.0, "torque_nm": 95.0},
+      {"rpm": 1500.0, "torque_nm": 150.0},
+      {"rpm": 2500.0, "torque_nm": 185.0},
+      {"rpm": 3500.0, "torque_nm": 200.0},
+      {"rpm": 4500.0, "torque_nm": 195.0},
+      {"rpm": 5500.0, "torque_nm": 180.0},
+      {"rpm": 6500.0, "torque_nm": 140.0}
+    ]
+  }
+}

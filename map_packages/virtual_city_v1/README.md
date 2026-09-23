@@ -4,7 +4,8 @@
 `/Game/VirtualCity/Maps/L_VirtualCity`에서 측정한 충돌 package다.
 충돌 package와 별도로 방향성 lane 25개·신호 head 3개의 `traffic_network.json`을
 추가했다. 완성 도시 아트·NPC/보행자·자율주행 기능은 포함하지 않는다.
-실행과 편집은 [가상 도심 빠른 시작](../../docs/virtual_city_quickstart.md)을 따른다.
+이전 실행·편집 안내는 [이전 자료](../../docs/README.md#이전-자료)에 보관한다.
+현재 기본 맵 실행은 [Signal City 안내](../../docs/guides/signal_city_quickstart.md)를 따른다.
 
 ## 제작 원본과 좌표
 
@@ -53,7 +54,7 @@ E ±119m 중심/안쪽 면 ±118.75m라 주행 영역을 valid 지면 안쪽에 
 pose를 가진다. 현재 collision checksum에 결합되며 자체 network checksum은
 `fnv1a64:32f81819cb6b2b0f`이다. collision manifest에는 포함하지 않는다.
 C++는 실제 지면과 topology를 검증한 뒤 30초 신호 주기를 계산하고 Unreal은
-수신 결과만 표시한다. [구조·최초 export·hot reload·제한](../../docs/traffic_network_signals.md)을 따른다.
+수신 결과만 표시한다. [구조·최초 export·hot reload·제한](../../docs/reference/traffic_network_signals.md)을 따른다.
 
 일반 Ground Bake는 traffic JSON을 자동 갱신하지 않는다. collision checksum이
 달라지면 기존 head는 안전하게 적색이 되지만 수동운전 자체를 차단하지 않는다.
@@ -73,11 +74,12 @@ LaneGraph, NPC AI, 통행 제한·신호·제품 navigation 계약이 아니다.
 저장 맵 재로드 검증은 도형 transform과 marker ID·pose·extent·semantic·활성 상태,
 route의 asphalt·높이·경사를 확인했다. C++ dense route/네 바퀴 coverage 및 pose를
 덮어쓰지 않는 실제 조향·가속 입력 기반 한 바퀴의 선행 시험이 통과했다.
-최신 UE Automation 35/35와 Editor/Game 빌드도 통과했다. 실제 package 연석 회귀는
+당시 UE Automation 35/35와 Editor/Game 빌드도 통과했다. 실제 package 연석 회귀는
 5.2252m/s 접근, near rise 0.1536m, 차축 support 차이 0.2400m, 차체 상승 0.2119m,
 최대 step 상승 0.0232m, 최대 pitch 5.7943°와 최소 세 바퀴 접지를
-확인했다. 최종 회귀 재실행 결과·알려진 문제는
-[9/2 작업일지](../../docs/worklogs/2026-09-02.md)를 기준으로 확인한다.
+확인했다. 당시 회귀 재실행 결과·알려진 문제는
+[이전 자료](../../docs/README.md#이전-자료)의 9/2 작업일지에 보관한다.
+현재 자동 검증·수동 인수 상태는 [검증 현황](../../docs/status.md)을 따른다.
 
 50cm heightfield에서 semantic Curb marker 중심 215곳을 가로지르는 production full-body
 footprint를 검사하면 도로/보도 연석 중심 214곳이 near(+1R)/far(+3R) 후보 조건을 만족한다.

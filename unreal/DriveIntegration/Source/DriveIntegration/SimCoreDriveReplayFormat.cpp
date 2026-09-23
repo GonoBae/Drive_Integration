@@ -16,6 +16,25 @@ namespace
 			&& !Value.Contains(TEXT("\r"));
 	}
 
+	bool ValidLoadoutId(const FString& Value)
+	{
+		if (Value.IsEmpty()) return true;
+		if (Value.Len() > 64 || Value[0] < TEXT('a') || Value[0] > TEXT('z')) return false;
+		for (const TCHAR Character : Value)
+			if (!((Character >= TEXT('a') && Character <= TEXT('z'))
+				|| (Character >= TEXT('0') && Character <= TEXT('9')) || Character == TEXT('_'))) return false;
+		return true;
+	}
+
+	bool HasRequiredCatalogIdentity(const FString& LoadoutId, const FString& CatalogChecksum)
+	{
+		// Custom part slots are indices into one immutable catalog. Treat the
+		// entire reserved prefix as catalog-bound, including malformed tokens;
+		// the catalog resolver validates their exact grammar and slot choices.
+		return !LoadoutId.StartsWith(TEXT("parts_v1_"), ESearchCase::CaseSensitive)
+			|| SimCoreProtocol::IsValidTrafficNetworkChecksum(CatalogChecksum);
+	}
+
 	float LerpHeading(float A, float B, double Alpha)
 	{
 		return FMath::Fmod(A + FMath::FindDeltaAngleDegrees(A, B) * Alpha + 360.0f, 360.0f);
@@ -42,25 +61,30 @@ void SimCoreDriveReplay::FTrack::Reset()
 {
 	MapChecksum.Reset();
 	PlaySessionId.Reset();
+	VehicleCatalogChecksum.Reset();
+	VehicleLoadoutId.Reset();
 	Frames.Reset();
+}
+
+bool SimCoreDriveReplay::FTrack::MatchesRecordingIdentity(const SimCoreProtocol::FVehicleState& State) const
+{
+	return Frames.IsEmpty() || (MapChecksum == State.MapPackageChecksum
+		&& PlaySessionId == State.PlaySessionId && VehicleLoadoutId == State.VehicleLoadoutId);
 }
 
 bool SimCoreDriveReplay::FTrack::Capture(const SimCoreProtocol::FVehicleState& State)
 {
 	if (!SimCoreProtocol::IsValidTrafficNetworkChecksum(State.MapPackageChecksum)
 		|| !SafeIdentity(State.PlaySessionId) || State.Sequence == 0
+		|| !ValidLoadoutId(State.VehicleLoadoutId)
+		|| !HasRequiredCatalogIdentity(State.VehicleLoadoutId, VehicleCatalogChecksum)
 		|| Frames.Num() >= MaxFrames)
 	{
 		return false;
 	}
-	if (Frames.IsEmpty())
-	{
-		MapChecksum = State.MapPackageChecksum;
-		PlaySessionId = State.PlaySessionId;
-	}
-	else if (MapChecksum != State.MapPackageChecksum || PlaySessionId != State.PlaySessionId
-		|| State.Sequence <= Frames.Last().Sequence
-		|| State.SimulationTimeNs <= Frames.Last().SimulationTimeNs)
+	if (!MatchesRecordingIdentity(State) || (!Frames.IsEmpty()
+		&& (State.Sequence <= Frames.Last().Sequence
+			|| State.SimulationTimeNs <= Frames.Last().SimulationTimeNs)))
 	{
 		return false;
 	}
@@ -80,6 +104,12 @@ bool SimCoreDriveReplay::FTrack::Capture(const SimCoreProtocol::FVehicleState& S
 		State.RuntimeVehicleClass == SimCoreProtocol::ERuntimeVehicleClass::Unspecified
 		? SimCoreProtocol::ERuntimeVehicleClass::Sedan : State.RuntimeVehicleClass;
 	if (!ValidFrame(Frame)) return false;
+	if (Frames.IsEmpty())
+	{
+		MapChecksum = State.MapPackageChecksum;
+		PlaySessionId = State.PlaySessionId;
+		VehicleLoadoutId = State.VehicleLoadoutId;
+	}
 	Frames.Add(Frame);
 	return true;
 }
@@ -96,7 +126,9 @@ bool SimCoreDriveReplay::Sample(
 {
 	OutState = {};
 	if (Track.Frames.IsEmpty() || !FMath::IsFinite(ElapsedSeconds) || ElapsedSeconds < 0.0
-		|| !SafeIdentity(Track.MapChecksum) || !SafeIdentity(Track.PlaySessionId)) return false;
+		|| !SafeIdentity(Track.MapChecksum) || !SafeIdentity(Track.PlaySessionId)
+		|| !ValidLoadoutId(Track.VehicleLoadoutId)
+		|| !HasRequiredCatalogIdentity(Track.VehicleLoadoutId, Track.VehicleCatalogChecksum)) return false;
 	const uint64 StartNs = Track.Frames[0].SimulationTimeNs;
 	const double TargetNsDouble = static_cast<double>(StartNs) + ElapsedSeconds * 1.e9;
 	const uint64 TargetNs = TargetNsDouble >= static_cast<double>(MAX_uint64)
@@ -117,6 +149,7 @@ bool SimCoreDriveReplay::Sample(
 	OutState.SimulationTimeNs = TargetNs;
 	OutState.MapPackageChecksum = Track.MapChecksum;
 	OutState.PlaySessionId = Track.PlaySessionId;
+	OutState.VehicleLoadoutId = Track.VehicleLoadoutId;
 	OutState.PositionEnu = FMath::Lerp(A.PositionEnu, B.PositionEnu, Alpha);
 	OutState.LinearVelocityEnu = FMath::Lerp(A.LinearVelocityEnu, B.LinearVelocityEnu, Alpha);
 	OutState.HeadingDegrees = LerpHeading(A.HeadingDegrees, B.HeadingDegrees, Alpha);
@@ -137,9 +170,12 @@ bool SimCoreDriveReplay::Sample(
 FString SimCoreDriveReplay::SerializeCsv(const FTrack& Track)
 {
 	if (!SafeIdentity(Track.MapChecksum) || !SafeIdentity(Track.PlaySessionId)
-		|| Track.Frames.IsEmpty()) return {};
-	FString Result = FString::Printf(TEXT("%s,%s,%s\n"), FormatName,
-		*Track.MapChecksum, *Track.PlaySessionId);
+		|| !ValidLoadoutId(Track.VehicleLoadoutId)
+		|| !HasRequiredCatalogIdentity(Track.VehicleLoadoutId, Track.VehicleCatalogChecksum)
+		|| Track.Frames.IsEmpty() || (!Track.VehicleCatalogChecksum.IsEmpty()
+			&& !SimCoreProtocol::IsValidTrafficNetworkChecksum(Track.VehicleCatalogChecksum))) return {};
+	FString Result = FString::Printf(TEXT("%s,%s,%s,%s,%s\n"), FormatName,
+		*Track.MapChecksum, *Track.PlaySessionId, *Track.VehicleCatalogChecksum, *Track.VehicleLoadoutId);
 	for (const FFrame& Frame : Track.Frames)
 	{
 		if (!ValidFrame(Frame)) return {};
@@ -173,11 +209,20 @@ bool SimCoreDriveReplay::ParseCsv(
 	TArray<FString> Header;
 	Lines[0].ParseIntoArray(Header, TEXT(","), false);
 	const bool bLegacyV1 = Header.Num() == 3 && Header[0] == LegacyFormatName;
-	if (Header.Num() != 3 || (!bLegacyV1 && Header[0] != FormatName)
+	const bool bLegacyV2 = (Header.Num() == 3 || Header.Num() == 4) && Header[0] == LegacyV2FormatName;
+	const bool bVersion3 = Header.Num() == 5 && Header[0] == FormatName;
+	if ((!bLegacyV1 && !bLegacyV2 && !bVersion3)
 		|| !SimCoreProtocol::IsValidTrafficNetworkChecksum(Header[1])
-		|| !SafeIdentity(Header[2])) return Fail(TEXT("Replay header is invalid"));
+		|| !SafeIdentity(Header[2]) || (bLegacyV2 && Header.Num() == 4
+			&& !SimCoreProtocol::IsValidTrafficNetworkChecksum(Header[3]))
+		|| (bVersion3 && ((!Header[3].IsEmpty() && !SimCoreProtocol::IsValidTrafficNetworkChecksum(Header[3]))
+			|| !ValidLoadoutId(Header[4])))) return Fail(TEXT("Replay header is invalid"));
+	if (bVersion3 && !HasRequiredCatalogIdentity(Header[4], Header[3]))
+		return Fail(TEXT("Custom-parts replay requires a valid vehicle catalog checksum"));
 	OutTrack.MapChecksum = Header[1];
 	OutTrack.PlaySessionId = Header[2];
+	if (Header.Num() >= 4) OutTrack.VehicleCatalogChecksum = Header[3];
+	if (bVersion3) OutTrack.VehicleLoadoutId = Header[4];
 	for (int32 LineIndex = 1; LineIndex < Lines.Num(); ++LineIndex)
 	{
 		TArray<FString> Fields;
@@ -221,5 +266,25 @@ bool SimCoreDriveReplay::ParseCsv(
 			return Fail(TEXT("Replay rows are invalid or unordered"));
 		OutTrack.Frames.Add(Frame);
 	}
+	return true;
+}
+
+bool SimCoreDriveReplay::ValidateCatalogIdentity(
+	const FTrack& Track, const FString& CurrentChecksum, FString& OutError)
+{
+	OutError.Reset();
+	if (!HasRequiredCatalogIdentity(Track.VehicleLoadoutId, Track.VehicleCatalogChecksum))
+	{
+		OutError = TEXT("Custom-parts replay requires a valid vehicle catalog checksum");
+		return false;
+	}
+	if (!SimCoreProtocol::IsValidTrafficNetworkChecksum(CurrentChecksum)
+		|| (!Track.VehicleCatalogChecksum.IsEmpty() && Track.VehicleCatalogChecksum != CurrentChecksum))
+	{
+		OutError = TEXT("Replay vehicle catalog differs from the current definitions");
+		return false;
+	}
+	// Legacy default/named tracks without a captured catalog identity remain
+	// readable, but cannot prove which historical definitions were recorded.
 	return true;
 }

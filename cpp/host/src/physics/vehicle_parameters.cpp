@@ -5,6 +5,45 @@
 #include <cmath>
 #include <numbers>
 
+AxleTireParameters resolved_tire_parameters(
+    const VehicleParameters& parameters, std::size_t wheel_index)
+{
+    const auto& axle = wheel_index < 2
+        ? parameters.front_axle_contact : parameters.rear_axle_contact;
+    if (axle.tire) return *axle.tire;
+    return {parameters.tire_radius_m, parameters.tire_friction,
+        parameters.tire_longitudinal_stiffness_n,
+        wheel_index < 2 ? parameters.front_tire_corner_stiffness_n_rad
+                        : parameters.rear_tire_corner_stiffness_n_rad,
+        parameters.rolling_resistance_coeff};
+}
+
+const simcore_host::SuspensionParameters& resolved_suspension_parameters(
+    const VehicleParameters& parameters, std::size_t wheel_index)
+{
+    const auto& axle = wheel_index < 2
+        ? parameters.front_axle_contact : parameters.rear_axle_contact;
+    return axle.suspension ? *axle.suspension : parameters.suspension;
+}
+
+namespace {
+bool valid_axle_contact_parameters(const AxleContactParameters& axle)
+{
+    if (axle.tire) {
+        const auto& tire = *axle.tire;
+        if (!std::isfinite(tire.radius_m) || tire.radius_m <= 0.f
+            || !std::isfinite(tire.friction_coefficient) || tire.friction_coefficient <= 0.f
+            || !std::isfinite(tire.longitudinal_stiffness_n) || tire.longitudinal_stiffness_n <= 0.f
+            || !std::isfinite(tire.cornering_stiffness_n_rad) || tire.cornering_stiffness_n_rad <= 0.f
+            || !std::isfinite(tire.rolling_resistance_coefficient) || tire.rolling_resistance_coefficient < 0.f) {
+            return false;
+        }
+    }
+    return !axle.suspension
+        || simcore_host::valid_suspension_parameters(*axle.suspension);
+}
+} // namespace
+
 bool valid_vehicle_parameters(const VehicleParameters& parameters)
 {
     const std::array<float, 59> finite_values{
@@ -146,5 +185,8 @@ bool valid_vehicle_parameters(const VehicleParameters& parameters)
         && parameters.chassis_shell_half_height_m > 0.f
         && std::abs(parameters.chassis_shell_center_up_offset_m)
             < parameters.collision_body_half_height_m * 2.f
-        && simcore_host::valid_suspension_parameters(parameters.suspension);
+        && simcore_host::valid_suspension_parameters(parameters.suspension)
+        && valid_axle_contact_parameters(parameters.front_axle_contact)
+        && valid_axle_contact_parameters(parameters.rear_axle_contact)
+        && (!parameters.powertrain || simcore_host::valid_powertrain_parameters(*parameters.powertrain));
 }

@@ -92,7 +92,7 @@ struct Harness {
                 require(frame.ParseFromString(bytes) && frame.has_world_state(),
                     "public host callback must emit a parseable atomic WorldState");
                 ++frame_count;
-            }, {}, {}})
+            }, {}})
     {}
 
     void tick()

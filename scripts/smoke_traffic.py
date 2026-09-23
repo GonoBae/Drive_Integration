@@ -6,6 +6,7 @@ Only the Popen child is terminated; map/network inputs are never modified.
 """
 
 import argparse
+from runtime_vehicle_catalog import checked_catalog_capability
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -297,6 +298,7 @@ class TrafficController(Controller):
         request.hello.build = f"traffic-smoke-v{self.expected.format_version}"
         request.hello.schema = server.hello.schema
         request.hello.capabilities.extend([
+            checked_catalog_capability(server.hello.capabilities),
             "world-state.v2", "control.v2", "simulation-reset.v1",
             "map-package-checksum.v1", "world-health.v1", "traffic-signals.v1",
         ])

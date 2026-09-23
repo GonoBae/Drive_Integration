@@ -483,6 +483,7 @@ struct VehiclePhysics::SupportedPoseSnapshot {
     std::array<float, 4> suspension_compression;
     std::array<float, 4> suspension_force;
     std::array<bool, 4> suspension_contact;
+    std::optional<simcore_host::PowertrainState> powertrain;
 };
 
 VehiclePhysics::VehiclePhysics(double lat, double lon, double alt, float heading,
@@ -541,6 +542,9 @@ void VehiclePhysics::reset()
     support_attitude_valid_ = false;
     motorcycle_rider_attached_ = true;
     applied_drive_force_n_ = 0.f;
+    powertrain_state_ = parameters_.powertrain
+        ? std::optional{simcore_host::initial_powertrain_state(*parameters_.powertrain)}
+        : std::nullopt;
     wheel_angular_speed_rad_s_.fill(0.f);
     suspension_compression_m_.fill(0.f);
     suspension_base_force_n_.fill(0.f);
@@ -565,6 +569,11 @@ void VehiclePhysics::reset()
     state_.alt = origin_alt_;
     state_.heading = static_cast<float>(heading_rad_ * RAD2DEG);
     state_.rpm = parameters_.idle_rpm;
+    if (powertrain_state_) {
+        state_.rpm = powertrain_state_->engine_rpm;
+        state_.fuel = static_cast<float>(100.0 * powertrain_state_->remaining_fuel_l
+            / parameters_.powertrain->fuel_tank.capacity_l);
+    }
     state_.position_enu = {0.0, 0.0, parameters_.cg_height_m};
     state_.collision_half_length_m = static_cast<float>(
         parameters_.wheelbase_m * 0.5 + parameters_.collision_body_overhang_m);
@@ -672,8 +681,13 @@ void VehiclePhysics::refresh_runtime_tire_supports(
     const std::vector<simcore_host::KinematicCollisionProxy>& proxies)
 {
     runtime_tire_supports_.clear();
+    // This filter removes an obstacle from the whole chassis collision solve.
+    // Require even the smaller axle tire to be capable of driving over it.
+    const float minimum_tire_radius = std::min(
+        resolved_tire_parameters(parameters_, 0).radius_m,
+        resolved_tire_parameters(parameters_, 2).radius_m);
     for (const auto& proxy : proxies) {
-        if (!simcore_host::is_low_tire_obstacle(proxy, *ground_query_, parameters_.tire_radius_m)) continue;
+        if (!simcore_host::is_low_tire_obstacle(proxy, *ground_query_, minimum_tire_radius)) continue;
         const auto& shape = std::get<simcore_host::ObbPrism>(proxy.shape);
         const double lateral = (shape.center_enu.east_m-east_m_)*std::cos(heading_rad_)
             - (shape.center_enu.north_m-north_m_)*std::sin(heading_rad_);
@@ -876,6 +890,7 @@ VehicleState VehiclePhysics::update(
     // steering force away and make a modest-speed turn feel frictionless.
     for (std::size_t index = 0; index < state_.wheels.size(); ++index) {
         auto& wheel = state_.wheels[index];
+        const auto tire = resolved_tire_parameters(parameters_, index);
         previous_longitudinal_slip[index] = wheel.longitudinal_slip;
         wheel.wheel_index = static_cast<uint32_t>(index);
         const float solver_wheel_steering = solver_wheel_steering_angles[index];
@@ -893,7 +908,7 @@ VehicleState VehiclePhysics::update(
             ? std::clamp(
                 suspension_normal_force_n[index],
                 0.f,
-                parameters_.suspension.max_force_n)
+                resolved_suspension_parameters(parameters_, index).max_force_n)
                 + wheel_contact_support_[index].tire_hard_stop_normal_force_n
             : 0.f;
         total_normal_load += wheel.normal_load;
@@ -947,14 +962,12 @@ VehicleState VehiclePhysics::update(
                 parameters_,
                 ground_surface_material_by_wheel_[index],
                 ground_friction_multiplier_by_wheel_[index]);
-        const float friction_limit = parameters_.tire_friction
+        const float friction_limit = tire.friction_coefficient
             * surface_friction_multiplier * wheel.normal_load;
         tire_friction_limit_by_wheel[index] = friction_limit;
         const float lateral_limit =
             friction_limit * parameters_.lateral_grip_priority;
-        const float corner_stiffness = index < 2
-            ? parameters_.front_tire_corner_stiffness_n_rad
-            : parameters_.rear_tire_corner_stiffness_n_rad;
+        const float corner_stiffness = tire.cornering_stiffness_n_rad;
         unconstrained_tire_force_y_by_wheel[index] =
             -corner_stiffness * internal_slip_angle;
         tire_force_y_by_wheel[index] = std::clamp(
@@ -984,11 +997,15 @@ VehicleState VehiclePhysics::update(
     std::array<float, 2> axle_drive_torque_per_wheel{};
     std::array<float, 4> traction_control_brake_torque{};
     for (std::size_t axle = 0; axle < axle_drive_torque_per_wheel.size(); ++axle) {
+        const float front_torque_fraction = parameters_.powertrain
+            ? parameters_.powertrain->drivetrain.front_torque_fraction
+            : parameters_.front_drive_torque_fraction;
         const float axle_drive_fraction = axle == 0
-            ? parameters_.front_drive_torque_fraction
-            : 1.f - parameters_.front_drive_torque_fraction;
+            ? front_torque_fraction
+            : 1.f - front_torque_fraction;
         const std::size_t left_index = axle * 2;
         const std::size_t right_index = left_index + 1;
+        const float tire_radius = resolved_tire_parameters(parameters_, left_index).radius_m;
         if (axle_drive_fraction <= 0.f
             || drive_force.suppressed
             || gear_sign * total_drive_force <= STOP_EPSILON
@@ -1012,13 +1029,16 @@ VehicleState VehiclePhysics::update(
                 1.f);
         }
 
-        const float requested_torque_per_wheel = total_drive_force
-            * axle_drive_fraction * parameters_.tire_radius_m * 0.5f
-            * traction_control_scale;
+        // A modular differential splits shaft torque, not road force. In
+        // particular, different front/rear radii must not change its split.
+        const float requested_torque_per_wheel = parameters_.powertrain
+            ? drive_force.axle_torque_nm[axle] * 0.5f * traction_control_scale
+            : total_drive_force * axle_drive_fraction * tire_radius * 0.5f
+                * traction_control_scale;
         const float left_torque_capacity = longitudinal_force_reserve[left_index]
-            * parameters_.tire_radius_m;
+            * tire_radius;
         const float right_torque_capacity = longitudinal_force_reserve[right_index]
-            * parameters_.tire_radius_m;
+            * tire_radius;
         const float brake_axle_fraction = axle == 0
             ? parameters_.front_service_brake_fraction
             : 1.f - parameters_.front_service_brake_fraction;
@@ -1033,7 +1053,7 @@ VehicleState VehiclePhysics::update(
                 / (BRAKE_DIFFERENTIAL_END_ASSIST_MPS - BRAKE_DIFFERENTIAL_FULL_ASSIST_MPS),
             0.f, 1.f);
         const float traction_brake_capacity = parameters_.max_service_brake_n
-            * brake_axle_fraction * 0.5f * parameters_.tire_radius_m * brake_assist_scale;
+            * brake_axle_fraction * 0.5f * tire_radius * brake_assist_scale;
         const float torque_capacity_per_wheel = std::min(
             std::max(left_torque_capacity, right_torque_capacity),
             std::min(left_torque_capacity, right_torque_capacity)
@@ -1045,13 +1065,14 @@ VehicleState VehiclePhysics::update(
         for (const auto index : {left_index, right_index}) {
             traction_control_brake_torque[index] = drive_direction * std::clamp(
                 std::abs(axle_drive_torque_per_wheel[axle])
-                    - longitudinal_force_reserve[index] * parameters_.tire_radius_m,
+                    - longitudinal_force_reserve[index] * tire_radius,
                 0.f, traction_brake_capacity);
         }
     }
 
     for (std::size_t index = 0; index < state_.wheels.size(); ++index) {
         auto& wheel = state_.wheels[index];
+        const auto tire = resolved_tire_parameters(parameters_, index);
         const float longitudinal_velocity = wheel_longitudinal_velocity[index];
         const float drive_torque = axle_drive_torque_per_wheel[index / 2];
         float brake_direction = 0.f;
@@ -1071,7 +1092,7 @@ VehicleState VehiclePhysics::update(
         const float wheel_brake_force = std::max(
             service_brake_per_wheel, parking_brake_per_wheel);
         const float brake_torque = wheel_brake_force
-            * parameters_.tire_radius_m * brake_direction;
+            * tire.radius_m * brake_direction;
         const float previous_angular_speed = wheel_angular_speed_rad_s_[index];
         const float applied_torque = drive_torque - brake_torque
             - traction_control_brake_torque[index];
@@ -1085,25 +1106,25 @@ VehicleState VehiclePhysics::update(
             // Couple tire force and wheel acceleration implicitly. This stays
             // stable at the 60 Hz host tick while still publishing real slip.
             const float longitudinal_gain =
-                parameters_.tire_longitudinal_stiffness_n / slip_denominator;
+                tire.longitudinal_stiffness_n / slip_denominator;
             const float angular_step = fdt / parameters_.wheel_inertia_kg_m2;
             const float implicit_denominator = 1.f + angular_step
-                * parameters_.tire_radius_m * parameters_.tire_radius_m
+                * tire.radius_m * tire.radius_m
                 * longitudinal_gain;
             const float implicit_angular_speed =
                 (previous_angular_speed
                  + angular_step
                     * (applied_torque
-                       + parameters_.tire_radius_m * longitudinal_gain
+                       + tire.radius_m * longitudinal_gain
                             * longitudinal_velocity))
                 / implicit_denominator;
             const float raw_implicit_slip =
-                (implicit_angular_speed * parameters_.tire_radius_m
+                (implicit_angular_speed * tire.radius_m
                     - longitudinal_velocity) / slip_denominator;
             const float implicit_slip = std::clamp(
                 raw_implicit_slip, -1.f, 1.f);
             const float raw_longitudinal_force =
-                parameters_.tire_longitudinal_stiffness_n * implicit_slip;
+                tire.longitudinal_stiffness_n * implicit_slip;
             tire_force_x = std::clamp(
                 raw_longitudinal_force,
                 -longitudinal_force_reserve[index],
@@ -1128,10 +1149,10 @@ VehicleState VehiclePhysics::update(
             wheel_angular_speed_rad_s_[index] = tire_force_saturated
                 ? previous_angular_speed + angular_step
                     * (applied_torque
-                       - tire_force_x * parameters_.tire_radius_m)
+                       - tire_force_x * tire.radius_m)
                 : implicit_angular_speed;
             wheel.longitudinal_slip = std::clamp(
-                (wheel_angular_speed_rad_s_[index] * parameters_.tire_radius_m
+                (wheel_angular_speed_rad_s_[index] * tire.radius_m
                     - longitudinal_velocity) / slip_denominator,
                 -1.f,
                 1.f);
@@ -1207,7 +1228,7 @@ VehicleState VehiclePhysics::update(
         if (!state_.wheels[index].in_contact) {
             continue;
         }
-        static_friction_capacity += parameters_.tire_friction
+        static_friction_capacity += resolved_tire_parameters(parameters_, index).friction_coefficient
             * effective_surface_friction_multiplier(
                 parameters_,
                 ground_surface_material_by_wheel_[index],
@@ -1225,7 +1246,14 @@ VehicleState VehiclePhysics::update(
             if (!wheel.in_contact) {
                 continue;
             }
-            const float load_fraction = wheel.normal_load / total_normal_load;
+            // Different front/rear compounds share a static hill reaction by
+            // available grip, so the lower-grip axle cannot exceed its circle.
+            // Equal compounds keep the original operation order exactly.
+            const bool mixed_axle_grip = resolved_tire_parameters(parameters_, 0).friction_coefficient
+                != resolved_tire_parameters(parameters_, 2).friction_coefficient;
+            const float load_fraction = mixed_axle_grip
+                ? tire_friction_limit_by_wheel[index] / static_friction_capacity
+                : wheel.normal_load / total_normal_load;
             const float body_force_x = required_static_force_x * load_fraction;
             const float body_force_y = required_static_force_y * load_fraction;
             const float tire_force_x = wheel_cosine[index] * body_force_x
@@ -1295,8 +1323,17 @@ VehicleState VehiclePhysics::update(
 
     if (std::abs(body_longitudinal_speed_mps_) > STOP_EPSILON) {
         const float motion_sign = std::copysign(1.f, body_longitudinal_speed_mps_);
-        const float rolling_resistance_force = motion_sign
-            * parameters_.rolling_resistance_coeff * total_normal_load;
+        const float front_rolling = resolved_tire_parameters(parameters_, 0).rolling_resistance_coefficient;
+        const float rear_rolling = resolved_tire_parameters(parameters_, 2).rolling_resistance_coefficient;
+        float rolling_resistance_force = motion_sign * front_rolling * total_normal_load;
+        if (front_rolling != rear_rolling) {
+            rolling_resistance_force = 0.f;
+            for (std::size_t index = 0; index < state_.wheels.size(); ++index) {
+                rolling_resistance_force += motion_sign
+                    * resolved_tire_parameters(parameters_, index).rolling_resistance_coefficient
+                    * state_.wheels[index].normal_load;
+            }
+        }
         total_force_x -= rolling_resistance_force;
         rolling_contact_force_x = -rolling_resistance_force;
         total_force_x -= 0.5f * parameters_.air_density_kg_m3
@@ -1379,6 +1416,12 @@ VehicleState VehiclePhysics::update(
         + solver_lateral_speed_mps_ * position_ground_basis.right[1];
 
     if (collision_world_) {
+        const float front_radius = resolved_tire_parameters(parameters_, 0).radius_m;
+        const float rear_radius = resolved_tire_parameters(parameters_, 2).radius_m;
+        // Whole-body broad phase covers the larger wheel envelope. Removing
+        // a curb collision requires the smaller wheel to clear it as well.
+        const float maximum_tire_radius = std::max(front_radius, rear_radius);
+        const float minimum_tire_radius = std::min(front_radius, rear_radius);
         const double collision_half_length =
             parameters_.wheelbase_m * 0.5 + parameters_.collision_body_overhang_m;
         const double collision_half_width =
@@ -1460,10 +1503,10 @@ VehicleState VehiclePhysics::update(
                 + rotation_projection_padding;
             const double expanded_forward_half_extent =
                 collider.shape.half_length_m + swept_body_forward_extent
-                + parameters_.tire_radius_m;
+                + maximum_tire_radius;
             const double expanded_right_half_extent =
                 collider.shape.half_width_m + swept_body_right_extent
-                + parameters_.tire_radius_m;
+                + maximum_tire_radius;
             const auto segment_stays_outside = [](
                 double start, double end, double half_extent) {
                 return (start < -half_extent && end < -half_extent)
@@ -1487,13 +1530,13 @@ VehicleState VehiclePhysics::update(
                 continue;
             }
             const double near_sample_offset = collider.shape.half_width_m
-                + parameters_.tire_radius_m;
+                + minimum_tire_radius;
             const double far_sample_offset = collider.shape.half_width_m
-                + parameters_.tire_radius_m
+                + maximum_tire_radius
                     * CURB_FAR_SUPPORT_TIRE_RADIUS_MULTIPLIER;
-            const double maximum_supported_rise = parameters_.tire_radius_m
+            const double maximum_supported_rise = minimum_tire_radius
                 * MAX_SUPPORTED_CURB_RISE_TIRE_RADIUS_FRACTION;
-            const double support_height_tolerance = parameters_.tire_radius_m
+            const double support_height_tolerance = minimum_tire_radius
                 * CURB_SUPPORT_RASTER_HEIGHT_TOLERANCE_TIRE_RADIUS_FRACTION;
             const double collider_height = collider.shape.half_height_m * 2.0;
             bool entire_swept_location_is_supported =
@@ -1503,7 +1546,7 @@ VehicleState VehiclePhysics::update(
             const int support_segment_count = std::max(
                 1,
                 static_cast<int>(std::ceil(
-                    support_interval_span / parameters_.tire_radius_m)));
+                    support_interval_span / minimum_tire_radius)));
             for (int sample = 0;
                  entire_swept_location_is_supported
                     && sample <= support_segment_count;
@@ -1856,6 +1899,21 @@ VehicleState VehiclePhysics::update(
 VehiclePhysics::DriveForceStep VehiclePhysics::advance_drive_force(
     const VehicleInput& in, float gear_sign, float fdt)
 {
+    if (parameters_.powertrain) {
+        const bool speed_limited = (gear_sign > 0.f
+                && body_longitudinal_speed_mps_ >= parameters_.max_forward_speed_mps)
+            || (gear_sign < 0.f && body_longitudinal_speed_mps_ <= -parameters_.max_reverse_speed_mps);
+        simcore_host::advance_powertrain(*parameters_.powertrain, *powertrain_state_,
+            {in.throttle, static_cast<int>(gear_sign), body_longitudinal_speed_mps_,
+                (wheel_angular_speed_rad_s_[0] + wheel_angular_speed_rad_s_[1]) * 0.5f,
+                (wheel_angular_speed_rad_s_[2] + wheel_angular_speed_rad_s_[3]) * 0.5f,
+                speed_limited || in.brake > 0.f}, fdt);
+        const auto& axle_torque = powertrain_state_->axle_drive_torque_nm;
+        const float equivalent_force = axle_torque[0] / resolved_tire_parameters(parameters_, 0).radius_m
+            + axle_torque[1] / resolved_tire_parameters(parameters_, 2).radius_m;
+        return {equivalent_force, powertrain_state_->drive_inhibited || powertrain_state_->shifting,
+            axle_torque};
+    }
     const float configured_drive_force = in.gear == VehicleGear::Reverse
         ? parameters_.max_reverse_force_n
         : parameters_.max_drive_force_n;
@@ -1977,7 +2035,8 @@ VehiclePhysics::SupportedPoseSnapshot VehiclePhysics::capture_supported_pose() c
         motorcycle_rider_attached_,
         suspension_compression_m_,
         suspension_base_force_n_,
-        suspension_had_contact_};
+        suspension_had_contact_,
+        powertrain_state_};
 }
 
 void VehiclePhysics::restore_supported_pose_and_stop(
@@ -2005,6 +2064,16 @@ void VehiclePhysics::restore_supported_pose_and_stop(
     solver_lateral_speed_mps_ = 0.f;
     solver_yaw_rate_rad_s_ = 0.f;
     applied_drive_force_n_ = 0.f;
+    powertrain_state_ = snapshot.powertrain;
+    if (powertrain_state_) {
+        // Rejected terrain motion must not consume fuel or advance the shift
+        // clock. Clear only attempted-tick outputs, retaining accepted state.
+        powertrain_state_->axle_drive_torque_nm = {};
+        powertrain_state_->combustion_torque_nm = 0.f;
+        powertrain_state_->transmission_input_torque_nm = 0.f;
+        powertrain_state_->crank_power_kw = 0.f;
+        powertrain_state_->fuel_flow_lph = 0.0;
+    }
     wheel_angular_speed_rad_s_.fill(0.f);
     suspension_compression_m_ = snapshot.suspension_compression;
     suspension_base_force_n_ = snapshot.suspension_force;
@@ -2017,7 +2086,7 @@ void VehiclePhysics::restore_supported_pose_and_stop(
     state_.yaw_rate = 0.f;
     state_.linear_velocity_body = {};
     state_.angular_velocity_body = {};
-    state_.rpm = parameters_.idle_rpm;
+    state_.rpm = powertrain_state_ ? powertrain_state_->engine_rpm : parameters_.idle_rpm;
     state_.gear = gear;
     state_.steering_angle =
         simcore_host::BodyFrameAdapter::solver_steering_to_canonical(
@@ -2042,9 +2111,26 @@ void VehiclePhysics::restore_supported_pose_and_stop(
 
 void VehiclePhysics::update_powertrain_telemetry(const VehicleInput& in, float fdt)
 {
+    if (powertrain_state_) {
+        state_.rpm = powertrain_state_->engine_rpm;
+        state_.fuel = static_cast<float>(100.0 * powertrain_state_->remaining_fuel_l
+            / parameters_.powertrain->fuel_tank.capacity_l);
+        state_.gear = in.gear;
+        return;
+    }
     // --- RPM (single-ratio driveline for the first physics milestone) ---
-    const float wheel_rpm = std::abs(state_.speed)
-        / (2.f * std::numbers::pi_v<float> * parameters_.tire_radius_m) * 60.f;
+    const float front_radius = resolved_tire_parameters(parameters_, 0).radius_m;
+    const float rear_radius = resolved_tire_parameters(parameters_, 2).radius_m;
+    float wheel_rpm = std::abs(state_.speed)
+        / (2.f * std::numbers::pi_v<float> * front_radius) * 60.f;
+    if (front_radius != rear_radius) {
+        const float rear_rpm = std::abs(state_.speed)
+            / (2.f * std::numbers::pi_v<float> * rear_radius) * 60.f;
+        // The reduced driveline reports drive-share-weighted shaft speed.
+        // Passive front tires must not determine the RPM of a RWD vehicle.
+        wheel_rpm = wheel_rpm * parameters_.front_drive_torque_fraction
+            + rear_rpm * (1.f - parameters_.front_drive_torque_fraction);
+    }
     const float gear_ratio = in.gear == VehicleGear::Reverse
         ? parameters_.reverse_gear_ratio
         : parameters_.drive_gear_ratio;
@@ -2199,11 +2285,15 @@ bool VehiclePhysics::update_wheel_contacts(
         simcore_host::GroundPointEnu point{};
         double wheel_x_m = 0.0;
         double wheel_y_m = 0.0;
+        double minimum_suspension_length_m = 0.0;
+        double tire_radius_m = 0.0;
     };
     std::array<SuspensionHardStopConstraint, 4> hard_stop_constraints{};
 
     for (std::size_t index = 0; index < state_.wheels.size(); ++index) {
         auto& wheel = state_.wheels[index];
+        const auto tire = resolved_tire_parameters(parameters_, index);
+        const auto& suspension_parameters = resolved_suspension_parameters(parameters_, index);
         const bool had_published_contact = wheel.in_contact;
         // Apply one orthonormal 3D body transform to the complete wheel
         // footprint. The previous split XY/Z formula preserved horizontal
@@ -2225,7 +2315,7 @@ bool VehiclePhysics::update_wheel_contacts(
              mount_up + GROUND_PENETRATION_RECOVERY_M},
             GROUND_QUERY_DEPTH_M + GROUND_PENETRATION_RECOVERY_M};
         const auto hit = simcore_host::runtime_tire_contact(request,
-            ground_query_->query_down(request), parameters_.tire_radius_m, runtime_tire_supports_);
+            ground_query_->query_down(request), tire.radius_m, runtime_tire_supports_);
 
         // GroundHit::distance_m is measured from the lifted query origin.
         // Suspension travel and penetration recovery use the real mount pose.
@@ -2283,21 +2373,21 @@ bool VehiclePhysics::update_wheel_contacts(
                 + normal_up * (mount_up - hit->point_enu.up_m)
             : 0.0;
         const double measured_suspension_length = body_up_normal_dot > 1e-6
-            ? (mount_normal_clearance - parameters_.tire_radius_m)
+            ? (mount_normal_clearance - tire.radius_m)
                 / body_up_normal_dot
             : std::numeric_limits<double>::infinity();
         const double maximum_suspension_length =
-            parameters_.suspension.rest_length_m
-            + parameters_.suspension.max_extension_m;
+            suspension_parameters.rest_length_m
+            + suspension_parameters.max_extension_m;
         const bool suspension_contact = valid_surface_hit
             && body_up_normal_dot > 1e-6
             && std::isfinite(measured_suspension_length)
             && measured_suspension_length <= maximum_suspension_length;
         const double minimum_suspension_length =
-            parameters_.suspension.rest_length_m
-            - parameters_.suspension.max_compression_m;
+            suspension_parameters.rest_length_m
+            - suspension_parameters.max_compression_m;
         const double compression_stop_clearance = mount_normal_clearance
-            - parameters_.tire_radius_m
+            - tire.radius_m
             - minimum_suspension_length * body_up_normal_dot;
         compression_stop_active_[index] = suspension_contact
             && compression_stop_clearance <= HARD_STOP_ACTIVATION_SLOP_M;
@@ -2314,7 +2404,9 @@ bool VehiclePhysics::update_wheel_contacts(
                     {normal_east, normal_north, normal_up},
                     hit->point_enu,
                     wheel_x[index],
-                    wheel_y[index]};
+                    wheel_y[index],
+                    minimum_suspension_length,
+                    tire.radius_m};
             }
         }
 
@@ -2329,7 +2421,7 @@ bool VehiclePhysics::update_wheel_contacts(
             wheel.lateral_force = 0.f;
             if (update_suspension) {
                 suspension_compression_m_[index] =
-                    -parameters_.suspension.max_extension_m;
+                    -suspension_parameters.max_extension_m;
                 suspension_base_force_n_[index] = 0.f;
                 suspension_had_contact_[index] = false;
             }
@@ -2362,15 +2454,15 @@ bool VehiclePhysics::update_wheel_contacts(
                 - tire_center_delta_north * heading_sine,
             tire_center_up};
         wheel.contact_point_enu = {
-            tire_center_east - normal_east * parameters_.tire_radius_m,
-            tire_center_north - normal_north * parameters_.tire_radius_m,
-            tire_center_up - normal_up * parameters_.tire_radius_m};
+            tire_center_east - normal_east * tire.radius_m,
+            tire_center_north - normal_north * tire.radius_m,
+            tire_center_up - normal_up * tire.radius_m};
 
         const float measured_suspension_length_m =
             static_cast<float>(measured_suspension_length);
         if (update_suspension) {
             const auto suspension = simcore_host::evaluate_suspension(
-                parameters_.suspension,
+                suspension_parameters,
                 measured_suspension_length_m,
                 suspension_compression_m_[index],
                 suspension_had_contact_[index],
@@ -2385,7 +2477,7 @@ bool VehiclePhysics::update_wheel_contacts(
             // pass. Seed its load immediately so a published contact never
             // carries a contradictory zero normal force.
             const auto suspension = simcore_host::evaluate_suspension(
-                parameters_.suspension,
+                suspension_parameters,
                 measured_suspension_length_m,
                 suspension_compression_m_[index],
                 false,
@@ -2466,9 +2558,6 @@ bool VehiclePhysics::update_wheel_contacts(
         // corner therefore raises/pitches the body and a side corner raises/
         // rolls it, avoiding both terrain penetration and the old "floating
         // body" response where every impact lifted the chassis only in Z.
-        const double minimum_suspension_length =
-            parameters_.suspension.rest_length_m
-            - parameters_.suspension.max_compression_m;
         bool corrected = false;
         // Ordinary road penetration converges in a few passes.  Keep enough
         // iterations for deterministic recovery after a temporarily missing
@@ -2496,6 +2585,8 @@ bool VehiclePhysics::update_wheel_contacts(
                     continue;
                 }
 
+                const double minimum_suspension_length = constraint.minimum_suspension_length_m;
+
                 const std::array<double, 3> stop_offset{
                     constraint.wheel_x_m * constrained_basis.forward[0]
                         + constraint.wheel_y_m * constrained_basis.right[0]
@@ -2517,7 +2608,7 @@ bool VehiclePhysics::update_wheel_contacts(
                         * (stop_world[1] - constraint.point.north_m)
                     + constraint.normal[2]
                         * (stop_world[2] - constraint.point.up_m)
-                    - parameters_.tire_radius_m;
+                    - constraint.tire_radius_m;
                 if (clearance >= -penetration_tolerance_m) {
                     continue;
                 }
@@ -2586,6 +2677,7 @@ bool VehiclePhysics::update_wheel_contacts(
             if (!constraint.valid || constraint.normal[2] <= 1e-9) {
                 continue;
             }
+            const double minimum_suspension_length = constraint.minimum_suspension_length_m;
             const std::array<double, 3> stop_offset{
                 constraint.wheel_x_m * residual_basis.forward[0]
                     + constraint.wheel_y_m * residual_basis.right[0]
@@ -2604,7 +2696,7 @@ bool VehiclePhysics::update_wheel_contacts(
                 + constraint.normal[2]
                     * (state_.position_enu.z + stop_offset[2]
                        - constraint.point.up_m)
-                - parameters_.tire_radius_m;
+                - constraint.tire_radius_m;
             residual_z_lift_m = std::max(
                 residual_z_lift_m,
                 (-clearance + penetration_tolerance_m)
@@ -2649,6 +2741,7 @@ bool VehiclePhysics::update_wheel_contacts(
                 if (!constraint.valid) {
                     continue;
                 }
+                const double minimum_suspension_length = constraint.minimum_suspension_length_m;
                 const std::array<double, 3> stop_offset{
                     constraint.wheel_x_m * velocity_basis.forward[0]
                         + constraint.wheel_y_m * velocity_basis.right[0]
@@ -2667,7 +2760,7 @@ bool VehiclePhysics::update_wheel_contacts(
                     + constraint.normal[2]
                         * (state_.position_enu.z + stop_offset[2]
                            - constraint.point.up_m)
-                    - parameters_.tire_radius_m;
+                    - constraint.tire_radius_m;
                 if (clearance > HARD_STOP_ACTIVATION_SLOP_M) {
                     // A valid ray is not necessarily a compressed hard stop.
                     // Do not lock suspension travel at unloaded corners.

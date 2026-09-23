@@ -2,6 +2,14 @@
 
 namespace SimCoreProtocol
 {
+bool IsValidVehicleLoadoutId(const FString& Value)
+{
+	if (Value.IsEmpty()) return true;
+	if (Value.Len() > 64 || Value[0] < TEXT('a') || Value[0] > TEXT('z')) return false;
+	for (const TCHAR C : Value)
+		if (!((C >= TEXT('a') && C <= TEXT('z')) || (C >= TEXT('0') && C <= TEXT('9')) || C == TEXT('_'))) return false;
+	return true;
+}
 namespace
 {
 	constexpr int32 MaxWorldStateEntities = 256;
@@ -393,6 +401,9 @@ namespace
 			|| static_cast<uint8>(State.TurnIndicator) > 2
 			|| static_cast<uint8>(State.RuntimeVehicleClass)
 				> static_cast<uint8>(ERuntimeVehicleClass::Motorcycle)
+			|| !IsValidVehicleLoadoutId(State.VehicleLoadoutId)
+			|| (!State.VehicleLoadoutId.IsEmpty() && State.EntityKind != EEntityKind::NpcVehicle
+				&& State.EntityKind != EEntityKind::EgoVehicle)
 			|| (State.EntityKind != EEntityKind::NpcVehicle
 				&& State.HornEventSequence != 0)
 			|| ((State.EntityKind != EEntityKind::NpcVehicle
@@ -462,6 +473,7 @@ namespace
 
 	bool ParseEntity(TArrayView<const uint8> Data, FVehicleState& State)
 	{
+		bool bHasLoadout = false;
 		auto ParseVector = [](TArrayView<const uint8> VectorData, FVector3d& Out) {
 			FReader VectorReader(VectorData);
 			while (!VectorReader.AtEnd()) {
@@ -621,6 +633,11 @@ namespace
 				if (Wire != 0 || !Reader.ReadVarint(Integer)
 					|| Integer > static_cast<uint8>(ERuntimeVehicleClass::Motorcycle)) return false;
 				State.RuntimeVehicleClass = static_cast<ERuntimeVehicleClass>(Integer);
+				break;
+			case 41:
+				if (Wire != 2 || bHasLoadout || !Reader.ReadString(State.VehicleLoadoutId, 64)
+					|| !IsValidVehicleLoadoutId(State.VehicleLoadoutId)) return false;
+				bHasLoadout = true;
 				break;
 			default: if (!Reader.Skip(Wire)) return false; break;
 			}
@@ -961,8 +978,10 @@ TArray<uint8> SerializeSimulationResetEnvelope(
 	uint64 Sequence,
 	const FString& SourceId,
 	const FString& ConnectionSessionId,
-	const FString& MapChecksum)
+	const FString& MapChecksum,
+	const FString& RequestedLoadoutId)
 {
+	if (!IsValidVehicleLoadoutId(RequestedLoadoutId)) return {};
 	TArray<uint8> Reset;
 	WriteString(Reset, 1, PlaySessionId);
 	WriteTag(Reset, 2, 0); WriteVarint(Reset, ClientTimeNs);
@@ -970,6 +989,7 @@ TArray<uint8> SerializeSimulationResetEnvelope(
 		static_cast<uint8>(RequestedVehicleClass) <= static_cast<uint8>(ERuntimeVehicleClass::Motorcycle)
 			? static_cast<uint8>(RequestedVehicleClass)
 			: static_cast<uint8>(ERuntimeVehicleClass::Sedan));
+	if (!RequestedLoadoutId.IsEmpty()) WriteString(Reset, 4, RequestedLoadoutId);
 
 	TArray<uint8> Envelope;
 	WriteTag(Envelope, 1, 0); WriteVarint(Envelope, SchemaVersion);

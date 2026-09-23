@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "id": "drivetrain_sedan_rwd",
+  "name": "Sedan reference rear-wheel drivetrain",
+  "kind": "drivetrain",
+  "interface_id": "drivetrain_sedan",
+  "mass": {
+    "mass_kg": 30,
+    "center_of_mass_m": [
+      0,
+      0,
+      0
+    ],
+    "inertia_diagonal_kg_m2": [
+      1.5,
+      2,
+      2
+    ]
+  },
+  "specification": {
+    "final_drive_ratio": 3.5,
+    "front_torque_fraction": 0,
+    "efficiency": 0.96
+  }
+}

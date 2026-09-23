@@ -26,11 +26,7 @@
 #include <timeapi.h>
 #endif
 
-#include "config.hpp"
 #include "physics/vehicle_config.hpp"
-#if defined(SIMCORE_ENABLE_ZMQ_OBSERVER)
-#include "publisher/zmq_publisher.hpp"
-#endif
 #include "runtime_options.hpp"
 #include "simulation_host.hpp"
 #include "terrain/map_package_runtime.hpp"
@@ -205,6 +201,14 @@ int run_simcore(const simcore_host::RuntimeOptions& options,
 
     const auto loaded_vehicle = simcore_host::load_vehicle_parameters(
         options.vehicle_config_path);
+    const auto vehicle_catalog = std::make_shared<const simcore_host::RuntimeVehicleCatalog>(
+        options.vehicle_catalog_path
+            ? simcore_host::load_runtime_vehicle_catalog(*options.vehicle_catalog_path)
+            : simcore_host::default_runtime_vehicle_catalog());
+    for (const auto& profile : vehicle_catalog->fleet()) {
+        (void)vehicle_catalog->player_parameters(loaded_vehicle.parameters, profile.vehicle_class);
+    }
+    const std::string vehicle_identity = loaded_vehicle.checksum + "+" + vehicle_catalog->checksum();
     auto map_package = simcore_host::load_runtime_map_package(
         options.map_package_path);
     const std::string map_package_checksum = map_package.collision_checksum;
@@ -212,14 +216,14 @@ int run_simcore(const simcore_host::RuntimeOptions& options,
     if (options.record_physics_path || options.verify_physics_replay_path) {
         const simcore_host::PhysicsReplayIdentity replay_identity{
             simcore_host::physics_replay_file_checksum(executable_path),
-            loaded_vehicle.checksum, map_package_checksum,
+            vehicle_identity, map_package_checksum,
             options.origin_lat_deg, options.origin_lon_deg, options.origin_alt_m,
             options.spawn_heading_deg, options.physics_frequency_hz};
         if (options.verify_physics_replay_path) {
             const auto result = simcore_host::verify_physics_replay(
                 *options.verify_physics_replay_path, replay_identity,
                 loaded_vehicle.parameters, map_package.ground_query,
-                map_package.collision_world);
+                map_package.collision_world, vehicle_catalog.get());
             std::cout << std::setprecision(12)
                 << "[Replay] PASS frames=" << result.frames << " events=" << result.events
                 << " resets=" << result.resets
@@ -242,6 +246,7 @@ int run_simcore(const simcore_host::RuntimeOptions& options,
             : ground_diagnostics.spatial_cell_count;
     std::cout << "[Config] vehicle=" << loaded_vehicle.source_path.string()
               << " checksum=" << loaded_vehicle.checksum << "\n";
+    std::cout << "[Config] vehicle_catalog=" << vehicle_catalog->checksum() << "\n";
     std::cout << "[Map] package="
               << std::filesystem::absolute(options.map_package_path).string()
               << " id=" << map_package.map_id
@@ -300,20 +305,12 @@ int run_simcore(const simcore_host::RuntimeOptions& options,
     net::io_context ioc;
 
     std::unique_ptr<WsServer> ws_server;
-#if defined(SIMCORE_ENABLE_ZMQ_OBSERVER)
-    ZmqPublisher publisher(Config::ZMQ_BIND_ADDR);
-#endif
 
     SimulationHostCallbacks callbacks;
     callbacks.broadcast_world_state = [&ws_server, &ioc, &physics_replay](const std::string& message) {
         ws_server->broadcast_binary(message);
         if (physics_replay && physics_replay->complete()) ioc.stop();
     };
-#if defined(SIMCORE_ENABLE_ZMQ_OBSERVER)
-    callbacks.publish_observer_state = [&publisher](const std::string& message) {
-        publisher.publish(message);
-    };
-#endif
     callbacks.close_control_connections = [&ws_server](const std::string& reason) {
         ws_server->close_all(reason);
     };
@@ -330,6 +327,8 @@ int run_simcore(const simcore_host::RuntimeOptions& options,
     host_config.source_id = options.source_id;
     host_config.map_package_checksum = map_package_checksum;
     host_config.vehicle_parameters = loaded_vehicle.parameters;
+    host_config.vehicle_catalog = vehicle_catalog;
+    host_config.require_vehicle_catalog_identity = true;
     host_config.ground_query = map_package.ground_query;
     host_config.collision_world = map_package.collision_world;
     host_config.traffic_network = std::move(traffic_network);
@@ -398,11 +397,7 @@ int run_simcore(const simcore_host::RuntimeOptions& options,
         traffic_watcher->start();
     }
 
-    std::cout << "[SimCore] WS binary :" << options.ws_port;
-#if defined(SIMCORE_ENABLE_ZMQ_OBSERVER)
-    std::cout << "  ZMQ " << Config::ZMQ_BIND_ADDR;
-#endif
-    std::cout << "\n";
+    std::cout << "[SimCore] WS binary :" << options.ws_port << "\n";
 
     // A capture closed through Ctrl+C has a verifiable END footer. A force-
     // killed process intentionally leaves an incomplete, rejected recording.

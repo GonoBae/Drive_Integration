@@ -6,6 +6,7 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "SimCoreNpcPresentationActor.h"
+#include "SimCoreVehicleVisualProfile.h"
 
 USimCoreDriveReplayComponent::USimCoreDriveReplayComponent()
 {
@@ -21,7 +22,16 @@ void USimCoreDriveReplayComponent::EndPlay(const EEndPlayReason::Type EndPlayRea
 void USimCoreDriveReplayComponent::CaptureAuthoritativeState(
 	const SimCoreProtocol::FVehicleState& State)
 {
-	if (Mode == EMode::Recording) Track.Capture(State);
+	if (Mode != EMode::Recording) return;
+	if (!Track.MatchesRecordingIdentity(State))
+	{
+		Mode = EMode::Idle;
+		const bool bSaved = SaveLastTrack();
+		Notify(FString::Printf(TEXT("Drive recording stopped: vehicle or play session changed (%d frames%s)"),
+			Track.Frames.Num(), bSaved ? TEXT(", saved") : TEXT(", save failed")), FColor::Cyan);
+		return;
+	}
+	Track.Capture(State);
 }
 
 FString USimCoreDriveReplayComponent::LastTrackPath() const
@@ -64,6 +74,12 @@ void USimCoreDriveReplayComponent::ToggleRecording()
 	}
 	StopReplay();
 	Track.Reset();
+	FString CatalogError;
+	if (!SimCoreVehicleVisualProfile::CatalogChecksum(Track.VehicleCatalogChecksum, CatalogError))
+	{
+		Notify(TEXT("Cannot record: invalid vehicle catalog"), FColor::Red);
+		return;
+	}
 	Mode = EMode::Recording;
 	Notify(TEXT("Drive recording started (R to stop)"), FColor::Red);
 }
@@ -80,6 +96,25 @@ void USimCoreDriveReplayComponent::ToggleReplay()
 	{
 		Notify(TEXT("No saved drive replay"), FColor::Yellow);
 		return;
+	}
+	FString CatalogChecksum, CatalogError;
+	if (!SimCoreVehicleVisualProfile::CatalogChecksum(CatalogChecksum, CatalogError)
+		|| !SimCoreDriveReplay::ValidateCatalogIdentity(Track, CatalogChecksum, CatalogError))
+	{
+		Notify(CatalogError, FColor::Red);
+		return;
+	}
+	TSet<SimCoreProtocol::ERuntimeVehicleClass> ValidatedClasses;
+	for (const SimCoreDriveReplay::FFrame& Frame : Track.Frames)
+	{
+		if (ValidatedClasses.Contains(Frame.RuntimeVehicleClass)) continue;
+		SimCoreVehicleVisualProfile::FProfile Profile;
+		if (!SimCoreVehicleVisualProfile::Resolve(Frame.RuntimeVehicleClass, Track.VehicleLoadoutId, Profile))
+		{
+			Notify(TEXT("Cannot replay: recorded vehicle loadout is unavailable for its vehicle class"), FColor::Red);
+			return;
+		}
+		ValidatedClasses.Add(Frame.RuntimeVehicleClass);
 	}
 	if (!GetWorld()) return;
 	FActorSpawnParameters Spawn;

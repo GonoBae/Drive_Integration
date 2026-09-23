@@ -5,12 +5,6 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-option(
-    SIMCORE_ENABLE_ZMQ_OBSERVER
-    "Build the optional C++ to Python ZMQ observer transport"
-    OFF
-)
-
 if(MSVC)
     add_compile_options(/utf-8)
     add_compile_definitions(_WIN32_WINNT=0x0A00)
@@ -26,10 +20,16 @@ find_package(protobuf CONFIG REQUIRED)
 find_package(Boost CONFIG REQUIRED COMPONENTS system property_tree)
 find_package(Threads REQUIRED)
 
-if(SIMCORE_ENABLE_ZMQ_OBSERVER)
-    find_package(ZeroMQ CONFIG REQUIRED)
-    find_package(cppzmq CONFIG REQUIRED)
-endif()
+add_library(simcore_vehicle_catalog_core
+    src/vehicle_catalog/json_document.cpp
+    src/vehicle_catalog/vehicle_catalog_loader.cpp
+    src/vehicle_catalog/vehicle_assembly.cpp
+)
+target_include_directories(simcore_vehicle_catalog_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(simcore_vehicle_catalog_core PUBLIC protobuf::libprotobuf)
+
+add_executable(simcore_vehicle_catalog src/vehicle_catalog/catalog_main.cpp)
+target_link_libraries(simcore_vehicle_catalog PRIVATE simcore_vehicle_catalog_core simcore_runtime_vehicle_catalog)
 
 add_library(simcore_protocol
     src/protocol/vehicle_message_decoder.cpp
@@ -64,6 +64,7 @@ target_include_directories(simcore_collision PUBLIC
 
 add_library(simcore_physics
     src/physics/chassis_ground_contact.cpp
+    src/physics/powertrain_model.cpp
     src/physics/vehicle_config.cpp
     src/physics/vehicle_parameters.cpp
     src/physics/vehicle_physics.cpp
@@ -86,10 +87,17 @@ add_library(simcore_websocket
     src/websocket/ws_server.cpp
 )
 
+add_library(simcore_runtime_vehicle_catalog src/vehicle_catalog/runtime_vehicle_catalog.cpp)
+target_link_libraries(simcore_runtime_vehicle_catalog PUBLIC simcore_physics simcore_vehicle_catalog_core)
+target_compile_definitions(simcore_runtime_vehicle_catalog PRIVATE
+    SIMCORE_DEFAULT_RUNTIME_VEHICLE_CATALOG_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../unreal/DriveIntegration/Config/VehicleCatalog/catalog.json"
+)
+
 add_library(simcore_traffic
     src/traffic/traffic_network.cpp
     src/traffic/traffic_network_hot_reloader.cpp
     src/traffic/npc_lane_follower.cpp
+    src/traffic/npc_vehicle_modules.cpp
     src/traffic/npc_horn_policy.cpp
     src/traffic/npc_route_planner.cpp
     src/traffic/npc_lane_change.cpp
@@ -120,20 +128,6 @@ target_include_directories(simcore_runtime_options PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
-if(SIMCORE_ENABLE_ZMQ_OBSERVER)
-    add_library(simcore_zmq_publisher
-        src/publisher/zmq_publisher.cpp
-    )
-
-    target_include_directories(simcore_zmq_publisher PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-    )
-
-    target_link_libraries(simcore_zmq_publisher PUBLIC
-        cppzmq
-    )
-endif()
-
 add_library(simcore_host_core
     src/player_vehicle_profile.cpp
     src/replay/physics_replay.cpp
@@ -148,6 +142,7 @@ target_include_directories(simcore_host_core PUBLIC
 )
 
 target_link_libraries(simcore_host_core PUBLIC
+    simcore_runtime_vehicle_catalog
     simcore_physics
     simcore_traffic
     simcore_protocol
@@ -173,15 +168,6 @@ target_compile_definitions(simcore_publisher PRIVATE
     SIMCORE_DEFAULT_MAP_PACKAGE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../map_packages/wall_broad_v1"
 )
 
-if(SIMCORE_ENABLE_ZMQ_OBSERVER)
-    target_compile_definitions(simcore_publisher PRIVATE
-        SIMCORE_ENABLE_ZMQ_OBSERVER=1
-    )
-    target_link_libraries(simcore_publisher PRIVATE
-        simcore_zmq_publisher
-    )
-endif()
-
 if(WIN32)
     target_link_libraries(simcore_publisher PRIVATE winmm)
 endif()
@@ -189,11 +175,34 @@ endif()
 include(CTest)
 
 if(BUILD_TESTING)
+    add_executable(runtime_vehicle_catalog_tests tests/runtime_vehicle_catalog_test.cpp)
+    target_link_libraries(runtime_vehicle_catalog_tests PRIVATE simcore_runtime_vehicle_catalog)
+    target_compile_definitions(runtime_vehicle_catalog_tests PRIVATE
+        SIMCORE_TEST_RUNTIME_VEHICLE_CATALOG_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../unreal/DriveIntegration/Config/VehicleCatalog/catalog.json"
+        SIMCORE_TEST_VEHICLE_CONFIG_PATH="${CMAKE_CURRENT_SOURCE_DIR}/config/vehicle_sedan.cfg"
+    )
+    add_test(NAME runtime_vehicle_catalog_tests COMMAND runtime_vehicle_catalog_tests)
+    add_executable(vehicle_catalog_tests tests/vehicle_catalog_test.cpp)
+    target_link_libraries(vehicle_catalog_tests PRIVATE simcore_vehicle_catalog_core)
+    target_compile_definitions(vehicle_catalog_tests PRIVATE
+        SIMCORE_TEST_VEHICLE_CATALOG_PATH="${CMAKE_CURRENT_SOURCE_DIR}/config/vehicles/catalog.json"
+    )
+    add_test(NAME vehicle_catalog_tests COMMAND vehicle_catalog_tests)
+    set_tests_properties(vehicle_catalog_tests PROPERTIES TIMEOUT 20)
+    add_executable(vehicle_catalog_json_tests tests/vehicle_catalog_json_test.cpp)
+    target_link_libraries(vehicle_catalog_json_tests PRIVATE simcore_vehicle_catalog_core)
+    add_test(NAME vehicle_catalog_json_tests COMMAND vehicle_catalog_json_tests)
+    set_tests_properties(vehicle_catalog_json_tests PROPERTIES TIMEOUT 20)
+    add_test(NAME vehicle_catalog_validation COMMAND simcore_vehicle_catalog
+        "${CMAKE_CURRENT_SOURCE_DIR}/config/vehicles/catalog.json")
     add_executable(runtime_collision_reaction_tests tests/runtime_collision_reaction_test.cpp)
     target_link_libraries(runtime_collision_reaction_tests PRIVATE simcore_host_core)
     add_test(NAME runtime_collision_reaction_tests COMMAND runtime_collision_reaction_tests)
     add_executable(physics_replay_tests tests/physics_replay_test.cpp)
     target_link_libraries(physics_replay_tests PRIVATE simcore_host_core simcore_runtime_options)
+    target_compile_definitions(physics_replay_tests PRIVATE
+        SIMCORE_TEST_RUNTIME_VEHICLE_CATALOG_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../unreal/DriveIntegration/Config/VehicleCatalog/catalog.json"
+    )
     add_test(NAME physics_replay_tests COMMAND physics_replay_tests)
     set_tests_properties(physics_replay_tests PROPERTIES TIMEOUT 20)
     add_executable(npc_host_tests tests/npc_host_test.cpp)
@@ -244,6 +253,21 @@ if(BUILD_TESTING)
     add_executable(motorcycle_physics_tests tests/motorcycle_physics_test.cpp)
     target_link_libraries(motorcycle_physics_tests PRIVATE simcore_host_core)
     add_test(NAME motorcycle_physics_tests COMMAND motorcycle_physics_tests)
+
+    add_executable(axle_contact_physics_tests tests/axle_contact_physics_test.cpp)
+    target_link_libraries(axle_contact_physics_tests PRIVATE simcore_physics)
+    add_test(NAME axle_contact_physics_tests COMMAND axle_contact_physics_tests)
+    add_executable(powertrain_physics_tests tests/powertrain_physics_test.cpp)
+    target_link_libraries(powertrain_physics_tests PRIVATE simcore_physics)
+    add_test(NAME powertrain_physics_tests COMMAND powertrain_physics_tests)
+    set_tests_properties(powertrain_physics_tests PROPERTIES TIMEOUT 20)
+    add_executable(npc_vehicle_modules_tests tests/npc_vehicle_modules_test.cpp)
+    target_link_libraries(npc_vehicle_modules_tests PRIVATE simcore_traffic)
+    add_test(NAME npc_vehicle_modules_tests COMMAND npc_vehicle_modules_tests)
+    add_executable(vehicle_loadout_host_tests tests/vehicle_loadout_host_test.cpp)
+    target_link_libraries(vehicle_loadout_host_tests PRIVATE simcore_host_core)
+    add_test(NAME vehicle_loadout_host_tests COMMAND vehicle_loadout_host_tests)
+    set_tests_properties(vehicle_loadout_host_tests PROPERTIES TIMEOUT 30)
     add_executable(npc_lane_follower_tests tests/npc_lane_follower_test.cpp)
     target_link_libraries(npc_lane_follower_tests PRIVATE simcore_traffic)
     add_test(NAME npc_lane_follower_tests COMMAND npc_lane_follower_tests)
@@ -337,6 +361,7 @@ if(BUILD_TESTING)
 
     target_link_libraries(signal_city_course_tests PRIVATE
         simcore_physics
+        simcore_runtime_vehicle_catalog
     )
 
     target_compile_definitions(signal_city_course_tests PRIVATE

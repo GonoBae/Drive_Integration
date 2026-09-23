@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "id": "sedan_reference",
+  "name": "Reference sedan chassis",
+  "category": "sedan",
+  "dynamics_model": "four_wheel",
+  "chassis_mass": {
+    "mass_kg": 1048.0,
+    "center_of_mass_m": [0.0, 0.0, 0.55],
+    "inertia_diagonal_kg_m2": [600.0, 1800.0, 2300.0]
+  },
+  "body_dimensions_m": [4.5, 1.9, 1.45],
+  "drag_coefficient": 0.30,
+  "frontal_area_m2": 2.2,
+  "mounts": {
+    "engine": {"interface_id": "engine_sedan", "position_m": [1.0, 0.0, 0.5]},
+    "transmission": {"interface_id": "transmission_sedan", "position_m": [0.5, 0.0, 0.4]},
+    "drivetrain": {"interface_id": "drivetrain_sedan", "position_m": [-0.2, 0.0, 0.3]},
+    "steering": {"interface_id": "steering_sedan", "position_m": [0.8, 0.4, 0.75]},
+    "fuel_tank": {"interface_id": "fuel_tank_sedan", "position_m": [-1.0, 0.0, 0.4]}
+  },
+  "front_axle": {
+    "x_m": 1.35,
+    "track_m": 1.58,
+    "wheel_center_z_m": 0.32,
+    "min_tire_radius_m": 0.30,
+    "max_tire_radius_m": 0.35,
+    "max_tire_width_m": 0.235,
+    "wheel_interface": "wheel_hub_sedan",
+    "suspension_interface": "suspension_sedan",
+    "brake_interface": "brake_sedan"
+  },
+  "rear_axle": {
+    "x_m": -1.35,
+    "track_m": 1.58,
+    "wheel_center_z_m": 0.32,
+    "min_tire_radius_m": 0.30,
+    "max_tire_radius_m": 0.35,
+    "max_tire_width_m": 0.235,
+    "wheel_interface": "wheel_hub_sedan",
+    "suspension_interface": "suspension_sedan",
+    "brake_interface": "brake_sedan"
+  }
+}

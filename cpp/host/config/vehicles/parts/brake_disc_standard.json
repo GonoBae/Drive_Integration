@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "id": "brake_disc_standard",
+  "name": "Reference disc brake per corner",
+  "kind": "brake",
+  "interface_id": "brake_sedan",
+  "mass": {
+    "mass_kg": 10.0,
+    "center_of_mass_m": [0.0, 0.0, 0.0],
+    "inertia_diagonal_kg_m2": [0.08, 0.12, 0.08]
+  },
+  "specification": {
+    "max_torque_nm": 2000.0,
+    "handbrake_torque_nm": 1800.0
+  }
+}

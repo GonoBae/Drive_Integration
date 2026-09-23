@@ -269,7 +269,6 @@ struct Harness {
     explicit Harness(SimulationHostConfig config)
         : host(ioc, std::move(config), {
               [this](const std::string& bytes) { frames.push_back(parse(bytes)); },
-              {},
               [this](const std::string& reason) { close_reasons.push_back(reason); }})
     {}
 

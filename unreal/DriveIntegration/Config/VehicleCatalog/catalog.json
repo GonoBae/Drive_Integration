@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "profiles": [
+    "profiles/sedan.json",
+    "profiles/compact.json",
+    "profiles/truck.json",
+    "profiles/motorcycle.json"
+  ],
+  "parts": [
+    "parts/tire_sedan_front_standard.json",
+    "parts/tire_sedan_rear_standard.json",
+    "parts/tire_sedan_comfort.json",
+    "parts/suspension_sedan_standard.json",
+    "parts/suspension_sedan_comfort.json",
+    "parts/engine_sedan_gasoline_2_0.json",
+    "parts/transmission_sedan_automatic_6speed.json",
+    "parts/drivetrain_sedan_rwd.json",
+    "parts/fuel_tank_sedan_50l.json"
+  ],
+  "loadouts": [
+    "loadouts/sedan_modular_standard.json",
+    "loadouts/sedan_modular_comfort.json"
+  ]
+}

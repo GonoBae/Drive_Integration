@@ -870,4 +870,56 @@ bool FSimCoreDownedWireTest::RunTest(const FString& Parameters)
 	return Ok;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSimCoreNpcLoadoutPresentationTest,
+	"DriveIntegration.NpcPresentation.SameClassLoadoutRefresh",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FSimCoreNpcLoadoutPresentationTest::RunTest(const FString& Parameters)
+{
+	using namespace SimCoreNpcPresentationTests;
+	FTestWorld Scene;
+	if (!TestNotNull(TEXT("isolated loadout presentation world"), Scene.World)) return false;
+	ASimCoreNpcPresentationActor* Actor = Scene.World->SpawnActor<ASimCoreNpcPresentationActor>();
+	if (!TestNotNull(TEXT("loadout presentation actor"), Actor)) return false;
+	auto State = Npc(3.2f);
+	State.RuntimeVehicleClass = ERuntimeVehicleClass::Sedan;
+	State.PlaySessionId = Play;
+	State.MapPackageChecksum = MapChecksum;
+	bool Ok = TestTrue(TEXT("baseline sedan snapshot presents"),
+		Actor->ApplySnapshot(State, 0.f, 0.f, true, 0.f, FVector::ZeroVector));
+	UStaticMeshComponent* Front = Actor->GetWheel(0);
+	UStaticMeshComponent* Rear = Actor->GetWheel(2);
+	if (!TestTrue(TEXT("authored axle meshes available"), Front && Rear && Front->GetStaticMesh() && Rear->GetStaticMesh())) return false;
+	const FVector BaselineFrontScale = Front->GetRelativeScale3D();
+	const FVector BaselineRearScale = Rear->GetRelativeScale3D();
+	State.VehicleLoadoutId = TEXT("sedan_modular_standard");
+	Ok &= TestTrue(TEXT("same class with a new loadout refreshes presentation"),
+		Actor->ApplySnapshot(State, 0.f, .05f, true, 0.f, FVector::ZeroVector));
+	Ok &= TestEqual(TEXT("preset retains sedan body class"), Actor->GetRuntimeVehicleClass(), ERuntimeVehicleClass::Sedan);
+	const double FrontMeshRadius = Front->GetStaticMesh()->GetBoundingBox().GetExtent().Z * .01;
+	const double RearMeshRadius = Rear->GetStaticMesh()->GetBoundingBox().GetExtent().Z * .01;
+	Ok &= TestTrue(TEXT("front rendered radius uses the selected 0.32 m tire"),
+		FMath::IsNearlyEqual(FrontMeshRadius * Front->GetRelativeScale3D().Z, .32, 1e-6));
+	Ok &= TestTrue(TEXT("rear rendered radius uses the selected 0.32 m tire"),
+		FMath::IsNearlyEqual(RearMeshRadius * Rear->GetRelativeScale3D().Z, .32, 1e-6));
+	const float ExpectedSpinDegrees = FMath::RadiansToDegrees((3.2f / .32f) * .05f);
+	Ok &= TestTrue(TEXT("front spin advances by road speed divided by selected radius"),
+		FMath::IsNearlyEqual(Actor->GetWheelSpinDegrees(), ExpectedSpinDegrees, 1e-4f));
+	const FQuat ExpectedRotation = FRotator(-ExpectedSpinDegrees, 0.f, 0.f).Quaternion();
+	Ok &= TestTrue(TEXT("front mesh applies the selected-radius spin"),
+		Front->GetRelativeRotation().Quaternion().Equals(ExpectedRotation, 1e-5));
+	Ok &= TestTrue(TEXT("rear mesh applies the selected-radius spin"),
+		Rear->GetRelativeRotation().Quaternion().Equals(ExpectedRotation, 1e-5));
+	State.VehicleLoadoutId.Reset();
+	Ok &= TestTrue(TEXT("clearing the ID restores the same-class default"),
+		Actor->ApplySnapshot(State, 0.f, 0.f, true, 0.f, FVector::ZeroVector));
+	Ok &= TestTrue(TEXT("default restores authored front wheel scale"), Front->GetRelativeScale3D().Equals(BaselineFrontScale, 1e-9));
+	Ok &= TestTrue(TEXT("default restores authored rear wheel scale"), Rear->GetRelativeScale3D().Equals(BaselineRearScale, 1e-9));
+	State.VehicleLoadoutId = TEXT("unknown_loadout");
+	Ok &= TestFalse(TEXT("unknown loadout cannot display the previous setup"),
+		Actor->ApplySnapshot(State, 0.f, 0.f, true, 0.f, FVector::ZeroVector));
+	Ok &= TestTrue(TEXT("unknown loadout hides the stale actor"), Actor->IsHidden());
+	return Ok;
+}
+
 #endif

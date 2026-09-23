@@ -25,6 +25,29 @@ foreach ($argument in @('-platform=Win64', '-clientconfig=Development', '-build'
 }
 Assert-PackageCondition ($plan.UatArguments -contains "-project=$($plan.Project)") 'project path must remain one argument'
 Assert-PackageCondition ($plan.UatArguments -contains "-archivedirectory=$($plan.Destination)") 'archive path mismatch'
+$catalogManifest = Get-Content -LiteralPath (Join-Path $repository 'unreal/DriveIntegration/Config/VehicleCatalog/catalog.json') -Raw | ConvertFrom-Json
+$expectedCatalogFiles = 5 + @($catalogManifest.parts).Count + @($catalogManifest.loadouts).Count
+Assert-PackageCondition ($plan.VehicleCatalogFiles.Count -eq $expectedCatalogFiles) 'plan must require the manifest, four runtime profiles, and every listed axle part'
+foreach ($catalogFile in $plan.VehicleCatalogFiles) {
+    Assert-PackageCondition ($catalogFile.SourceRelative.StartsWith('unreal/DriveIntegration/Config/VehicleCatalog/')) 'catalog source must be the shared Unreal config'
+    Assert-PackageCondition ($catalogFile.PackageRelative.StartsWith('Windows/DriveIntegration/Config/VehicleCatalog/')) 'catalog must use the exact Unreal NonUFS archive location'
+    Assert-PackageCondition (Test-Path -LiteralPath $catalogFile.Source -PathType Leaf) 'required shared catalog source must exist'
+}
+$sourceRuntimeConfig = Get-Content -LiteralPath (Join-Path $repository 'cpp\host\config\signal_city_server.cfg') -Raw
+$packagedRuntimeConfig = ConvertTo-SimCorePackagedRuntimeConfig -Content $sourceRuntimeConfig
+$sourceCatalogPath = '../../../unreal/DriveIntegration/Config/VehicleCatalog/catalog.json'
+$packagedCatalogPath = '../../../Windows/DriveIntegration/Config/VehicleCatalog/catalog.json'
+Assert-PackageCondition ($packagedRuntimeConfig -eq $sourceRuntimeConfig.Replace($sourceCatalogPath, $packagedCatalogPath)) 'packaging must only rewrite the catalog location'
+$resolvedPackagedCatalog = [IO.Path]::GetFullPath((Join-Path (Join-Path $plan.Destination 'cpp\host\config') $packagedCatalogPath))
+Assert-PackageCondition ($resolvedPackagedCatalog -eq (Join-Path $plan.Destination 'Windows\DriveIntegration\Config\VehicleCatalog\catalog.json')) 'server catalog must resolve to the same files as the packaged client'
+foreach ($invalidConfig in @(
+    ($sourceRuntimeConfig -replace '(?m)^vehicle_catalog=[^\r\n]*', ''),
+    ($sourceRuntimeConfig + "`nvehicle_catalog=$sourceCatalogPath`n"),
+    ($sourceRuntimeConfig.Replace($sourceCatalogPath, 'C:/other-catalog/catalog.json')))) {
+    $rejected = $false
+    try { ConvertTo-SimCorePackagedRuntimeConfig -Content $invalidConfig | Out-Null } catch { $rejected = $true }
+    Assert-PackageCondition $rejected 'missing, duplicate or alternate catalog source must fail packaging preflight'
+}
 
 $files = Get-SimCorePackageLaunchFiles -ServerPort 9107
 Assert-PackageCondition ($files['SimCoreClient.ini'].Contains('ServerUrl=ws://127.0.0.1:9107/')) 'INI port must follow server config'
@@ -49,6 +72,22 @@ foreach ($directory in @('/Game/Vehicles', '/Game/Characters/Mannequins/Meshes',
 }
 $moduleRules = Get-Content -LiteralPath (Join-Path $repository 'unreal\DriveIntegration\Source\DriveIntegration\DriveIntegration.Build.cs') -Raw
 Assert-PackageCondition ($moduleRules.Contains('RuntimeDependencies.Add("$(ProjectDir)/Config/sensors.json", StagedFileType.NonUFS)')) 'SensorRig JSON must be staged as an exact loose runtime dependency'
+Assert-PackageCondition ($moduleRules.Contains('RuntimeDependencies.Add("$(ProjectDir)/Config/VehicleCatalog/" + File, StagedFileType.NonUFS)')) 'shared vehicle catalog must be staged as exact loose runtime files'
+foreach ($catalogFile in $plan.VehicleCatalogFiles) {
+    $relative = $catalogFile.SourceRelative.Substring('unreal/DriveIntegration/Config/VehicleCatalog/'.Length)
+    if ($relative.StartsWith('parts/')) {
+        Assert-PackageCondition ($moduleRules.Contains('parts')) 'runtime staging rule must include axle parts'
+    } elseif ($relative.StartsWith('loadouts/')) {
+        Assert-PackageCondition ($moduleRules.Contains('loadouts')) 'runtime staging rule must include loadouts'
+    } else {
+        Assert-PackageCondition ($moduleRules.Contains('"' + $relative + '"')) "runtime staging rule missing catalog file $relative"
+    }
+}
+$catalogInventory = @(Get-SimCorePackageInventory -PackageRoot (Join-Path $repository 'unreal\DriveIntegration\Config\VehicleCatalog'))
+Assert-PackageCondition ($catalogInventory.Count -eq $expectedCatalogFiles) 'catalog source inventory must hash every shared profile and axle part'
+foreach ($entry in $catalogInventory) {
+    Assert-PackageCondition ($entry.sha256 -match '^[0-9A-F]{64}' -and $entry.bytes -gt 0) 'catalog source inventory must contain hashes and byte sizes'
+}
 $sensorConfig = Join-Path $repository 'unreal\DriveIntegration\Config\sensors.json'
 Assert-PackageCondition (Test-Path -LiteralPath $sensorConfig -PathType Leaf) 'SensorRig source config must exist'
 $sensorHash = Get-SimCorePackageFileHash -LiteralPath $sensorConfig
@@ -69,6 +108,7 @@ foreach ($field in @('source_revision', 'source_dirty', 'source_snapshot_sha256'
     'prepackage_reference_not_packaged_acceptance', '--cached --others --exclude-standard')) {
     Assert-PackageCondition ($packagingScript.Contains($field)) "candidate provenance missing $field"
 }
+Assert-PackageCondition ($packagingScript.Contains('unreal/DriveIntegration/Config')) 'source snapshot must include tracked and untracked catalog files'
 $testParent = [IO.Path]::GetFullPath((Join-Path $repository 'runtime_tmp')) + '\'
 $testDirectory = Join-Path $testParent ('package-manifest-test-' + [Guid]::NewGuid().ToString('N'))
 [void](New-Item -ItemType Directory -Path $testDirectory)
@@ -89,6 +129,68 @@ try {
     $rejected = $false
     try { Test-SimCorePackageIntegrity -PackageRoot $testDirectory | Out-Null } catch { $rejected = $true }
     Assert-PackageCondition $rejected 'inventory traversal must be rejected'
+
+    foreach ($catalogFile in $plan.VehicleCatalogFiles) {
+        $catalogDestination = Join-Path $testDirectory $catalogFile.PackageRelative
+        [void](New-Item -ItemType Directory -Path (Split-Path -Parent $catalogDestination) -Force)
+        Copy-Item -LiteralPath $catalogFile.Source -Destination $catalogDestination
+    }
+    Assert-PackageCondition ((Test-SimCorePackagedVehicleCatalog -RepositoryRoot $repository -PackageRoot $testDirectory) -eq $expectedCatalogFiles) 'exact staged catalog copies must pass source hash verification'
+    $stagedCatalogInventory = @(Get-SimCorePackageInventory -PackageRoot $testDirectory | Where-Object { $_.path.StartsWith('Windows/DriveIntegration/Config/VehicleCatalog/') })
+    Assert-PackageCondition ($stagedCatalogInventory.Count -eq $expectedCatalogFiles) 'final package inventory must include every listed shared catalog file'
+    foreach ($entry in $stagedCatalogInventory) {
+        $catalogSource = @($plan.VehicleCatalogFiles | Where-Object { $_.PackageRelative -eq $entry.path })
+        Assert-PackageCondition ($catalogSource.Count -eq 1) 'package inventory must map to exactly one catalog source'
+        Assert-PackageCondition ($entry.sha256 -eq (Get-SimCorePackageFileHash -LiteralPath $catalogSource[0].Source)) 'staged inventory hash must match shared source bytes'
+    }
+    $partFile = @($plan.VehicleCatalogFiles | Where-Object { $_.SourceRelative.Contains('/parts/') })[0]
+    $stagedPart = Join-Path $testDirectory $partFile.PackageRelative
+    [IO.File]::AppendAllText($stagedPart, "`n")
+    $rejected = $false
+    try { Test-SimCorePackagedVehicleCatalog -RepositoryRoot $repository -PackageRoot $testDirectory | Out-Null } catch { $rejected = $true }
+    Assert-PackageCondition $rejected 'changed axle part must fail source hash verification'
+    Copy-Item -LiteralPath $partFile.Source -Destination $stagedPart -Force
+
+    $sourceFixture = Join-Path $testDirectory 'source'
+    foreach ($catalogFile in $plan.VehicleCatalogFiles) {
+        $sourceDestination = Join-Path $sourceFixture $catalogFile.SourceRelative
+        [void](New-Item -ItemType Directory -Path (Split-Path -Parent $sourceDestination) -Force)
+        Copy-Item -LiteralPath $catalogFile.Source -Destination $sourceDestination
+    }
+    $sourceManifestPath = Join-Path $sourceFixture 'unreal/DriveIntegration/Config/VehicleCatalog/catalog.json'
+    foreach ($invalidParts in @(
+        @{ parts = @($catalogManifest.parts[0], $catalogManifest.parts[0]) },
+        @{ parts = @('../outside.json') },
+        @{ parts = @('parts/missing.json') },
+        @{ parts = 'not an array' }
+    )) {
+        $fixtureCatalog = @{ schema_version = 1; profiles = $catalogManifest.profiles; parts = $invalidParts.parts }
+        $fixtureCatalog | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $sourceManifestPath -Encoding UTF8
+        $rejected = $false
+        try { Get-SimCoreRuntimeVehiclePackageFiles -RepositoryRoot $sourceFixture | Out-Null } catch { $rejected = $true }
+        Assert-PackageCondition $rejected 'duplicate, escaping, missing or malformed axle part source must fail preflight'
+    }
+    $tamperedCatalog = Join-Path $testDirectory $plan.VehicleCatalogFiles[0].PackageRelative
+    foreach ($invalidLoadouts in @(
+        @{ loadouts = @($catalogManifest.loadouts[0], $catalogManifest.loadouts[0]) },
+        @{ loadouts = @('../outside.json') },
+        @{ loadouts = @('loadouts/missing.json') },
+        @{ loadouts = 'not an array' }
+    )) {
+        $fixtureCatalog = @{ schema_version = 1; profiles = $catalogManifest.profiles; parts = $catalogManifest.parts; loadouts = $invalidLoadouts.loadouts }
+        $fixtureCatalog | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $sourceManifestPath -Encoding UTF8
+        $rejected = $false
+        try { Get-SimCoreRuntimeVehiclePackageFiles -RepositoryRoot $sourceFixture | Out-Null } catch { $rejected = $true }
+        Assert-PackageCondition $rejected 'invalid loadout sources must fail package preflight'
+    }
+    Set-Content -LiteralPath $tamperedCatalog -Value 'changed catalog fixture' -Encoding UTF8
+    $rejected = $false
+    try { Test-SimCorePackagedVehicleCatalog -RepositoryRoot $repository -PackageRoot $testDirectory | Out-Null } catch { $rejected = $true }
+    Assert-PackageCondition $rejected 'changed staged catalog must fail source hash verification'
+    Remove-Item -LiteralPath $tamperedCatalog
+    $rejected = $false
+    try { Test-SimCorePackagedVehicleCatalog -RepositoryRoot $repository -PackageRoot $testDirectory | Out-Null } catch { $rejected = $true }
+    Assert-PackageCondition $rejected 'missing staged catalog must fail source hash verification'
 } finally {
     $resolvedTestDirectory = [IO.Path]::GetFullPath($testDirectory)
     if (-not $resolvedTestDirectory.StartsWith($testParent, [StringComparison]::OrdinalIgnoreCase)) {

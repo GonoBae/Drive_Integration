@@ -13,6 +13,15 @@
 #include <type_traits>
 
 namespace simcore_host {
+bool valid_vehicle_loadout_id(std::string_view id)
+{
+    if (id.empty()) return true;
+    if (id.size() > 64 || id.front() < 'a' || id.front() > 'z') return false;
+    return std::all_of(id.begin(), id.end(), [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
+    });
+}
+
 namespace {
 
 simcore::VehicleGear to_proto_gear(VehicleGear gear)
@@ -249,6 +258,19 @@ void fill_runtime_entity_state(simcore::EntityState& entity,
     entity.set_npc_local_bypass_active(state.npc_local_bypass_active);
     entity.set_runtime_vehicle_class(
         static_cast<simcore::RuntimeVehicleClass>(state.vehicle_class));
+    if (!valid_vehicle_loadout_id(state.vehicle_loadout_id))
+        throw std::invalid_argument("invalid runtime vehicle loadout ID");
+    entity.set_vehicle_loadout_id(state.vehicle_loadout_id);
+    if (state.vehicle_module_telemetry) {
+        const auto& telemetry = *state.vehicle_module_telemetry;
+        if (state.kind != RuntimeEntityKind::NpcVehicle || !std::isfinite(telemetry.rpm)
+            || telemetry.rpm < 0 || !std::isfinite(telemetry.fuel_percent)
+            || telemetry.fuel_percent < 0 || telemetry.fuel_percent > 100)
+            throw std::invalid_argument("invalid runtime vehicle module telemetry");
+        entity.set_rpm(telemetry.rpm);
+        entity.set_fuel(telemetry.fuel_percent);
+        entity.set_gear(to_proto_gear(telemetry.gear));
+    }
     if (state.kind == RuntimeEntityKind::Pedestrian && !state.dent_patches.empty())
         throw std::invalid_argument("pedestrian cannot carry vehicle dent patches");
     fill_dent_patches(entity,state.dent_patches);
@@ -444,6 +466,9 @@ std::string serialize_world_state_envelope(
     fill_envelope(envelope, metadata);
     auto* world_state = envelope.mutable_world_state();
     fill_entity_state(*world_state->add_entities(), state, ego_vehicle_class);
+    if (!valid_vehicle_loadout_id(metadata.vehicle_loadout_id))
+        throw std::invalid_argument("invalid Ego vehicle loadout ID");
+    world_state->mutable_entities(0)->set_vehicle_loadout_id(std::string(metadata.vehicle_loadout_id));
     if (health) {
         fill_health(*world_state->mutable_health(), *health);
     }

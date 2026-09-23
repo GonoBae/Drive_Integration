@@ -48,6 +48,7 @@ void apply_values(
     };
 
     options.vehicle_config_path = resolve_path("vehicle_config");
+    if (values.contains("vehicle_catalog")) options.vehicle_catalog_path = resolve_path("vehicle_catalog");
     options.map_package_path = resolve_path("map_package");
     if (values.contains("traffic_network")) {
         options.traffic_network_path = resolve_path("traffic_network");
@@ -252,7 +253,7 @@ RuntimeOptions load_runtime_config(
     };
     for (const auto& [key, value] : values) {
         (void)value;
-        if (!expected_keys.contains(key) && key != "traffic_network"
+        if (!expected_keys.contains(key) && key != "traffic_network" && key != "vehicle_catalog"
             && key != "npc_route" && key != "npc_alternate_route"
             && key != "npc_route_loop" && key != "npc_start_offset_m"
             && key != "npc_max_speed_mps" && key != "npc_count"

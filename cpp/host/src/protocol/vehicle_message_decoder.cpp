@@ -115,6 +115,11 @@ std::optional<ParsedClientMessage> parse_client_message_envelope(
         }
         parsed.requested_vehicle_class =
             static_cast<RuntimeVehicleClass>(requested_class);
+        parsed.requested_loadout_id = reset.requested_loadout_id();
+        if (!valid_vehicle_loadout_id(parsed.requested_loadout_id)) {
+            set_error(error, "SimulationReset has an invalid loadout ID");
+            return std::nullopt;
+        }
         return ParsedClientMessage{std::move(parsed)};
     }
 

@@ -1,6 +1,23 @@
 #pragma once
 
 #include "physics/suspension_model.hpp"
+#include "physics/powertrain_model.hpp"
+
+#include <cstddef>
+#include <optional>
+
+struct AxleTireParameters {
+    float radius_m = 0.32f;
+    float friction_coefficient = 1.05f;
+    float longitudinal_stiffness_n = 90000.f;
+    float cornering_stiffness_n_rad = 60000.f;
+    float rolling_resistance_coefficient = 0.015f;
+};
+
+struct AxleContactParameters {
+    std::optional<AxleTireParameters> tire;
+    std::optional<simcore_host::SuspensionParameters> suspension;
+};
 
 // Configuration and validation shared by file loading and runtime profiles.
 struct VehicleParameters {
@@ -86,7 +103,18 @@ struct VehicleParameters {
     float chassis_shell_center_up_offset_m = 0.335f;
     float chassis_shell_half_height_m = 0.625f;
     simcore_host::SuspensionParameters suspension;
+    // Missing modules retain the legacy common tire/suspension settings.
+    // Paired protocol wheel slots also share these values for motorcycles.
+    AxleContactParameters front_axle_contact;
+    AxleContactParameters rear_axle_contact;
+    std::optional<simcore_host::PowertrainParameters> powertrain;
 };
+
+// Wheel slots 0/1 belong to the front axle, 2/3 to the rear axle.
+[[nodiscard]] AxleTireParameters resolved_tire_parameters(
+    const VehicleParameters& parameters, std::size_t wheel_index);
+[[nodiscard]] const simcore_host::SuspensionParameters& resolved_suspension_parameters(
+    const VehicleParameters& parameters, std::size_t wheel_index);
 
 [[nodiscard]] bool valid_vehicle_parameters(
     const VehicleParameters& parameters);

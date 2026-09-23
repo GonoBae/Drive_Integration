@@ -6,13 +6,13 @@ C++ SimCore와 Unreal이 같은 `map_enu` 충돌 snapshot을 사용하기 위한
 2026-08-31 R1 대상은 작은 가상 도심으로 변경됐고, 실제 Unreal blockout을 측정한
 [`virtual_city_v1`](./virtual_city_v1/README.md)을 생성했다. `landscape_local_v1`은 기존
 Landscape 회귀용, `wall_broad_v1`은 코드/테스트가 참조하는 이전 bootstrap fixture로
-보존한다. 가상 도심 실행은 [빠른 시작](../docs/virtual_city_quickstart.md), 범위는
-[전환 결정](../docs/decisions/ADR-013-small-virtual-city-course.md)을 따른다.
+보존한다. 이전 가상 도심 실행 안내와 전환 결정은 [이전 자료](../docs/README.md#이전-자료)에
+보관했다. 현재 서버·클라이언트의 책임과 지도 계약은 [아키텍처](../docs/architecture.md)를 따른다.
 
 2026-09-02에는 기존 package를 덮어쓰지 않는 두 교차로 확장
 [`signal_city_v2`](./signal_city_v2/README.md)을 추가했다. 별도 map·collision snapshot과
 traffic format version 2를 사용하며, 실행·재생성은
-[signal city 빠른 시작](../docs/signal_city_quickstart.md)을 따른다.
+[signal city 빠른 시작](../docs/guides/signal_city_quickstart.md)을 따른다.
 
 ```text
 <map_id>/
@@ -87,7 +87,7 @@ ID도 parser가 보존하고 차량 설정의 default profile scale을 사용한
 
 Unreal은 지면 collision을 측정해 snapshot으로 고정하고, C++만 wheel contact·suspension·
 tire·차체 물리를 계산한다. 이 책임 경계는
-[ADR-012](../docs/decisions/ADR-012-unreal-ground-measurement-boundary.md)에 기록한다.
+[아키텍처](../docs/architecture.md)에 정리한다.
 
 ## `ground_surface.csv` legacy 형식
 
@@ -148,7 +148,7 @@ C++ dense route·실제 입력 기반 한 바퀴와 실제 package 연석 등판
 해상도 하나에만 귀속하지 않는다. 이는 marker 중심 결과이며 runtime은 실제 swept along
 구간을 `R` 이하 간격으로 다시 검사한다. 전체 along-length QA는 210/215 collider 전 길이
 eligible, 북쪽 T-opening 네 끝단과 BayEnd만 의도적 gap으로 확인했다.
-최종 회귀 결과는 작업일지에 기록하며,
+당시 회귀 결과의 작업일지는 [이전 자료](../docs/README.md#이전-자료)에 보관하며,
 실제 PIE 충돌·접지·재Bake/reconnect·성능·30분 인수는 별도다.
 
 이 package의 `drive_route.csv`는 약 632.6m 코스의 QA용 checkpoint 364개다.

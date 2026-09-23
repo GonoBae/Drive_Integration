@@ -7,14 +7,5 @@
     "boost-beast",
     "boost-property-tree",
     "protobuf"
-  ],
-  "features": {
-    "zmq-observer": {
-      "description": "Optional C++ publisher for the frozen Python observer",
-      "dependencies": [
-        "zeromq",
-        "cppzmq"
-      ]
-    }
-  }
+  ]
 }

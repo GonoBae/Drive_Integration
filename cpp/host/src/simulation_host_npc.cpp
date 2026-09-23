@@ -30,7 +30,6 @@ constexpr double kNpcEscapeMaximumReverseSpeedMps = 1.4;
 constexpr double kNpcEscapeReverseAccelerationMps2 = 1.0;
 constexpr double kNpcNominalMaximumYawRateRadS = 2.6;
 constexpr double kNpcNominalMaximumYawAccelerationRadS2 = 10.0;
-constexpr std::array<double,4> kNpcNominalMinimumTurnRadiiM{4.8,4.0,8.5,2.6};
 
 struct NpcSearchSliceMeasurement {
     SimulationHost::Clock::time_point started;
@@ -42,32 +41,6 @@ struct NpcSearchSliceMeasurement {
             SimulationHost::Clock::now() - started).count());
     }
 };
-
-struct NpcVehicleProfileDefinition {
-    const char* name;
-    double half_length_m;
-    double half_width_m;
-    double half_height_m;
-    double mass_kg;
-    double yaw_inertia_kg_m2;
-    double maximum_reaction_speed_mps;
-    double speed_scale;
-    double acceleration_mps2;
-    double braking_mps2;
-    double tumble_contact_below_cg_m;
-    double ground_clearance_m = 0.10;
-};
-
-// Deterministic ID-order fleet. These are reduced kinematic/collision
-// profiles, not a claim that the NPCs run the Ego's full tire-force model.
-constexpr std::array<NpcVehicleProfileDefinition, 4> kNpcVehicleProfiles{{
-    {"sedan",      2.20, 1.00, 0.75, 1500.0,  2600.0, 30.0, 1.00, 1.50, 3.00, 0.35},
-    {"compact",    1.75, 0.86, 0.70, 1050.0,  1450.0, 32.0, 1.08, 1.90, 3.40, 0.32},
-    // SharedWheelMesh tread radius is 32.055 cm before the truck's 1.22 scale.
-    // Body minimum -26 cm minus tire bottom (-28 - 32.055*1.22) cm = 41.1071 cm.
-    {"truck",      3.10, 1.05, 0.965, 6200.0, 14500.0, 20.0, 0.72, 0.85, 2.20, 0.65, 0.411071},
-    {"motorcycle", 1.10, 0.42, 0.68,  240.0,   210.0, 36.0, 1.12, 2.30, 4.00, 0.38},
-}};
 
 simcore_host::NpcHornMotionContext horn_motion_context(
     simcore_host::NpcLaneStopReason reason)
@@ -187,6 +160,20 @@ simcore_host::RuntimeEntityState npc_entity(
     return result;
 }
 
+void publish_npc_modules(simcore_host::RuntimeEntityState& entity,
+    const std::string& loadout_id, const std::optional<simcore_host::NpcVehicleModules>& modules)
+{
+    entity.vehicle_loadout_id = loadout_id;
+    entity.vehicle_module_telemetry.reset();
+    if (modules && modules->powertrain()) {
+        const auto& powertrain = *modules->powertrain();
+        entity.vehicle_module_telemetry = simcore_host::RuntimeVehicleModuleTelemetry{
+            powertrain.engine_rpm, static_cast<float>(modules->fuel_percent()),
+            powertrain.selected_direction == 0 ? VehicleGear::Neutral
+                : powertrain.selected_direction < 0 ? VehicleGear::Reverse : VehicleGear::Drive};
+    }
+}
+
 std::optional<simcore_host::GroundPointEnu> supported_point(
     const simcore_host::GroundQuery& ground,
     const simcore_host::GroundPointEnu& authored)
@@ -302,9 +289,17 @@ void SimulationHost::rebuild_lane_npc()
                 + static_cast<double>(index / routes.size()) * config_.npc_spacing_m;
             LaneNpcRuntime runtime;
             runtime.entity_id = kFirstLaneNpcId + index;
-            const auto& profile = kNpcVehicleProfiles[index % kNpcVehicleProfiles.size()];
-            runtime.vehicle_profile_index = index % kNpcVehicleProfiles.size();
+            const auto& fleet = config_.vehicle_catalog->fleet();
+            runtime.vehicle_profile_index = index % fleet.size();
+            const auto vehicle_class = fleet[runtime.vehicle_profile_index].vehicle_class;
+            const auto& profile = fleet[runtime.vehicle_profile_index].npc;
+            runtime.vehicle_loadout_id = vehicle_class == active_vehicle_class_ ? active_vehicle_loadout_id_ : "";
+            auto module_parameters = config_.vehicle_catalog->player_parameters(
+                base_vehicle_parameters_, vehicle_class, runtime.vehicle_loadout_id);
+            if (simcore_host::NpcVehicleModules::selected(module_parameters))
+                runtime.vehicle_modules.emplace(std::move(module_parameters), profile.mass_kg);
             runtime.vehicle_profile_name = profile.name;
+            runtime.minimum_turn_radius_m = profile.minimum_turn_radius_m;
             runtime.body_half_length_m = profile.half_length_m;
             runtime.body_half_width_m = profile.half_width_m;
             runtime.body_half_height_m = profile.half_height_m;
@@ -344,6 +339,7 @@ void SimulationHost::rebuild_lane_npc()
                     npc.body_half_length_m, npc.body_half_width_m, npc.body_half_height_m,
                     npc.mass_kg, npc.yaw_inertia_kg_m2, npc.maximum_reaction_speed_mps,
                     npc.body_ground_clearance_m));
+                publish_npc_modules(runtime_entities_.back(), npc.vehicle_loadout_id, npc.vehicle_modules);
             }
         }
         std::cout << "[NPC] route ready entity=" << npc.entity_id
@@ -441,8 +437,7 @@ bool SimulationHost::npc_sample_blocked(const LaneNpcRuntime& npc,
 {
     if (accident_entity_id) *accident_entity_id = 0;
     const auto ego = physics_.get_state();
-    const auto params = simcore_host::make_player_vehicle_parameters(
-        config_.vehicle_parameters, active_vehicle_class_);
+    const auto& params = config_.vehicle_parameters;
     const auto player_shape = ego_shape(ego, params);
     const auto candidate = collision_shape ? *collision_shape : npc_shape(sample,
         npc.body_half_length_m, npc.body_half_width_m, npc.body_half_height_m,
@@ -651,8 +646,7 @@ bool SimulationHost::try_npc_lane_change(LaneNpcRuntime& npc, double retreat_m, 
     std::vector<simcore_host::NpcLaneChangeGapVehicle> neighbours;
     const auto ego = physics_.get_state();
     const double ego_heading = ego.heading * std::numbers::pi / 180.0;
-    const auto parameters = simcore_host::make_player_vehicle_parameters(
-        config_.vehicle_parameters, active_vehicle_class_);
+    const auto& parameters = config_.vehicle_parameters;
     const auto player_shape = ego_shape(ego, parameters);
     const double lane_heading = state.heading_deg * std::numbers::pi / 180.0;
     const auto projected_extents = [&](double heading, double half_length, double half_width) {
@@ -842,7 +836,7 @@ SimulationHost::NpcLocalScene SimulationHost::npc_local_obstacles(
     if (config_.collision_world) for (const auto& collider:config_.collision_world->static_colliders()) append(collider.shape);
     for (const auto& structure:structure_damage_.collision_proxies()) append(structure.shape);
     const auto ego=physics_.get_state();
-    const auto parameters=simcore_host::make_player_vehicle_parameters(config_.vehicle_parameters,active_vehicle_class_);
+    const auto& parameters = config_.vehicle_parameters;
     const double heading=ego.heading*std::numbers::pi/180.0;
     add_motion(ego_shape(ego, parameters),{std::sin(heading)*ego.linear_velocity_body.x
             -std::cos(heading)*ego.linear_velocity_body.y,
@@ -875,9 +869,8 @@ bool SimulationHost::try_npc_local_bypass(LaneNpcRuntime& npc)
         return false;
     }
     const auto& reference=npc.follower;
-    constexpr std::array<double,4> turn_radii{4.8,4.0,8.5,2.6};
     const simcore_host::NpcLocalBypassDimensions dimensions{npc.body_half_length_m,npc.body_half_width_m,
-        turn_radii[std::min<std::size_t>(npc.vehicle_profile_index,turn_radii.size()-1)]};
+        npc.minimum_turn_radius_m};
     npc.avoidance_stop_distance_m=reference.state().distance_travelled_m;
     if (npc.local_search && std::abs(npc.local_search_anchor_m
             -reference.state().distance_travelled_m)>0.05) npc.local_search.reset();
@@ -1310,6 +1303,7 @@ void SimulationHost::prepare_lane_npc(double dt_seconds, Clock::time_point now)
     for (auto& npc : lane_npcs_) {
         npc.pending.reset();
         npc.nominal_pending.reset();
+        const auto modules_before = npc.vehicle_modules;
         auto current = std::find_if(runtime_entities_.begin(), runtime_entities_.end(),
             [&](const auto& entity) { return entity.entity_id == npc.entity_id; });
         if (current == runtime_entities_.end()) {
@@ -1324,6 +1318,32 @@ void SimulationHost::prepare_lane_npc(double dt_seconds, Clock::time_point now)
             current = std::prev(runtime_entities_.end());
         }
 
+        if (npc.vehicle_modules) {
+            const auto anchor = sample_lane_npc(npc, 0.0);
+            const double preview_m = std::max(2.0, npc.follower.state().speed_mps);
+            const auto ahead = sample_lane_npc(npc, preview_m);
+            double grade = 0.0;
+            double curvature = 0.0;
+            auto material = simcore_host::GroundSurfaceMaterialId::Default;
+            double friction = 1.0;
+            if (anchor) {
+                if (const auto hit = config_.ground_query->query_down({
+                        {anchor->position_enu.east_m, anchor->position_enu.north_m,
+                         anchor->position_enu.up_m + 2.0}, 4.0})) {
+                    material = hit->surface_material_id;
+                    if (std::isfinite(hit->friction_multiplier) && hit->friction_multiplier > 0.0)
+                        friction = hit->friction_multiplier;
+                }
+                if (ahead) {
+                    grade = (ahead->position_enu.up_m - anchor->position_enu.up_m) / preview_m;
+                    curvature = std::remainder((ahead->heading_deg - anchor->heading_deg)
+                        * std::numbers::pi / 180.0, 2.0 * std::numbers::pi) / preview_m;
+                }
+            }
+            npc.vehicle_modules->set_road_context(material, friction, grade, curvature);
+            publish_npc_modules(*current, npc.vehicle_loadout_id, npc.vehicle_modules);
+        } else current->vehicle_loadout_id = npc.vehicle_loadout_id;
+
         const auto previous_tumble = npc.tumble;
         npc.tumble.tick(dt_seconds, npc.tumble_dimensions, enabled);
         npc.reaction.update(current->collision_proxy, dt_seconds, enabled,
@@ -1333,13 +1353,14 @@ void SimulationHost::prepare_lane_npc(double dt_seconds, Clock::time_point now)
         }
         npc.reaction.publish(*current, physics_.get_last_collision_contacts());
         const bool drive = npc.reaction.recovery.allows_driving();
+        if (enabled && !drive && npc.vehicle_modules) npc.vehicle_modules->idle(dt_seconds);
         if (enabled && drive) update_npc_navigation(npc, dt_seconds);
         current->npc_local_bypass_active=npc.local_bypass.has_value();
 
         const auto& settings = npc.follower.config();
         // Save before either forward or reverse motion. A failed curve sample
         // must not leave hidden follower progress behind the frozen world pose.
-        const auto before_change = npc.lane_change || npc.local_bypass
+        const auto before_change = npc.lane_change || npc.local_bypass || npc.vehicle_modules
             ? std::optional<simcore_host::NpcLaneFollower>(npc.follower) : std::nullopt;
         const double before_reverse_remaining = npc.avoidance_reverse_remaining_m;
         const double before_reverse_total = npc.avoidance_reverse_total_m;
@@ -1349,10 +1370,15 @@ void SimulationHost::prepare_lane_npc(double dt_seconds, Clock::time_point now)
             const double desired_speed = std::min(kNpcEscapeMaximumReverseSpeedMps,
                 std::sqrt(std::max(0.0, 2.0 * kNpcEscapeReverseAccelerationMps2
                     * npc.avoidance_reverse_remaining_m)));
-            npc.avoidance_reverse_speed_mps += std::clamp(
-                desired_speed - npc.avoidance_reverse_speed_mps,
-                -kNpcEscapeReverseAccelerationMps2 * dt_seconds,
-                kNpcEscapeReverseAccelerationMps2 * dt_seconds);
+            if (npc.vehicle_modules) {
+                npc.vehicle_modules->set_direction(-1);
+                npc.avoidance_reverse_speed_mps = npc.vehicle_modules->speed_after_step(
+                    npc.avoidance_reverse_speed_mps, desired_speed, kNpcEscapeReverseAccelerationMps2,
+                    kNpcEscapeReverseAccelerationMps2, dt_seconds);
+            } else npc.avoidance_reverse_speed_mps += std::clamp(
+                    desired_speed - npc.avoidance_reverse_speed_mps,
+                    -kNpcEscapeReverseAccelerationMps2 * dt_seconds,
+                    kNpcEscapeReverseAccelerationMps2 * dt_seconds);
             const double retreat = std::min(npc.avoidance_reverse_remaining_m,
                 npc.avoidance_reverse_speed_mps * dt_seconds);
             if (retreat > 0.0
@@ -1373,6 +1399,10 @@ void SimulationHost::prepare_lane_npc(double dt_seconds, Clock::time_point now)
                     npc.lane_change_wait_reason = npc.maneuver_recovery_active
                         ? "maneuver_recovery_reversing" : "reverse_complete_replanning";
                 }
+            } else if (retreat <= 0.0 && npc.vehicle_modules) {
+                // A real gearbox needs time to engage Reverse. Do not cancel
+                // the manoeuvre each time its shift-cut correctly yields zero.
+                reversing_for_space = true;
             } else {
                 npc.avoidance_reverse_speed_mps = 0.0;
                 npc.avoidance_phase = LaneNpcRuntime::AvoidancePhase::WaitingForStop;
@@ -1382,9 +1412,17 @@ void SimulationHost::prepare_lane_npc(double dt_seconds, Clock::time_point now)
             }
         }
         const double speed = npc.follower.state().speed_mps;
-        const double lookahead = std::ceil((speed * speed / (2.0 * settings.braking_mps2)
+        const double braking_limit = npc.vehicle_modules
+            ? npc.vehicle_modules->braking_limit_mps2(settings.braking_mps2) : settings.braking_mps2;
+        const double requested_lookahead = std::ceil((speed * speed / (2.0 * braking_limit)
             + speed * dt_seconds + settings.front_extent_m + settings.stop_margin_m + 2.0)
             / kScanStepM) * kScanStepM;
+        // Very slippery authored compounds must not turn the occupancy scan
+        // into kilometres of work on the I/O thread. Limit modular cruise speed
+        // to a stoppable, bounded observed horizon instead.
+        constexpr double module_observation_horizon_m = 40.0;
+        const double lookahead = npc.vehicle_modules
+            ? std::min(module_observation_horizon_m, requested_lookahead) : requested_lookahead;
         const auto physical_obstacle = drive
             ? lane_npc_obstacle(npc, lookahead) : std::nullopt;
         const auto physical_blocked = physical_obstacle
@@ -1439,11 +1477,30 @@ void SimulationHost::prepare_lane_npc(double dt_seconds, Clock::time_point now)
         const auto& horn = npc.horn.step(dt_seconds, horn_observation);
         current->horn_event_sequence = horn.event_sequence;
 
+        if (!reversing_for_space && npc.vehicle_modules) npc.vehicle_modules->set_direction(1);
+        const double module_corner_limit = npc.vehicle_modules
+            ? std::min(npc.vehicle_modules->corner_speed_limit_mps(), std::sqrt(2.0 * braking_limit
+                * std::max(1.0, module_observation_horizon_m - settings.front_extent_m - settings.stop_margin_m - 2.0)))
+            : 55.6;
         const auto& next = reversing_for_space
             ? npc.follower.state()
             : npc.follower.step(dt_seconds, signals, enabled && drive, blocked,
-                npc.local_bypass ? npc.local_bypass->route_speed_limit_mps() : 55.6,
-                npc.local_bypass ? npc.local_bypass->extra_stop_margin_m() : 0.0);
+                std::min(module_corner_limit, npc.local_bypass ? npc.local_bypass->route_speed_limit_mps() : 55.6),
+                npc.local_bypass ? npc.local_bypass->extra_stop_margin_m() : 0.0,
+                npc.vehicle_modules ? &*npc.vehicle_modules : nullptr);
+        if (npc.vehicle_modules && (next.stop_reason == simcore_host::NpcLaneStopReason::NoGround
+            || next.stop_reason == simcore_host::NpcLaneStopReason::InvalidInput)) {
+            npc.vehicle_modules = modules_before;
+            if (before_change) npc.follower = *before_change;
+            npc.follower.step(0.0, signals, false);
+            current->collision_proxy.linear_velocity_enu_mps = {};
+            current->collision_proxy.heading_rate_rad_s = 0.0;
+            npc.reaction.nominal_velocity_enu_mps = {};
+            npc.reaction.nominal_heading_rate_rad_s = 0.0;
+            publish_npc_modules(*current, npc.vehicle_loadout_id, npc.vehicle_modules);
+            continue;
+        }
+        publish_npc_modules(*current, npc.vehicle_loadout_id, npc.vehicle_modules);
         if (!enabled || !next.valid) {
             current->collision_proxy.linear_velocity_enu_mps = {};
             current->collision_proxy.heading_rate_rad_s = 0.0;
@@ -1457,6 +1514,8 @@ void SimulationHost::prepare_lane_npc(double dt_seconds, Clock::time_point now)
         const double old_heading_offset = npc.reaction.heading_offset_rad;
         const auto displayed = sample_lane_npc(npc, 0.0);
         const auto freeze_failed_change = [&] {
+            npc.vehicle_modules = modules_before;
+            publish_npc_modules(*current, npc.vehicle_loadout_id, npc.vehicle_modules);
             if (before_change) npc.follower = *before_change;
             if (reversing_for_space) {
                 npc.avoidance_reverse_remaining_m = before_reverse_remaining;
@@ -1509,6 +1568,7 @@ void SimulationHost::prepare_lane_npc(double dt_seconds, Clock::time_point now)
             npc.body_half_length_m, npc.body_half_width_m, npc.body_half_height_m,
             npc.mass_kg, npc.yaw_inertia_kg_m2, npc.maximum_reaction_speed_mps,
             npc.body_ground_clearance_m);
+        publish_npc_modules(*npc.nominal_pending, npc.vehicle_loadout_id, npc.vehicle_modules);
         npc.nominal_pending->horn_event_sequence = horn.event_sequence;
         npc.nominal_pending->npc_local_bypass_active=npc.local_bypass.has_value();
         auto& planned_shape = std::get<simcore_host::ObbPrism>(
@@ -1540,8 +1600,7 @@ void SimulationHost::prepare_lane_npc(double dt_seconds, Clock::time_point now)
         }
         // Route steering requires travel, including during a near-stationary
         // restart. Collision angular momentum is handled separately below.
-        const double minimum_turn_radius=kNpcNominalMinimumTurnRadiiM[
-            std::min<std::size_t>(npc.vehicle_profile_index,kNpcNominalMinimumTurnRadiiM.size()-1)];
+        const double minimum_turn_radius=npc.minimum_turn_radius_m;
         const double distance_yaw_budget=nominal_movement<=1.e-6 ? 0.0 : nominal_movement/minimum_turn_radius;
         smoothed_heading_delta=std::clamp(smoothed_heading_delta,-distance_yaw_budget,distance_yaw_budget);
         // The route centre still advances authoritatively, while yaw rate and
@@ -1710,8 +1769,7 @@ void SimulationHost::finish_runtime_impact_contacts(
                 });
                 double closest = std::numeric_limits<double>::infinity();
                 if (strongest != contacts.end()) {
-                    const auto parameters = simcore_host::make_player_vehicle_parameters(
-                        config_.vehicle_parameters, active_vehicle_class_);
+                    const auto& parameters = config_.vehicle_parameters;
                     for (const auto& vehicle : pedestrian_vehicle_surfaces(
                             physics_.get_state(), runtime_entities_, parameters)) {
                         const double east = strongest->contact_point_enu.east_m - vehicle.shape.center_enu.east_m;
@@ -1852,8 +1910,7 @@ void SimulationHost::prepare_pedestrians(double dt_seconds, Clock::time_point no
                 {target.east_m, target.north_m, anchor->up_m});
             const bool recovering = pedestrian.reaction.recovery.phase() == simcore_host::ImpactRecoveryPhase::Recovering;
             if (ground) {
-                const auto parameters = simcore_host::make_player_vehicle_parameters(
-                    config_.vehicle_parameters, active_vehicle_class_);
+                const auto& parameters = config_.vehicle_parameters;
                 const auto vehicle_surfaces = pedestrian_vehicle_surfaces(
                     physics_.get_state(), runtime_entities_, parameters);
                 pedestrian.body.tick(dt_seconds, ground->up_m, recovering, true, target, vehicle_surfaces);
@@ -1991,8 +2048,7 @@ void SimulationHost::prepare_pedestrians(double dt_seconds, Clock::time_point no
         if (!pedestrian.reaction.recovery.allows_driving()
             || std::hypot(old_offset.east_m, old_offset.north_m) > 0.001) {
             const auto ego = physics_.get_state();
-            const auto params = simcore_host::make_player_vehicle_parameters(
-                config_.vehicle_parameters, active_vehicle_class_);
+            const auto& params = config_.vehicle_parameters;
             const auto player_shape = ego_shape(ego, params);
             const auto blocked = [&](const simcore_host::VerticalCapsule& candidate) {
                 const auto overlaps_proxy = [&](const simcore_host::KinematicProxyShape& shape) {

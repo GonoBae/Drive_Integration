@@ -134,6 +134,15 @@ class TrafficSmokeHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent.source_id, "traffic-smoke")
         self.assertIn("traffic-signals.v1", sent.hello.capabilities)
 
+    async def test_mismatched_vehicle_catalog_sends_no_application_frames(self):
+        expected = network_expectations(fixture_bytes())
+        message = server_hello("our-nonce", "vehicle-catalog-fnv1a64-mismatch")
+        message.hello.capabilities.append("traffic-signals.v1")
+        connection = FakeConnection(message)
+        with self.assertRaisesRegex(AssertionError, "vehicle catalog differs"):
+            await TrafficController(connection, "play", "our-nonce", expected).hello()
+        self.assertEqual(connection.sent, [])
+
     async def test_new_pie_has_fresh_connection_session_and_reconnect_preserves_play(self):
         expected = network_expectations(fixture_bytes())
         message = server_hello("our-nonce")

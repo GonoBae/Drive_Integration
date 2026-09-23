@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "id": "engine_sedan_gasoline_2_0",
+  "name": "Sedan reference gasoline engine",
+  "kind": "engine",
+  "interface_id": "engine_sedan",
+  "mass": {
+    "mass_kg": 160,
+    "center_of_mass_m": [
+      0,
+      0,
+      0
+    ],
+    "inertia_diagonal_kg_m2": [
+      10,
+      14,
+      14
+    ]
+  },
+  "specification": {
+    "idle_rpm": 800,
+    "max_rpm": 6500,
+    "rotational_inertia_kg_m2": 0.22,
+    "response_time_s": 0.15,
+    "idle_fuel_lph": 0.8,
+    "bsfc_g_per_kwh": 270,
+    "fuel_type": "gasoline",
+    "torque_curve": [
+      {
+        "rpm": 800,
+        "torque_nm": 95
+      },
+      {
+        "rpm": 1500,
+        "torque_nm": 150
+      },
+      {
+        "rpm": 2500,
+        "torque_nm": 185
+      },
+      {
+        "rpm": 3500,
+        "torque_nm": 200
+      },
+      {
+        "rpm": 4500,
+        "torque_nm": 195
+      },
+      {
+        "rpm": 5500,
+        "torque_nm": 180
+      },
+      {
+        "rpm": 6500,
+        "torque_nm": 140
+      }
+    ]
+  }
+}

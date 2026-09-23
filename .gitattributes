@@ -8,3 +8,8 @@ map_packages/**/traffic_network.json -text
 # Unreal packages are serialized binary assets, never line-normalized.
 *.umap -text
 *.uasset -text
+
+# The generated binding is compared byte-for-byte with protoc output.
+scripts/generated/vehicle_pb2.py text eol=lf
+# Runtime catalog identity hashes the exact shared JSON bytes.
+/unreal/DriveIntegration/Config/VehicleCatalog/** -text

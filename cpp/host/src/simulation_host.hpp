@@ -6,9 +6,11 @@
 #include "replay/physics_replay.hpp"
 #include "simulation_clock.hpp"
 #include "runtime_collision_reaction.hpp"
+#include "vehicle_catalog/runtime_vehicle_catalog.hpp"
 #include "terrain/map_package_runtime.hpp"
 #include "traffic/npc_horn_policy.hpp"
 #include "traffic/npc_lane_follower.hpp"
+#include "traffic/npc_vehicle_modules.hpp"
 #include "traffic/npc_lane_change.hpp"
 #include "traffic/npc_local_bypass.hpp"
 #include "traffic/npc_route_planner.hpp"
@@ -64,11 +66,12 @@ struct SimulationHostConfig {
     double npc_spacing_m = 120.0;
     // Optional offline-verifiable recording of actual applied fixed-tick input.
     std::shared_ptr<simcore_host::PhysicsReplayRecorder> physics_replay;
+    std::shared_ptr<const simcore_host::RuntimeVehicleCatalog> vehicle_catalog;
+    bool require_vehicle_catalog_identity = false;
 };
 
 struct SimulationHostCallbacks {
     std::function<void(const std::string&)> broadcast_world_state;
-    std::function<void(const std::string&)> publish_observer_state;
     std::function<void(const std::string&)> close_control_connections;
 };
 
@@ -123,7 +126,7 @@ struct NpcNavigationSnapshot {
 
 // Application-level simulation coordinator. Network transports are injected as
 // callbacks, so command arbitration and the fixed-step loop can be exercised
-// without opening WebSocket or ZMQ sockets.
+// without opening WebSocket sockets.
 class SimulationHost {
 public:
     using Clock = SimulationClock::Clock;
@@ -248,7 +251,8 @@ private:
     void schedule_tick();
     void run_tick();
     bool apply_pending_map_package_reload(Clock::time_point tick_started_at);
-    void reset_player_vehicle(simcore_host::RuntimeVehicleClass vehicle_class);
+    void reset_player_vehicle(simcore_host::RuntimeVehicleClass vehicle_class,
+        std::string_view loadout_id = {});
 
     SimulationHostConfig config_;
     VehicleParameters base_vehicle_parameters_;
@@ -273,7 +277,10 @@ private:
         std::uint32_t entity_id = 0;
         double start_offset_m = 0.0;
         std::uint32_t vehicle_profile_index = 0;
-        const char* vehicle_profile_name = "sedan";
+        std::string vehicle_profile_name;
+        std::string vehicle_loadout_id;
+        std::optional<simcore_host::NpcVehicleModules> vehicle_modules;
+        double minimum_turn_radius_m = 0;
         double body_half_length_m = 2.2;
         double body_half_width_m = 1.0;
         double body_half_height_m = 0.75;
@@ -363,6 +370,8 @@ private:
         // Canonical semantic identity excluding sequence. An equal sequence is
         // valid only when this kind and fingerprint are also equal.
         std::string last_payload_fingerprint;
+        bool supports_vehicle_loadout = false;
+        bool supports_vehicle_parts = false;
     };
     // The transport generation alone is not an application identity. Bind the
     // accepted Hello identity and global envelope ordering to that generation
@@ -376,6 +385,7 @@ private:
     std::string active_connection_session_id_;
     simcore_host::RuntimeVehicleClass active_vehicle_class_ =
         simcore_host::RuntimeVehicleClass::Sedan;
+    std::string active_vehicle_loadout_id_;
     std::uint64_t active_connection_generation_ = 0;
     std::uint64_t lifecycle_highest_sequence_ = 0;
     std::uint64_t lifecycle_last_client_time_ns_ = 0;

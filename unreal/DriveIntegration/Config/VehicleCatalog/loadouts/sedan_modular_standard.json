@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "id": "sedan_modular_standard",
+  "name": "Sedan - Modular Standard",
+  "vehicle_class": 1,
+  "axle_modules": {
+    "front": {
+      "tire": "tire_sedan_front_standard",
+      "suspension": "suspension_sedan_standard"
+    },
+    "rear": {
+      "tire": "tire_sedan_rear_standard",
+      "suspension": "suspension_sedan_standard"
+    }
+  },
+  "powertrain_modules": {
+    "engine": "engine_sedan_gasoline_2_0",
+    "transmission": "transmission_sedan_automatic_6speed",
+    "drivetrain": "drivetrain_sedan_rwd",
+    "fuel_tank": "fuel_tank_sedan_50l",
+    "initial_fuel_l": 35,
+    "upshift_rpm": 5200,
+    "downshift_rpm": 2000,
+    "shift_duration_s": 0.25
+  }
+}

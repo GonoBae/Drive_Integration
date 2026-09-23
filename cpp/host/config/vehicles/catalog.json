@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "vehicles": ["chassis/sedan_reference.json"],
+  "parts": [
+    "parts/engine_gasoline_2_0.json",
+    "parts/transmission_automatic_6speed.json",
+    "parts/drivetrain_rear_wheel_drive.json",
+    "parts/wheel_alloy_16in.json",
+    "parts/tire_road_standard.json",
+    "parts/tire_road_comfort.json",
+    "parts/suspension_standard.json",
+    "parts/suspension_comfort.json",
+    "parts/brake_disc_standard.json",
+    "parts/steering_standard.json",
+    "parts/fuel_tank_50l.json"
+  ],
+  "assemblies": ["assemblies/sedan_standard.json", "assemblies/sedan_comfort.json"]
+}

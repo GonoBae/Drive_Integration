@@ -101,6 +101,12 @@ public:
 
 	/** Starts a fresh authoritative Play lifecycle with the selected Ego profile. */
 	bool SelectVehicleClass(SimCoreProtocol::ERuntimeVehicleClass VehicleClass);
+	bool CanSelectLoadout(FString& OutReason) const;
+	bool CanEditParts(FString& OutReason) const;
+	bool SelectLoadout(const FString& LoadoutId, FString& OutReason);
+	const FString& GetSelectedLoadoutId() const { return SelectedLoadoutId; }
+	bool IsLoadoutPending() const { return bLoadoutPending; }
+	FString GetLoadoutStatusText() const;
 	SimCoreProtocol::ERuntimeVehicleClass GetSelectedVehicleClass() const
 	{
 		return SelectedVehicleClass;
@@ -142,6 +148,8 @@ private:
 	friend class FSimCoreBinaryMessageBoundarySafetyTest;
 	friend class FSimCorePlayerVehicleHelloValidationTest;
 	friend class FSimCoreClientSettingsFailureTest;
+	friend class FSimCoreGarageLifecycleTest;
+	friend class FSimCoreGaragePartsDraftTest;
 	static constexpr int32 MaxIncomingMessageBytes = 1024 * 1024;
 
 	void StartConnectionAttempt();
@@ -187,6 +195,7 @@ private:
 	bool ValidateServerHello(
 		const SimCoreProtocol::FHelloInfo& Hello,
 		FString& OutError) const;
+	bool ValidateAuthoritativeLoadout(const SimCoreProtocol::FVehicleState& State, FString& OutError) const;
 	void SendControl();
 	void ApplyConnected(uint64 Generation);
 	void ApplyConnectionError(uint64 Generation, const FString& Error);
@@ -224,6 +233,12 @@ private:
 	TArray<uint8> IncomingMessage;
 	FString SessionId;
 	FString PlaySessionId;
+	FString SelectedLoadoutId;
+	bool bServerSupportsLoadouts = false;
+	bool bServerSupportsParts = false;
+	bool bServerMatchesCatalog = false;
+	bool bLoadoutPending = false;
+	double LoadoutRequestedAtSeconds = 0;
 	SimCoreProtocol::ERuntimeVehicleClass SelectedVehicleClass =
 		SimCoreProtocol::ERuntimeVehicleClass::Sedan;
 	uint64 SocketGeneration = 0;

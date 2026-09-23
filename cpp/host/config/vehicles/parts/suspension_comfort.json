@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "id": "suspension_comfort",
+  "name": "Reference comfort suspension per corner",
+  "kind": "suspension",
+  "interface_id": "suspension_sedan",
+  "mass": {
+    "mass_kg": 12.0,
+    "center_of_mass_m": [0.0, 0.0, 0.0],
+    "inertia_diagonal_kg_m2": [0.15, 0.15, 0.10]
+  },
+  "specification": {
+    "rest_length_m": 0.30,
+    "max_compression_m": 0.16,
+    "max_extension_m": 0.12,
+    "spring_rate_n_per_m": 30000.0,
+    "damper_rate_n_s_per_m": 4000.0,
+    "max_force_n": 30000.0
+  }
+}

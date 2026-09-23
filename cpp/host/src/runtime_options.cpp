@@ -104,6 +104,9 @@ void validate_runtime_options(const RuntimeOptions& options)
     if (options.vehicle_config_path.empty()) {
         throw std::invalid_argument("vehicle_config path must not be empty");
     }
+    if (options.vehicle_catalog_path && options.vehicle_catalog_path->empty()) {
+        throw std::invalid_argument("vehicle_catalog path must not be empty");
+    }
     if (options.map_package_path.empty()) {
         throw std::invalid_argument("map_package path must not be empty");
     }
@@ -205,6 +208,7 @@ std::string runtime_options_help(const RuntimeOptions& defaults)
         << "  --verify-physics-replay PATH    Offline verify same build/cfg/map/spawn, no server\n"
         << "  --vehicle-config PATH           Vehicle cfg (default: "
         << defaults.vehicle_config_path.string() << ")\n"
+        << "  --vehicle-catalog PATH          Shared vehicle profiles/visual JSON manifest\n"
         << "  --map-package DIRECTORY         MapPackage (default: "
         << defaults.map_package_path.string() << ")\n"
         << "  --traffic-network PATH          Optional authored lane/signal JSON\n"

@@ -38,7 +38,8 @@ namespace SimCorePresentation
 		float StateStaleTimeoutSeconds,
 		float VisualWheelStopSpeedMps,
 		float VisualTireRadiusMeters,
-		const FVector& PresentationOffsetCentimeters);
+		const FVector& PresentationOffsetCentimeters,
+		const TStaticArray<float, VehicleWheelCount>* WheelRadiiMeters = nullptr);
 
 	DRIVEINTEGRATION_API bool BuildRuntimeEntitySample(
 		const SimCoreProtocol::FVehicleState& State,

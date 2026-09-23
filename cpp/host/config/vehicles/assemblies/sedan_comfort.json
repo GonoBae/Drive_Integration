@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "id": "sedan_comfort",
+  "name": "Reference sedan comfort assembly",
+  "vehicle_id": "sedan_reference",
+  "engine": "engine_gasoline_2_0",
+  "transmission": "transmission_automatic_6speed",
+  "drivetrain": "drivetrain_rear_wheel_drive",
+  "steering": "steering_standard",
+  "fuel_tank": "fuel_tank_50l",
+  "front_axle": {
+    "wheel": "wheel_alloy_16in",
+    "tire": "tire_road_comfort",
+    "suspension": "suspension_comfort",
+    "brake": "brake_disc_standard"
+  },
+  "rear_axle": {
+    "wheel": "wheel_alloy_16in",
+    "tire": "tire_road_comfort",
+    "suspension": "suspension_comfort",
+    "brake": "brake_disc_standard"
+  }
+}

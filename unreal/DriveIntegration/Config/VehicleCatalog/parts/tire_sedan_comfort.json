@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "tire_sedan_comfort",
+  "name": "Sedan comfort tire",
+  "kind": "tire",
+  "interface_id": "tire_16in",
+  "mass": {
+    "mass_kg": 10,
+    "center_of_mass_m": [
+      0,
+      0,
+      0
+    ],
+    "inertia_diagonal_kg_m2": [
+      0.5,
+      0.9,
+      0.5
+    ]
+  },
+  "specification": {
+    "radius_m": 0.32,
+    "width_m": 0.215,
+    "rim_diameter_m": 0.4064,
+    "min_rim_width_m": 0.17,
+    "max_rim_width_m": 0.2,
+    "friction_coefficient": 0.98,
+    "longitudinal_stiffness_n": 85000,
+    "cornering_stiffness_n_rad": 55000,
+    "rolling_resistance_coefficient": 0.013,
+    "rated_load_n": 7000
+  }
+}

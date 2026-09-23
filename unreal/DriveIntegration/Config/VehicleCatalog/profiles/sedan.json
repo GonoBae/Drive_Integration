@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "id": "sedan_standard",
+  "vehicle_class": 1,
+  "player_overrides": {},
+  "scale_suspension_by_mass": false,
+  "rest_length_cg_tire_offset_m": null,
+  "npc": {
+    "name": "sedan",
+    "half_length_m": 2.2,
+    "half_width_m": 1,
+    "half_height_m": 0.75,
+    "mass_kg": 1500,
+    "yaw_inertia_kg_m2": 2600,
+    "maximum_reaction_speed_mps": 30,
+    "speed_scale": 1,
+    "acceleration_mps2": 1.5,
+    "braking_mps2": 3,
+    "tumble_contact_below_cg_m": 0.35,
+    "ground_clearance_m": 0.1,
+    "minimum_turn_radius_m": 4.8
+  },
+  "visual": {
+    "wheel_origins_cm": [
+      [
+        121.5,
+        -79,
+        -23
+      ],
+      [
+        121.5,
+        79,
+        -23
+      ],
+      [
+        -148.5,
+        -79,
+        -23
+      ],
+      [
+        -148.5,
+        79,
+        -23
+      ]
+    ],
+    "wheel_scales": [
+      [
+        1,
+        1,
+        1
+      ],
+      [
+        1,
+        1,
+        1
+      ],
+      [
+        1,
+        1,
+        1
+      ],
+      [
+        1,
+        1,
+        1
+      ]
+    ],
+    "lamp_locations_cm": [
+      [
+        190.64,
+        -46.22097292344889,
+        22.224977156740746
+      ],
+      [
+        190.64,
+        46.22097292344889,
+        22.224977156740746
+      ],
+      [
+        -220.42,
+        -45.2011177268429,
+        22.533039727616025
+      ],
+      [
+        -220.42,
+        45.2011177268429,
+        22.533039727616025
+      ]
+    ],
+    "exhaust_location_cm": [
+      -221,
+      55,
+      -25
+    ],
+    "driver_translation_cm": [
+      0,
+      0,
+      0
+    ],
+    "driver_scale": [
+      1,
+      1,
+      1
+    ],
+    "half_height_m": 0.75,
+    "cg_height_m": 0.55,
+    "collision_body_forward_offset_m": 0,
+    "collision_ground_clearance_m": 0.1,
+    "npc_collision_ground_clearance_m": 0.1
+  },
+  "axle_modules": {
+    "front": {
+      "tire": null,
+      "suspension": null
+    },
+    "rear": {
+      "tire": null,
+      "suspension": null
+    }
+  },
+  "powertrain_modules": null
+}

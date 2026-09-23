@@ -242,6 +242,7 @@ namespace SimCoreProtocol
 		// NPC-only monotonic event sequence; zero before the first horn this Play.
 		uint32 HornEventSequence = 0;
 		ERuntimeVehicleClass RuntimeVehicleClass = ERuntimeVehicleClass::Unspecified;
+		FString VehicleLoadoutId;
 		TArray<FWheelState> Wheels;
 	};
 
@@ -259,7 +260,9 @@ namespace SimCoreProtocol
 		uint64 Sequence,
 		const FString& SourceId,
 		const FString& ConnectionSessionId,
-		const FString& MapChecksum);
+		const FString& MapChecksum,
+		const FString& RequestedLoadoutId = FString());
+	DRIVEINTEGRATION_API bool IsValidVehicleLoadoutId(const FString& Value);
 
 	DRIVEINTEGRATION_API TArray<uint8> SerializeHelloEnvelope(
 		uint64 Sequence,

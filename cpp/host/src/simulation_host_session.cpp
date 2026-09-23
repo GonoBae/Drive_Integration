@@ -120,6 +120,7 @@ std::string make_reset_payload_fingerprint(
     append_fingerprint_string(fingerprint, reset.play_session_id);
     append_fingerprint_u64(fingerprint, reset.client_time_ns);
     fingerprint.push_back(static_cast<char>(reset.requested_vehicle_class));
+    append_fingerprint_string(fingerprint, reset.requested_loadout_id);
     return fingerprint;
 }
 
@@ -258,8 +259,19 @@ ClientMessageResult SimulationHost::handle_hello(
         }
     }
 
-    const std::string negotiation_fingerprint =
-        make_hello_negotiation_fingerprint(hello);
+    const bool supports_parts = has_capability(hello.capabilities, "vehicle-parts.v1");
+    if (config_.require_vehicle_catalog_identity || supports_parts) {
+        const auto capability = "vehicle-catalog-fnv1a64-" + config_.vehicle_catalog->checksum().substr(8);
+        const auto catalog_count = std::count_if(hello.capabilities.begin(), hello.capabilities.end(),
+            [](const auto& value) { return value.starts_with("vehicle-catalog-"); });
+        if (!has_capability(hello.capabilities, capability)
+            || (supports_parts && (catalog_count != 1
+                || !has_capability(hello.capabilities, "vehicle-loadout.v1")))) {
+            std::cerr << "[Hello] vehicle catalog mismatch; expected " << capability << "\n";
+            return ClientMessageResult::Rejected;
+        }
+    }
+    const std::string negotiation_fingerprint = make_hello_negotiation_fingerprint(hello);
     const std::string payload_fingerprint = make_hello_payload_fingerprint(
         hello, negotiation_fingerprint);
     const auto existing = hello_connection_states_.find(connection_generation);
@@ -306,7 +318,9 @@ ClientMessageResult SimulationHost::handle_hello(
             negotiation_fingerprint,
             hello.sequence,
             ClientPayloadKind::Hello,
-            payload_fingerprint});
+            payload_fingerprint,
+            has_capability(hello.capabilities, "vehicle-loadout.v1"),
+            supports_parts});
     std::cout << "[Hello] client accepted build=" << hello.build
               << " generation=" << connection_generation
               << " capabilities=" << hello.capabilities.size() << "\n";
@@ -448,6 +462,33 @@ ClientMessageResult SimulationHost::handle_simulation_reset(
         reset.requested_vehicle_class == simcore_host::RuntimeVehicleClass::Unspecified
         ? simcore_host::RuntimeVehicleClass::Sedan
         : reset.requested_vehicle_class;
+    // Resolve before modifying lease/lifecycle state. A bad selection must not
+    // retire the current controller or partially install vehicle parameters.
+    try {
+        (void)config_.vehicle_catalog->player_parameters(
+            base_vehicle_parameters_, requested_class, reset.requested_loadout_id);
+    } catch (const std::exception&) {
+        std::cerr << "[Lifecycle] reset rejected: invalid vehicle loadout\n";
+        return ClientMessageResult::Rejected;
+    }
+    const bool custom_parts = reset.requested_loadout_id.starts_with("parts_v1_");
+    if ((!reset.requested_loadout_id.empty() && config_.require_client_hello) || custom_parts) {
+        const auto hello = hello_connection_states_.find(connection_generation);
+        if (hello == hello_connection_states_.end()
+            || !hello->second.supports_vehicle_loadout
+            || (custom_parts && !hello->second.supports_vehicle_parts)) {
+            std::cerr << "[Lifecycle] reset rejected: loadout capability not negotiated\n";
+            return ClientMessageResult::Rejected;
+        }
+    }
+    if (lifecycle_active_ && reset.requested_loadout_id != active_vehicle_loadout_id_
+        && (requested_class == active_vehicle_class_ || !reset.requested_loadout_id.empty())) {
+        const auto state = physics_.get_state();
+        if (std::hypot(state.linear_velocity_body.x, state.linear_velocity_body.y) > 0.2) {
+            std::cerr << "[Lifecycle] reset rejected: stop before changing vehicle parts\n";
+            return ClientMessageResult::Rejected;
+        }
+    }
 
     // WebSocket connection generations are issued by the server at accept.
     // They provide ordering that random session GUIDs cannot: once a newer
@@ -470,7 +511,8 @@ ClientMessageResult SimulationHost::handle_simulation_reset(
                 std::cerr << "[Lifecycle] identity changed within one connection generation\n";
                 return ClientMessageResult::Rejected;
             }
-            if (requested_class != active_vehicle_class_) {
+            if (requested_class != active_vehicle_class_
+                || reset.requested_loadout_id != active_vehicle_loadout_id_) {
                 std::cerr << "[Lifecycle] reset rejected: vehicle class changed within play session\n";
                 return ClientMessageResult::Rejected;
             }
@@ -501,7 +543,8 @@ ClientMessageResult SimulationHost::handle_simulation_reset(
                       << reset.play_session_id << "\n";
             return ClientMessageResult::Rejected;
         }
-        if (requested_class != active_vehicle_class_) {
+        if (requested_class != active_vehicle_class_
+            || reset.requested_loadout_id != active_vehicle_loadout_id_) {
             std::cerr << "[Lifecycle] reconnect rejected: vehicle class changed within play session\n";
             return ClientMessageResult::Rejected;
         }
@@ -548,10 +591,10 @@ ClientMessageResult SimulationHost::handle_simulation_reset(
         return ClientMessageResult::Rejected;
     }
 
-    reset_player_vehicle(requested_class);
+    reset_player_vehicle(requested_class, reset.requested_loadout_id);
     if (config_.physics_replay) {
         config_.physics_replay->event(
-            simcore_host::PhysicsReplayEvent::Reset, requested_class);
+            simcore_host::PhysicsReplayEvent::Reset, requested_class, reset.requested_loadout_id);
     }
     runtime_entities_ = initial_runtime_entities_;
     structure_damage_.reset();
@@ -580,22 +623,25 @@ ClientMessageResult SimulationHost::handle_simulation_reset(
               << " session=" << reset.session_id << " generation="
               << connection_generation << " vehicle="
               << simcore_host::runtime_vehicle_class_name(active_vehicle_class_)
+              << " loadout=" << (active_vehicle_loadout_id_.empty() ? "default" : active_vehicle_loadout_id_)
               << "\n";
     publish_current_state();
     return ClientMessageResult::SimulationReset;
 }
 
 void SimulationHost::reset_player_vehicle(
-    simcore_host::RuntimeVehicleClass vehicle_class)
+    simcore_host::RuntimeVehicleClass vehicle_class, std::string_view loadout_id)
 {
-    config_.vehicle_parameters = simcore_host::make_player_vehicle_parameters(
-        base_vehicle_parameters_, vehicle_class);
+    config_.vehicle_parameters = config_.vehicle_catalog->player_parameters(
+        base_vehicle_parameters_, vehicle_class, loadout_id);
     physics_.replace_parameters(config_.vehicle_parameters);
     active_vehicle_class_ = vehicle_class;
+    active_vehicle_loadout_id_ = loadout_id;
 }
 
 std::string SimulationHost::make_initial_hello()
 {
+    const std::string catalog_capability = "vehicle-catalog-fnv1a64-" + config_.vehicle_catalog->checksum().substr(8);
     return simcore_host::serialize_hello_envelope(
         make_metadata(),
         "simcore-cpp-host-r1",
@@ -604,11 +650,14 @@ std::string SimulationHost::make_initial_hello()
             "control.v2",
             "simulation-reset.v1",
             "player-vehicle-selection.v1",
+            "vehicle-loadout.v1",
+            "vehicle-parts.v1",
             "map-package-checksum.v1",
             "safe-stop.v1",
             "world-health.v1",
             "traffic-signals.v1",
             "pedestrian-signals.v1",
+            catalog_capability,
         });
 }
 

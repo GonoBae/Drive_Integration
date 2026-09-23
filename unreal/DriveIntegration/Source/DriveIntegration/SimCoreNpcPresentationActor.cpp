@@ -163,7 +163,7 @@ void ASimCoreNpcPresentationActor::EndPlay(const EEndPlayReason::Type EndPlayRea
 }
 
 bool ASimCoreNpcPresentationActor::ConfigureVehicleClass(
-	SimCoreProtocol::ERuntimeVehicleClass VehicleClass)
+	SimCoreProtocol::ERuntimeVehicleClass VehicleClass, const FString& LoadoutId)
 {
 	const SimCoreVehicleVisualApplication::FBodySelection Selection =
 		SimCoreVehicleVisualApplication::SelectBody(VehicleClass,
@@ -171,43 +171,47 @@ bool ASimCoreNpcPresentationActor::ConfigureVehicleClass(
 	VehicleClass = Selection.VehicleClass;
 	UStaticMesh* TargetBody = Selection.BodyMesh;
 	if (!TargetBody || !SharedWheelMesh) return false;
-	if (RuntimeVehicleClass == VehicleClass && Body->GetStaticMesh() == TargetBody)
+	if (RuntimeVehicleClass == VehicleClass && RuntimeLoadoutId == LoadoutId
+		&& Body->GetStaticMesh() == TargetBody)
 	{
 		return true;
 	}
 
+	SimCoreVehicleVisualProfile::FProfile Profile;
+	if (!SimCoreVehicleVisualProfile::Resolve(VehicleClass, LoadoutId, Profile)) return false;
 	SimCoreVehicleVisualApplication::ReplaceBodyMesh(*Body, *TargetBody);
 	DeformableBody->ClearAllMeshSections();
 	DeformableBody->SetVisibility(false);
 	DamageMaterials.Reset();
 	DamageAccumulator = {};
 
-	SimCoreVehicleVisualProfile::FProfile Profile;
-	if (!SimCoreVehicleVisualProfile::Resolve(VehicleClass, Profile)) return false;
 	PresentationHalfHeightMeters = Profile.HalfHeightMeters;
 	PresentationGroundClearanceCm = Profile.NpcCollisionGroundClearanceMeters * 100.0f;
 
 	AuthoredBounds = TargetBody->GetBoundingBox();
+	const float MeshRadiusMeters = static_cast<float>(SharedWheelMesh->GetBoundingBox().GetExtent().Z * 0.01);
 	for (int32 Index = 0; Index < Wheels.Num(); ++Index)
 	{
 		const bool bVisible = Profile.IsWheelVisible(Index);
 		Wheels[Index]->SetVisibility(bVisible);
 		Wheels[Index]->SetRelativeLocation(Profile.WheelOriginsCm[Index]);
-		Wheels[Index]->SetRelativeScale3D(Profile.WheelScales[Index]);
+		const FVector WheelScale = Profile.PlayerWheelScale(Index, MeshRadiusMeters);
+		Wheels[Index]->SetRelativeScale3D(WheelScale);
 		Wheels[Index]->SetRelativeRotation(FRotator::ZeroRotator);
 		if (bVisible)
 		{
 			AuthoredBounds += SharedWheelMesh->GetBoundingBox().TransformBy(
-				FTransform(FQuat::Identity, Profile.WheelOriginsCm[Index], Profile.WheelScales[Index]));
+				FTransform(FQuat::Identity, Profile.WheelOriginsCm[Index], WheelScale));
 		}
 	}
-	TireRadiusMeters = static_cast<float>(SharedWheelMesh->GetBoundingBox().GetExtent().Z
-		* Profile.WheelScales[0].Z * 0.01);
+	TireRadiusMeters = Profile.PlayerWheelRadiusMeters(0, MeshRadiusMeters);
+	RearTireRadiusMeters = Profile.PlayerWheelRadiusMeters(2, MeshRadiusMeters);
 	VehicleHorn->SetRelativeLocation(FVector(AuthoredBounds.Max.X - 18.0, 0.0,
 		FMath::Clamp(AuthoredBounds.GetCenter().Z, 18.0, 80.0)));
 	SimCoreVehicleVisualApplication::ConfigureAttachments(
 		Profile, *TurnSignals, *DriverPresentation, *SuspensionPresentation);
 	RuntimeVehicleClass = VehicleClass;
+	RuntimeLoadoutId = LoadoutId;
 	return AuthoredBounds.IsValid != 0;
 }
 
@@ -239,7 +243,7 @@ bool ASimCoreNpcPresentationActor::ApplySnapshot(const SimCoreProtocol::FVehicle
 		SetActorHiddenInGame(true);
 		return false;
 	}
-	if (!ConfigureVehicleClass(State.RuntimeVehicleClass))
+	if (!ConfigureVehicleClass(State.RuntimeVehicleClass, State.VehicleLoadoutId))
 	{
 		SetActorHiddenInGame(true);
 		return false;
@@ -293,6 +297,10 @@ bool ASimCoreNpcPresentationActor::ApplySnapshot(const SimCoreProtocol::FVehicle
 			const float AngularSpeed = static_cast<float>(SignedForwardSpeed / FMath::Max(TireRadiusMeters, 0.01f));
 			WheelSpinDegrees = SimCorePresentation::AdvanceWheelSpinDegrees(
 				WheelSpinDegrees, AngularSpeed, FMath::Min(DeltaSeconds, 0.1f));
+			RearWheelSpinDegrees = SimCorePresentation::AdvanceWheelSpinDegrees(
+				RearWheelSpinDegrees,
+				static_cast<float>(SignedForwardSpeed / FMath::Max(RearTireRadiusMeters, 0.01f)),
+				FMath::Min(DeltaSeconds, 0.1f));
 			// Runtime NPCs send yaw rate and velocity, but no rack/wheel angles.
 			// Infer only the visual front axle angle from the accepted curvature.
 			// FLU yaw is left-positive; UE wheel yaw is right-positive. Signed
@@ -308,11 +316,12 @@ bool ASimCoreNpcPresentationActor::ApplySnapshot(const SimCoreProtocol::FVehicle
 			FrontWheelYawDegrees = static_cast<float>(
 				FMath::Clamp(SteeringDegrees, -35.0, 35.0) * LowSpeedBlend);
 		}
-		const FQuat Spin = SimCorePresentation::BuildWheelSpinRelativeRotation(WheelSpinDegrees).Quaternion();
 		for (int32 Index = 0; Index < Wheels.Num(); ++Index)
 		{
 			if (Wheels[Index]->IsVisible())
 			{
+				const FQuat Spin = SimCorePresentation::BuildWheelSpinRelativeRotation(
+					Index < 2 ? WheelSpinDegrees : RearWheelSpinDegrees).Quaternion();
 				const FQuat Steering = FRotator(0.0f, Index < 2 ? FrontWheelYawDegrees : 0.0f, 0.0f).Quaternion();
 				Wheels[Index]->SetRelativeRotation(Steering * Spin);
 			}

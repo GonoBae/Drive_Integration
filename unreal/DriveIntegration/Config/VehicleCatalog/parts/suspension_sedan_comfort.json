@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "id": "suspension_sedan_comfort",
+  "name": "Sedan comfort suspension per physical wheel",
+  "kind": "suspension",
+  "interface_id": "suspension_sedan",
+  "mass": {
+    "mass_kg": 12,
+    "center_of_mass_m": [
+      0,
+      0,
+      0
+    ],
+    "inertia_diagonal_kg_m2": [
+      0.15,
+      0.15,
+      0.1
+    ]
+  },
+  "specification": {
+    "rest_length_m": 0.35,
+    "max_compression_m": 0.18,
+    "max_extension_m": 0.15,
+    "spring_rate_n_per_m": 27000,
+    "damper_rate_n_s_per_m": 4100,
+    "max_force_n": 12000
+  }
+}

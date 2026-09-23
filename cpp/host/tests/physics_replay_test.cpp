@@ -5,6 +5,7 @@
 
 #include <boost/asio/io_context.hpp>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -12,6 +13,10 @@
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+
+#ifndef SIMCORE_TEST_RUNTIME_VEHICLE_CATALOG_PATH
+#error SIMCORE_TEST_RUNTIME_VEHICLE_CATALOG_PATH must identify the shared runtime catalog
+#endif
 
 namespace {
 void require(bool value, const char* message)
@@ -293,6 +298,205 @@ void test_contact_policy_round_trip(const std::filesystem::path& directory)
         && content.find(" CONTACT 0 1250 0 \"\"") != std::string::npos,
         "recording must capture all contact policy fields instead of silently dropping them");
 }
+
+void test_explicit_runtime_catalog_replay(const std::filesystem::path& directory)
+{
+    using namespace simcore_host;
+    const auto source = std::filesystem::canonical(SIMCORE_TEST_RUNTIME_VEHICLE_CATALOG_PATH).parent_path();
+    const auto fixture = directory / "runtime_catalog";
+    std::filesystem::create_directory(fixture);
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(source)) {
+        if (!entry.is_regular_file()) continue;
+        const auto target = fixture / entry.path().lexically_relative(source);
+        std::filesystem::create_directories(target.parent_path());
+        std::filesystem::copy_file(entry.path(), target);
+    }
+    const auto replace = [&](const char* relative, const std::string& before, const std::string& after) {
+        const auto path = fixture / relative;
+        auto bytes = read_file(path);
+        const auto position = bytes.find(before);
+        require(position != std::string::npos, "runtime catalog fixture mutation anchor missing");
+        bytes.replace(position, before.size(), after);
+        write_file(path, bytes);
+    };
+    // All four reset branches differ from the compiled default catalog. Replay
+    // must use the same explicitly supplied immutable snapshot as the host.
+    replace("profiles/sedan.json", "\"player_overrides\": {}", "\"player_overrides\": {\"mass_kg\": 1600}");
+    replace("profiles/compact.json", "\"mass_kg\": 1050", "\"mass_kg\": 1125");
+    replace("profiles/truck.json", "\"mass_kg\": 6200", "\"mass_kg\": 6300");
+    replace("profiles/motorcycle.json", "\"mass_kg\": 240", "\"mass_kg\": 260");
+    // Selected axle parts must survive reset and use the recorded catalog in
+    // replay, not silently revert to the scalar compatibility parameters.
+    replace("profiles/sedan.json", "\"tire\": null", "\"tire\": \"tire_sedan_comfort\"");
+    replace("profiles/sedan.json", "\"suspension\": null", "\"suspension\": \"suspension_sedan_comfort\"");
+    replace("profiles/sedan.json", "\"powertrain_modules\": null", R"("powertrain_modules": {
+      "engine": "engine_sedan_gasoline_2_0",
+      "transmission": "transmission_sedan_automatic_6speed",
+      "drivetrain": "drivetrain_sedan_rwd",
+      "fuel_tank": "fuel_tank_sedan_50l",
+      "initial_fuel_l": 40,
+      "upshift_rpm": 5200,
+      "downshift_rpm": 1800,
+      "shift_duration_s": 0.25
+    })");
+    const auto catalog = std::make_shared<const RuntimeVehicleCatalog>(
+        load_runtime_vehicle_catalog(fixture / "catalog.json"));
+    require(catalog->checksum() != default_runtime_vehicle_catalog().checksum(),
+        "custom replay fixture must have a different catalog identity");
+    const auto selected = catalog->player_parameters({}, RuntimeVehicleClass::Sedan);
+    require(selected.front_axle_contact.tire && selected.front_axle_contact.suspension
+            && !selected.rear_axle_contact.tire && !selected.rear_axle_contact.suspension,
+        "replay fixture must select front modules without overwriting the rear axle");
+    require(selected.powertrain.has_value(), "replay fixture must select the powertrain modules");
+    const PhysicsReplayIdentity identity{"test-build", "test-vehicle+" + catalog->checksum(),
+        "test-map", 0, 0, 0, 0, 1000};
+    const auto path = directory / "runtime-catalog.replay";
+    auto recorder = std::make_shared<PhysicsReplayRecorder>(path, identity, 40);
+    SimulationHostConfig config;
+    config.source_id = "catalog-replay-test-host";
+    config.map_package_checksum = identity.map_checksum;
+    config.physics_frequency_hz = identity.physics_hz;
+    config.physics_replay = recorder;
+    config.vehicle_catalog = catalog;
+    boost::asio::io_context ioc;
+    SimulationHost host(ioc, config, {});
+    std::uint64_t sequence = 1;
+    for (unsigned encoded_class = 1; encoded_class <= 4; ++encoded_class) {
+        require(host.handle_client_message(frame(sequence++, true, 0, false,
+                "catalog-play-" + std::to_string(encoded_class),
+                static_cast<simcore::RuntimeVehicleClass>(encoded_class))) == ClientMessageResult::SimulationReset,
+            "custom catalog reset rejected");
+        for (int tick = 0; tick < 10; ++tick) {
+            require(host.handle_client_message(frame(sequence++, false, 0.6f)) == ClientMessageResult::ControlAccepted,
+                "custom catalog control rejected");
+            one_tick(ioc, host);
+        }
+    }
+    require(recorder->complete(), "custom catalog recording did not finalize");
+    const auto result = verify_physics_replay(path, identity, config.vehicle_parameters, {}, {}, catalog.get());
+    require(result.frames == 40 && result.resets == 4 && result.maximum_position_error_m == 0
+        && result.maximum_yaw_error_deg == 0, "explicit catalog replay must match all four host reset profiles exactly");
+
+    std::string mismatch;
+    try {
+        (void)verify_physics_replay(path, identity, config.vehicle_parameters, {}, {}, &default_runtime_vehicle_catalog());
+    } catch (const std::exception& error) {
+        mismatch = error.what();
+    }
+    require(mismatch.find("resolved runtime catalog does not match replay identity") != std::string::npos,
+        "a different catalog must be rejected by identity before physics verification");
+
+    // Run enough physical time for shifts and fuel use, independent of the
+    // wall-clock scheduler. The second reset must discard internal RPM/gear/fuel history.
+    auto driving_identity = identity;
+    driving_identity.physics_hz = 60;
+    const auto driving_path = directory / "powertrain-catalog.replay";
+    PhysicsReplayRecorder driving_recorder(driving_path, driving_identity, 1200);
+    VehiclePhysics physics(0, 0, 0, 0, selected);
+    for (int tick = 0; tick < 1200; ++tick) {
+        if (tick == 0 || tick == 600) {
+            physics.replace_parameters(selected);
+            driving_recorder.event(PhysicsReplayEvent::Reset, RuntimeVehicleClass::Sedan);
+            require(std::abs(physics.get_state().fuel - 80.f) < 0.001f,
+                "powertrain reset must restore initial litres as fuel percentage");
+        }
+        VehicleInput input;
+        input.throttle = 0.9f;
+        if (tick >= 600 && tick < 660) input.gear = VehicleGear::Neutral;
+        else if (tick >= 660) input.gear = VehicleGear::Reverse;
+        physics.set_input(input);
+        driving_recorder.tick(input, {}, physics.update(1.0 / 60));
+    }
+    require(physics.get_state().fuel < 80.f, "selected engine must consume recorded fuel");
+    const auto driving_result = verify_physics_replay(driving_path, driving_identity,
+        config.vehicle_parameters, {}, {}, catalog.get());
+    require(driving_result.frames == 1200 && driving_result.resets == 2
+        && driving_result.maximum_position_error_m == 0 && driving_result.maximum_yaw_error_deg == 0,
+        "powertrain shifts, reverse, fuel and reset must replay deterministically");
+}
+void test_named_loadout_replay(const std::filesystem::path& directory)
+{
+    using namespace simcore_host;
+    const auto& catalog = default_runtime_vehicle_catalog();
+    const PhysicsReplayIdentity identity{"test-build", "test-vehicle+" + catalog.checksum(),
+        "test-map", 0, 0, 0, 0, 60};
+    const auto path = directory / "named-loadouts.replay";
+    PhysicsReplayRecorder recorder(path, identity, 600);
+    VehiclePhysics physics(0, 0, 0, 0);
+    for (int tick = 0; tick < 600; ++tick) {
+        if (tick == 0 || tick == 300) {
+            const auto* id = tick == 0 ? "sedan_modular_standard" : "sedan_modular_comfort";
+            physics.replace_parameters(catalog.player_parameters({}, RuntimeVehicleClass::Sedan, id));
+            recorder.event(PhysicsReplayEvent::Reset, RuntimeVehicleClass::Sedan, id);
+        }
+        VehicleInput input;
+        input.throttle = .65f;
+        input.steering = tick % 300 > 100 ? .05f : 0.f;
+        physics.set_input(input);
+        recorder.tick(input, {}, physics.update(1.0 / 60));
+    }
+    const auto result = verify_physics_replay(path, identity, {}, {}, {}, &catalog);
+    require(result.frames == 600 && result.resets == 2 && result.maximum_position_error_m == 0
+        && result.maximum_yaw_error_deg == 0, "named loadout reset history did not replay exactly");
+    const auto bytes = read_file(path);
+    require(bytes.find("RESET 1 LOADOUT sedan_modular_standard") != std::string::npos
+        && bytes.find("RESET 1 LOADOUT sedan_modular_comfort") != std::string::npos,
+        "replay must preserve actual loadout rather than only vehicle class");
+    for (const auto* invalid : {"missing_loadout", "../escape", "sedan_modular_comfort trailing"}) {
+        auto changed = bytes;
+        const auto position = changed.find("sedan_modular_standard");
+        changed.replace(position, std::string("sedan_modular_standard").size(), invalid);
+        const auto invalid_path = directory / "invalid-loadout.replay";
+        write_file(invalid_path, resign_recording(changed));
+        rejects([&] { verify_physics_replay(invalid_path, identity, {}, {}, {}, &catalog); });
+    }
+}
+
+void test_custom_parts_replay(const std::filesystem::path& directory)
+{
+    using namespace simcore_host;
+    const auto& catalog = default_runtime_vehicle_catalog();
+    constexpr auto custom = "parts_v1_01_0504070401080002";
+    const PhysicsReplayIdentity identity{"test-build", "test-vehicle+" + catalog.checksum(),
+        "test-map", 0, 0, 0, 0, 60};
+    const auto path = directory / "custom-parts.replay";
+    PhysicsReplayRecorder recorder(path, identity, 360);
+    VehiclePhysics physics(0, 0, 0, 0);
+    for (int tick = 0; tick < 360; ++tick) {
+        if (tick == 0 || tick == 180) {
+            const auto* id = tick == 0 ? custom : "sedan_modular_standard";
+            physics.replace_parameters(catalog.player_parameters({}, RuntimeVehicleClass::Sedan, id));
+            recorder.event(PhysicsReplayEvent::Reset, RuntimeVehicleClass::Sedan, id);
+        }
+        VehicleInput input;
+        input.throttle = .6f;
+        input.steering = tick % 180 > 70 ? .06f : 0.f;
+        physics.set_input(input);
+        recorder.tick(input, {}, physics.update(1.0 / 60));
+    }
+    for (const auto* selected_catalog : {&catalog, static_cast<const RuntimeVehicleCatalog*>(nullptr)}) {
+        const auto result = verify_physics_replay(path, identity, {}, {}, {}, selected_catalog);
+        require(result.frames == 360 && result.resets == 2 && result.maximum_position_error_m == 0
+            && result.maximum_yaw_error_deg == 0, "individual part selection did not replay exactly");
+    }
+    auto legacy_identity = identity;
+    legacy_identity.vehicle_checksum = "test-vehicle";
+    auto bytes = read_file(path);
+    const auto suffix = "+" + catalog.checksum();
+    const auto suffix_at = bytes.find(suffix);
+    require(suffix_at != std::string::npos, "custom replay catalog identity fixture missing");
+    bytes.erase(suffix_at, suffix.size());
+    const auto legacy_path = directory / "custom-parts-without-catalog.replay";
+    write_file(legacy_path, resign_recording(bytes));
+    rejects([&] { verify_physics_replay(legacy_path, legacy_identity, {}, {}, {}, nullptr); });
+    auto wrong_identity = identity;
+    wrong_identity.vehicle_checksum = "test-vehicle+fnv1a64:0000000000000000";
+    bytes = read_file(path);
+    bytes.replace(suffix_at, suffix.size(), "+fnv1a64:0000000000000000");
+    const auto wrong_path = directory / "custom-parts-wrong-catalog.replay";
+    write_file(wrong_path, resign_recording(bytes));
+    rejects([&] { verify_physics_replay(wrong_path, wrong_identity, {}, {}, {}, nullptr); });
+}
 } // namespace
 
 int main()
@@ -302,6 +506,9 @@ int main()
         test_actual_host_and_strict_reader(scratch.path);
         test_recording_guards_and_cli(scratch.path);
         test_contact_policy_round_trip(scratch.path);
+        test_explicit_runtime_catalog_replay(scratch.path);
+        test_named_loadout_replay(scratch.path);
+        test_custom_parts_replay(scratch.path);
         std::cout << "physics replay tests passed\n";
         return 0;
     } catch (const std::exception& error) {

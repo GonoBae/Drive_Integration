@@ -39,9 +39,18 @@ FVehiclePresentationSample BuildVehicleSample(
 	float StateStaleTimeoutSeconds,
 	float VisualWheelStopSpeedMps,
 	float VisualTireRadiusMeters,
-	const FVector& PresentationOffsetCentimeters)
+	const FVector& PresentationOffsetCentimeters,
+	const TStaticArray<float, VehicleWheelCount>* WheelRadiiMeters)
 {
 	FVehiclePresentationSample Sample;
+	const auto WheelRadius = [VisualTireRadiusMeters, WheelRadiiMeters](const int32 Index)
+	{
+		const float Radius = WheelRadiiMeters ? (*WheelRadiiMeters)[Index] : VisualTireRadiusMeters;
+		if (FMath::IsFinite(Radius) && Radius > 0) return Radius;
+		// Asset-loading fallback may not have resolved its per-wheel profile yet.
+		return FMath::IsFinite(VisualTireRadiusMeters) && VisualTireRadiusMeters > 0
+			? VisualTireRadiusMeters : KINDA_SMALL_NUMBER;
+	};
 	const double ClampedStateAgeSeconds = FMath::Max(0.0, static_cast<double>(StateAgeSeconds));
 	const double PredictionSeconds = FMath::Min(
 		ClampedStateAgeSeconds,
@@ -127,7 +136,7 @@ FVehiclePresentationSample BuildVehicleSample(
 			if (TryNormalizeContactNormal(WheelState, ContactNormalEnu))
 			{
 				const double SafeTireRadiusMeters = FMath::Max(
-					static_cast<double>(VisualTireRadiusMeters),
+					static_cast<double>(WheelRadius(WheelState.WheelIndex)),
 					UE_DOUBLE_KINDA_SMALL_NUMBER);
 				// contact_point_enu is the true tangent patch. Adding the unit
 				// normal times radius reconstructs the solver's wheel centre.
@@ -205,37 +214,15 @@ FVehiclePresentationSample BuildVehicleSample(
 		// Preserve small physical tire slip while preventing a transient contact
 		// loss from looking like a wheel-speed bug. State.SpeedMps carries its
 		// sign, so the same bound also keeps reverse rotation visually correct.
-		const float SafeTireRadiusMeters = FMath::Max(
-			VisualTireRadiusMeters,
-			KINDA_SMALL_NUMBER);
-		const float RoadAngularSpeedRadPerSecond =
-			State.SpeedMps / SafeTireRadiusMeters;
-		const float AllowedVisualSlipRadPerSecond = FMath::Max(
-			0.10f,
-			FMath::Abs(RoadAngularSpeedRadPerSecond) * 0.03f);
-		const float MinimumVisualSpeed =
-			RoadAngularSpeedRadPerSecond - AllowedVisualSlipRadPerSecond;
-		const float MaximumVisualSpeed =
-			RoadAngularSpeedRadPerSecond + AllowedVisualSlipRadPerSecond;
-
-		if (FrontWheelCount == 0)
+		const auto BoundAxleSpin = [&State, &WheelRadius](const int32 WheelIndex, const int32 ContactCount, float& Speed)
 		{
-			Sample.FrontAxleAngularSpeedRadPerSecond =
-				RoadAngularSpeedRadPerSecond;
-		}
-		if (RearWheelCount == 0)
-		{
-			Sample.RearAxleAngularSpeedRadPerSecond =
-				RoadAngularSpeedRadPerSecond;
-		}
-		Sample.FrontAxleAngularSpeedRadPerSecond = FMath::Clamp(
-			Sample.FrontAxleAngularSpeedRadPerSecond,
-			MinimumVisualSpeed,
-			MaximumVisualSpeed);
-		Sample.RearAxleAngularSpeedRadPerSecond = FMath::Clamp(
-			Sample.RearAxleAngularSpeedRadPerSecond,
-			MinimumVisualSpeed,
-			MaximumVisualSpeed);
+			const float RoadSpeed = State.SpeedMps / WheelRadius(WheelIndex);
+			const float AllowedSlip = FMath::Max(0.10f, FMath::Abs(RoadSpeed) * 0.03f);
+			if (ContactCount == 0) Speed = RoadSpeed;
+			Speed = FMath::Clamp(Speed, RoadSpeed - AllowedSlip, RoadSpeed + AllowedSlip);
+		};
+		BoundAxleSpin(0, FrontWheelCount, Sample.FrontAxleAngularSpeedRadPerSecond);
+		BoundAxleSpin(2, RearWheelCount, Sample.RearAxleAngularSpeedRadPerSecond);
 	}
 
 	return Sample;

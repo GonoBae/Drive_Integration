@@ -347,7 +347,7 @@ void test_authoritative_health_initial_reset_active_and_nonnegative_age()
     boost::asio::io_context ioc;
     std::string last_published;
     SimulationHost host(ioc, make_test_config(), {
-        [&](const std::string& bytes) { last_published = bytes; }, {}, {}});
+        [&](const std::string& bytes) { last_published = bytes; }, {}});
     const auto initial = health_snapshot(host);
     require(initial.status() == "awaiting_reset"
             && !initial.has_control_command()
@@ -401,7 +401,7 @@ void test_health_reports_tick_overruns_and_reset_clears_metrics()
     boost::asio::io_context ioc;
     std::string last_published;
     SimulationHost host(ioc, make_test_config(), {
-        [&](const std::string& bytes) { last_published = bytes; }, {}, {}});
+        [&](const std::string& bytes) { last_published = bytes; }, {}});
     // Deliberately miss the 1 ms fixture deadline before running one callback.
     // This tests the real clock counter without relying on machine load.
     std::this_thread::sleep_for(std::chrono::milliseconds(4));
@@ -474,6 +474,27 @@ void test_required_hello_gates_lifecycle_and_control()
     }
     require(has_world_health,
             "server Hello must advertise optional atomic world-health.v1 support");
+}
+
+void test_shared_vehicle_catalog_identity_is_required()
+{
+    SimulationHostConfig config;
+    config.source_id = "catalog-host-test";
+    config.map_package_checksum = "test-map";
+    config.require_client_hello = true;
+    config.require_vehicle_catalog_identity = true;
+    boost::asio::io_context ioc;
+    SimulationHost host(ioc, config, {});
+    const auto capability = "vehicle-catalog-fnv1a64-"
+        + simcore_host::default_runtime_vehicle_catalog().checksum().substr(8);
+    require(host.handle_client_message(make_hello_message(), 10) == ClientMessageResult::Rejected,
+            "client without vehicle catalog identity must not control migrated server");
+    require(host.handle_client_message(make_hello_message("hello-session", 1, "test-map", true,
+                "unreal-test", "drive-integration-test", "vehicle-catalog-fnv1a64-0000000000000000"), 10)
+                == ClientMessageResult::Rejected, "mismatched vehicle data must be rejected");
+    require(host.handle_client_message(make_hello_message("hello-session", 1, "test-map", true,
+                "unreal-test", "drive-integration-test", capability), 10) == ClientMessageResult::HelloAccepted,
+            "catalog rejection must not poison a subsequent valid handshake");
 }
 
 void test_hello_binds_identity_and_sequence_without_rejection_poisoning()
@@ -782,7 +803,6 @@ void test_soft_timeout_retains_session_and_fresh_control_recovers()
         std::move(config),
         {
             [&](const std::string& bytes) { last_published = bytes; },
-            {},
             [&](const std::string&) { ++close_requests; },
         });
 
@@ -823,7 +843,6 @@ void test_hard_timeout_retires_session_and_requests_reconnect_once()
         ioc,
         std::move(config),
         {
-            {},
             {},
             [&](const std::string&) { ++close_requests; },
         });
@@ -895,7 +914,6 @@ void test_map_reload_applies_at_tick_boundary_and_requires_fresh_handshake()
         ioc,
         make_test_config(),
         {
-            {},
             {},
             [&](const std::string& reason) {
                 ++close_requests;
@@ -1005,7 +1023,7 @@ void test_map_reload_queue_is_latest_verified_candidate_wins()
     SimulationHost host(
         ioc,
         make_test_config(),
-        {{}, {}, [&](const std::string&) { ++close_requests; }});
+        {{}, [&](const std::string&) { ++close_requests; }});
 
     host.queue_map_package_reload(
         make_runtime_map_package("reload-map-b", 2.0, 1));
@@ -1027,13 +1045,11 @@ void test_new_pie_resets_pose_clock_and_control_lease()
 {
     boost::asio::io_context ioc;
     int world_messages = 0;
-    int observer_messages = 0;
     SimulationHost host(
         ioc,
         make_test_config(),
         {
             [&](const std::string&) { ++world_messages; },
-            [&](const std::string&) { ++observer_messages; },
             {},
         });
 
@@ -1051,7 +1067,6 @@ void test_new_pie_resets_pose_clock_and_control_lease()
     require(simulation_time_ns(host) > 0,
             "test setup must advance authoritative simulation time");
     const int world_before_reset = world_messages;
-    const int observer_before_reset = observer_messages;
 
     require(host.handle_client_message(
                 make_reset_message("new-socket", "pie-run-b", 1, 3), 2)
@@ -1069,8 +1084,7 @@ void test_new_pie_resets_pose_clock_and_control_lease()
             && reset_world.play_session_id() == "pie-run-b"
             && reset_world.world_state().entities(0).timestamp() > 0.0,
             "reset snapshot must echo its play identity with a live timestamp");
-    require(world_messages == world_before_reset + 1
-            && observer_messages == observer_before_reset + 1,
+    require(world_messages == world_before_reset + 1,
             "reset must immediately publish one matching authoritative snapshot");
 
     require(host.handle_client_message(
@@ -1142,7 +1156,6 @@ void test_same_pie_reconnect_is_deduplicated_without_physics_reset()
         make_test_config(),
         {
             [&](const std::string&) { ++world_messages; },
-            {},
             {},
         });
 
@@ -1390,10 +1403,8 @@ int main()
     using namespace std::chrono_literals;
     boost::asio::io_context ioc;
     int world_messages = 0;
-    int observer_messages = 0;
     int close_requests = 0;
     std::string last_world_message;
-    std::string last_observer_message;
 
     SimulationHost host(
         ioc,
@@ -1405,10 +1416,6 @@ int main()
             [&](const std::string& message) {
                 ++world_messages;
                 last_world_message = message;
-            },
-            [&](const std::string& message) {
-                ++observer_messages;
-                last_observer_message = message;
             },
             [&](const std::string&) { ++close_requests; },
         });
@@ -1437,18 +1444,12 @@ int main()
 
     require(!host.running(), "stop must terminate the fixed-step loop");
     require(world_messages > 0, "fixed-step loop must publish world state");
-    require(observer_messages == world_messages,
-            "each tick must publish matching direct and observer state");
     require(close_requests == 0, "fresh control must not close connections");
 
     simcore::Envelope world;
     require(world.ParseFromString(last_world_message) && world.has_world_state(),
             "published world message must be a protobuf WorldState envelope");
 
-    simcore::EntityStatePacket observer;
-    require(observer.ParseFromString(last_observer_message)
-                && observer.entities_size() == 1,
-            "optional observer must preserve the frozen EntityStatePacket format");
     test_host_requires_verified_map_identity();
     test_player_vehicle_selection_is_authoritative_and_reset_fenced();
     test_truck_collision_matches_authored_body_at_each_heading();
@@ -1456,6 +1457,7 @@ int main()
     test_authoritative_health_initial_reset_active_and_nonnegative_age();
     test_health_reports_tick_overruns_and_reset_clears_metrics();
     test_required_hello_gates_lifecycle_and_control();
+    test_shared_vehicle_catalog_identity_is_required();
     test_hello_binds_identity_and_sequence_without_rejection_poisoning();
     test_log_exposed_client_identifiers_require_printable_ascii();
     test_map_reload_applies_at_tick_boundary_and_requires_fresh_handshake();

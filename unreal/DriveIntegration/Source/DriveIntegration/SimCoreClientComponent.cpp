@@ -1,4 +1,5 @@
 #include "SimCoreClientComponent.h"
+#include "SimCoreDriveReplay.h"
 
 #include "Async/Async.h"
 #include "Engine/Engine.h"
@@ -8,6 +9,7 @@
 #include "Misc/Paths.h"
 #include "SimCoreClientSettings.h"
 #include "SimCoreMapPackage.h"
+#include "SimCoreVehicleVisualProfile.h"
 #include "WebSocketsModule.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogSimCoreClient, Log, All);
@@ -157,6 +159,14 @@ void USimCoreClientComponent::StartConnectionAttempt()
 		SetConnectionState(ESimCoreConnectionState::Incompatible);
 		return;
 	}
+	FString VehicleCatalogCapability, VehicleCatalogError;
+	if (!SimCoreVehicleVisualProfile::CatalogCapability(VehicleCatalogCapability, VehicleCatalogError))
+	{
+		UE_LOG(LogSimCoreClient, Error, TEXT("Cannot connect with an invalid vehicle catalog: %s"), *VehicleCatalogError);
+		bAutoReconnectEnabled = false;
+		SetConnectionState(ESimCoreConnectionState::Incompatible);
+		return;
+	}
 	// A server-side MapPackage hot reload closes the old checksum lifecycle.
 	// Re-read the editor's manifest before every reconnect so the next Reset and
 	// control frames use the newly committed collision identity automatically.
@@ -220,11 +230,92 @@ bool USimCoreClientComponent::SelectVehicleClass(
 	}
 
 	SelectedVehicleClass = VehicleClass;
+	SelectedLoadoutId.Reset();
+	bLoadoutPending = false;
 	PlaySessionId = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
 	PendingControl = {};
 	bAutoReconnectEnabled = true;
 	StartConnectionAttempt();
 	return true;
+}
+
+bool USimCoreClientComponent::CanSelectLoadout(FString& OutReason) const
+{
+	OutReason.Reset();
+	if (bLoadoutPending) { OutReason = GetLoadoutStatusText(); return false; }
+	if (!bServerSupportsLoadouts) { OutReason = TEXT("Server does not support the garage yet."); return false; }
+	if (const auto* Replay = GetOwner() ? GetOwner()->FindComponentByClass<USimCoreDriveReplayComponent>() : nullptr)
+		if (Replay->IsReplaying()) { OutReason = TEXT("Stop replay before applying a setup."); return false; }
+	SimCoreProtocol::FVehicleState State;
+	float Age;
+	if (ConnectionState != ESimCoreConnectionState::Connected || !GetLatestState(State, Age)
+		|| !FMath::IsFinite(Age) || Age > HealthStateStaleTimeoutSeconds || Age < 0
+		|| !State.ServerHealth.bPresent || State.ServerHealth.Status != SimCoreProtocol::EServerHealthStatus::Active)
+	{
+		OutReason = TEXT("Wait for a fresh Active server connection.");
+		return false;
+	}
+	if (!FMath::IsFinite(State.SpeedMps) || FMath::Abs(State.SpeedMps) > .2f
+		|| State.LinearVelocityBody.ContainsNaN() || State.LinearVelocityBody.Size2D() > .2)
+	{
+		OutReason = TEXT("Stop the vehicle to apply a setup (0.2 m/s or less).");
+		return false;
+	}
+	return true;
+}
+
+bool USimCoreClientComponent::SelectLoadout(const FString& LoadoutId, FString& OutReason)
+{
+	if (LoadoutId.StartsWith(TEXT("parts_v1_"), ESearchCase::CaseSensitive) && !CanEditParts(OutReason)) return false;
+	if (!CanSelectLoadout(OutReason)) return false;
+	SimCoreVehicleVisualProfile::FProfile Profile;
+	if (!SimCoreVehicleVisualProfile::Resolve(SelectedVehicleClass, LoadoutId, Profile))
+	{
+		OutReason = TEXT("This setup is not available for the selected vehicle.");
+		return false;
+	}
+	if (LoadoutId == SelectedLoadoutId) { OutReason = TEXT("This setup is already applied."); return false; }
+	SelectedLoadoutId = LoadoutId;
+	bLoadoutPending = true;
+	LoadoutRequestedAtSeconds = FPlatformTime::Seconds();
+	PlaySessionId = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
+	PendingControl = {};
+	PendingControl.Brake = 1.0f;
+	bAutoReconnectEnabled = true;
+	StartConnectionAttempt();
+	return true;
+}
+
+bool USimCoreClientComponent::CanEditParts(FString& OutReason) const
+{
+	OutReason.Reset();
+	if (!bServerSupportsParts)
+	{
+		OutReason = TEXT("Individual parts require a vehicle-parts.v1 server. Presets remain available.");
+		return false;
+	}
+	if (!bServerMatchesCatalog)
+	{
+		OutReason = TEXT("Individual parts require the server's exact matching vehicle catalog.");
+		return false;
+	}
+	return true;
+}
+
+FString USimCoreClientComponent::GetLoadoutStatusText() const
+{
+	if (bLoadoutPending)
+	{
+		if (ConnectionState == ESimCoreConnectionState::Incompatible) return TEXT("Setup was not accepted: reconnect with matching server files.");
+		if (ConnectionState == ESimCoreConnectionState::WaitingToReconnect)
+			return TEXT("No setup confirmation yet - reconnecting safely with the same request...");
+		return FPlatformTime::Seconds() - LoadoutRequestedAtSeconds > 5
+			? TEXT("Still waiting for server confirmation; check the server connection.")
+			: TEXT("Applying at spawn - waiting for server confirmation...");
+	}
+	FString Reason;
+	if (!CanSelectLoadout(Reason)) return Reason;
+	return TEXT("Ready. Apply resets the world; same-class NPCs use this setup too.");
 }
 
 FString USimCoreClientComponent::GetConnectionStatusText() const
@@ -286,6 +377,21 @@ bool USimCoreClientComponent::PrepareRuntimeSettings()
 
 void USimCoreClientComponent::TickConnection()
 {
+	// A stopped-state race can reject Reset without closing the socket. Retry
+	// through the existing connection backoff, never by reviving the old play.
+	// If Reset was accepted but its acknowledgement was lost, the host safely
+	// deduplicates this same desired loadout/play on the new connection.
+	if (bAutoReconnectEnabled && bLoadoutPending && bMapHandshakeComplete
+		&& ConnectionState == ESimCoreConnectionState::Connected
+		&& FPlatformTime::Seconds() - LoadoutRequestedAtSeconds >= 5.0)
+	{
+		UE_LOG(LogSimCoreClient, Log, TEXT("Loadout acknowledgement timed out; reconnecting with the same play and setup"));
+		++SocketGeneration;
+		ReleaseSocket(true, TEXT("Loadout acknowledgement timeout"));
+		ResetConnectionSession();
+		ScheduleReconnect();
+		return;
+	}
 	if (bAutoReconnectEnabled
 		&& ConnectionState == ESimCoreConnectionState::WaitingToReconnect
 		&& FPlatformTime::Seconds() >= NextReconnectTimeSeconds)
@@ -516,6 +622,9 @@ void USimCoreClientComponent::ResetConnectionSession()
 	ResetControlSession();
 	bMapHandshakeComplete = false;
 	bProtocolHandshakeComplete = false;
+	bServerSupportsLoadouts = false;
+	bServerSupportsParts = false;
+	bServerMatchesCatalog = false;
 }
 
 void USimCoreClientComponent::ResetReceivedState()
@@ -767,6 +876,7 @@ void USimCoreClientComponent::SendControl()
 void USimCoreClientComponent::SendSimulationReset()
 {
 	if (!IsConnected() || !bMapHandshakeComplete || PlaySessionId.IsEmpty()) return;
+	if (bLoadoutPending) LoadoutRequestedAtSeconds = FPlatformTime::Seconds();
 	const uint64 ClientTimeNs = static_cast<uint64>(
 		FPlatformTime::Seconds() * 1'000'000'000.0);
 	const TArray<uint8> Message = SimCoreProtocol::SerializeSimulationResetEnvelope(
@@ -776,7 +886,8 @@ void USimCoreClientComponent::SendSimulationReset()
 		OutgoingSequence++,
 		SourceId,
 		SessionId,
-		MapPackageChecksum);
+		MapPackageChecksum,
+		SelectedLoadoutId);
 	Socket->Send(Message.GetData(), Message.Num(), true);
 	UE_LOG(
 		LogSimCoreClient,
@@ -790,17 +901,29 @@ void USimCoreClientComponent::SendSimulationReset()
 void USimCoreClientComponent::SendHello()
 {
 	if (!Socket.IsValid() || !Socket->IsConnected()) return;
-	const TArray<FString> Capabilities{
+	FString VehicleCatalogCapability, Error;
+	if (!SimCoreVehicleVisualProfile::CatalogCapability(VehicleCatalogCapability, Error))
+	{
+		UE_LOG(LogSimCoreClient, Error, TEXT("Cannot send Hello with an invalid vehicle catalog: %s"), *Error);
+		bAutoReconnectEnabled = false;
+		SetConnectionState(ESimCoreConnectionState::Incompatible);
+		ReleaseSocket(true, TEXT("Invalid vehicle catalog"));
+		return;
+	}
+	TArray<FString> Capabilities{
 		TEXT("world-state.v2"),
 		TEXT("control.v2"),
 		TEXT("simulation-reset.v1"),
 		TEXT("player-vehicle-selection.v1"),
+		TEXT("vehicle-loadout.v1"),
+		TEXT("vehicle-parts.v1"),
 		TEXT("map-package-checksum.v1"),
 		TEXT("ground-heightfield.v1"),
 		TEXT("runtime-entities.v1"),
 		TEXT("traffic-signals.v1"),
 		TEXT("pedestrian-signals.v1"),
 	};
+	Capabilities.Add(VehicleCatalogCapability);
 	const TArray<uint8> Message = SimCoreProtocol::SerializeHelloEnvelope(
 		OutgoingSequence++,
 		SourceId,
@@ -856,6 +979,42 @@ bool USimCoreClientComponent::ValidateServerHello(
 			return false;
 		}
 	}
+	if ((!SelectedLoadoutId.IsEmpty() || bLoadoutPending) && !UniqueCapabilities.Contains(TEXT("vehicle-loadout.v1")))
+	{
+		OutError = TEXT("server cannot confirm the selected vehicle setup");
+		return false;
+	}
+	if (SelectedLoadoutId.StartsWith(TEXT("parts_v1_"), ESearchCase::CaseSensitive))
+	{
+		FString CatalogCapability;
+		if (!UniqueCapabilities.Contains(TEXT("vehicle-parts.v1")))
+		{
+			OutError = TEXT("server Hello is missing vehicle-parts.v1 for the selected individual parts");
+			return false;
+		}
+		if (!SimCoreVehicleVisualProfile::CatalogCapability(CatalogCapability, OutError)) return false;
+		if (!UniqueCapabilities.Contains(CatalogCapability))
+		{
+			OutError = TEXT("individual parts require an explicit exact matching vehicle catalog capability");
+			return false;
+		}
+	}
+	return SimCoreVehicleVisualProfile::ValidateServerCatalog(Hello.Capabilities, OutError);
+}
+
+bool USimCoreClientComponent::ValidateAuthoritativeLoadout(const SimCoreProtocol::FVehicleState& State, FString& OutError) const
+{
+	SimCoreVehicleVisualProfile::FProfile Profile;
+	if ((bServerSupportsLoadouts && (State.RuntimeVehicleClass != SelectedVehicleClass || State.VehicleLoadoutId != SelectedLoadoutId))
+		|| (!bServerSupportsLoadouts && !State.VehicleLoadoutId.IsEmpty())
+		|| (State.VehicleLoadoutId.StartsWith(TEXT("parts_v1_"), ESearchCase::CaseSensitive)
+			&& (!bServerSupportsParts || !bServerMatchesCatalog))
+		|| !SimCoreVehicleVisualProfile::Resolve(State.RuntimeVehicleClass, State.VehicleLoadoutId, Profile))
+	{
+		OutError = TEXT("Server vehicle setup does not match the requested setup.");
+		return false;
+	}
+	OutError.Reset();
 	return true;
 }
 
@@ -976,6 +1135,11 @@ void USimCoreClientComponent::ApplyBinaryMessage(
 			return;
 		}
 		bProtocolHandshakeComplete = true;
+		bServerSupportsLoadouts = Hello.Capabilities.Contains(TEXT("vehicle-loadout.v1"));
+		bServerSupportsParts = Hello.Capabilities.Contains(TEXT("vehicle-parts.v1"));
+		FString ExpectedCatalogCapability;
+		bServerMatchesCatalog = SimCoreVehicleVisualProfile::CatalogCapability(ExpectedCatalogCapability, Error)
+			&& Hello.Capabilities.Contains(ExpectedCatalogCapability);
 		UE_LOG(
 			LogSimCoreClient,
 			Log,
@@ -1078,6 +1242,16 @@ void USimCoreClientComponent::ApplyBinaryMessage(
 		++DroppedOutOfOrderStateCount;
 		return;
 	}
+	if (!ValidateAuthoritativeLoadout(Parsed, Error))
+	{
+		UE_LOG(LogSimCoreClient, Error, TEXT("%s"), *Error);
+		bAutoReconnectEnabled = false;
+		SetConnectionState(ESimCoreConnectionState::Incompatible);
+		++SocketGeneration;
+		ReleaseSocket(true, Error);
+		ResetReceivedState();
+		return;
+	}
 	if (bHasState)
 	{
 		const uint64 SequenceDelta = Parsed.Sequence - LatestState.Sequence;
@@ -1102,6 +1276,7 @@ void USimCoreClientComponent::ApplyBinaryMessage(
 	LatestState = MoveTemp(Parsed);
 	LatestStateReceiveTimeSeconds = ArrivalTimeSeconds;
 	bHasState = true;
+	bLoadoutPending = false;
 	bTrafficSnapshotAccepted = true;
 	SyncRuntimeProxyActors(ParsedEntities, ArrivalTimeSeconds);
 	TickTrafficSignals();

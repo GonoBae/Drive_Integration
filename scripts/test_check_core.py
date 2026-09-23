@@ -9,6 +9,14 @@ from check_core import ROOT, Step, child_environment, execute_step, git_metadata
 
 
 class CoreCheckTests(unittest.TestCase):
+    def test_generated_proto_check_uses_the_standalone_tools_directory(self):
+        steps = make_steps(None, Path("reports"), skip_build=True, skip_unreal=True)
+        proto = next(step for step in steps if step.name == "generated-proto")
+        self.assertEqual(proto.command,
+                         [sys.executable, str(ROOT / "scripts/check_generated_proto.py"), "-v"])
+        self.assertEqual(proto.cwd, ROOT)
+        self.assertNotIn("python.relay_server", " ".join(proto.command))
+
     def test_unreal_build_logs_stay_in_the_report_directory(self):
         output = Path('reports') / 'one-run'
         with patch('check_core.unreal_tools', return_value=(Path('dotnet'), Path('ubt'), Path('editor'))):

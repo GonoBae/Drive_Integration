@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "id": "steering_standard",
+  "name": "Reference sedan steering rack",
+  "kind": "steering",
+  "interface_id": "steering_sedan",
+  "mass": {
+    "mass_kg": 10.0,
+    "center_of_mass_m": [0.0, 0.0, 0.0],
+    "inertia_diagonal_kg_m2": [0.1, 0.1, 0.1]
+  },
+  "specification": {
+    "max_angle_rad": 0.61086524,
+    "rate_rad_s": 1.8,
+    "return_rate_rad_s": 1.2
+  }
+}

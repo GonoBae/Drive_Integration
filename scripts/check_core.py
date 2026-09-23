@@ -84,8 +84,8 @@ def make_steps(engine_root, output, skip_build=False, skip_unreal=False):
         Step("ctest", ["ctest", "--test-dir", str(host_root / "build"),
                        "-C", "Release", "--output-on-failure", "--no-tests=error",
                        "--output-junit", str(output / "ctest.xml")], ROOT, 600, "ctest"),
-        Step("generated-proto", [python, "-m", "unittest", "-v",
-                                 "python.relay_server.tests.test_generated_proto"], ROOT),
+        Step("generated-proto", [python, str(ROOT / "scripts/check_generated_proto.py"),
+                                 "-v"], ROOT),
         Step("python-tools", [python, "-m", "unittest", "discover", "-s", "scripts",
                               "-p", "test_*.py", "-v"], ROOT),
         Step("launcher", ["powershell.exe", "-NoProfile", "-NonInteractive",
@@ -234,8 +234,8 @@ def preflight(engine_root, skip_unreal, skip_build):
     for module in ("grpc_tools", "websockets", "google.protobuf"):
         if importlib.util.find_spec(module) is None:
             raise ValueError("Missing Python dependency: " + module)
-    for script in ("smoke_physics_replay.py", "smoke_signal_city.py", "test_server_launcher.ps1",
-                   "test_package_windows.ps1"):
+    for script in ("check_generated_proto.py", "smoke_physics_replay.py", "smoke_signal_city.py",
+                   "test_server_launcher.ps1", "test_package_windows.ps1"):
         if not (ROOT / "scripts" / script).is_file():
             raise ValueError("Required check missing: " + script)
     if skip_build and not (ROOT / "cpp/host/build/Release/simcore_publisher.exe").is_file():

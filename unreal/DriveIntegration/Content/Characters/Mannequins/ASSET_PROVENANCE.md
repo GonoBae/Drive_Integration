@@ -2,7 +2,9 @@
 
 Imported on 2026-09-03 from the user's installed Unreal Engine 5.6 template:
 
-`B:/Epic Games/UE_5.6/Templates/TemplateResources/High/Characters/Content/Mannequins`
+`<UE_5.6>/Templates/TemplateResources/High/Characters/Content/Mannequins`
+
+`<UE_5.6>` denotes the local Unreal Engine 5.6 installation directory.
 
 These are Epic's bundled Manny/Quinn mannequins, not original character art made
 for this project. The 25 `.uasset` files (about 80 MB) were copied unchanged at

@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "id": "fuel_tank_sedan_50l",
+  "name": "Sedan reference 50 litre gasoline tank",
+  "kind": "fuel_tank",
+  "interface_id": "fuel_tank_sedan",
+  "mass": {
+    "mass_kg": 7,
+    "center_of_mass_m": [
+      0,
+      0,
+      0
+    ],
+    "inertia_diagonal_kg_m2": [
+      0.3,
+      0.4,
+      0.5
+    ]
+  },
+  "specification": {
+    "capacity_l": 50,
+    "fuel_density_kg_l": 0.745,
+    "fuel_type": "gasoline"
+  }
+}

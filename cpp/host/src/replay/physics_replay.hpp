@@ -10,6 +10,8 @@
 
 namespace simcore_host {
 
+class RuntimeVehicleCatalog;
+
 // Deliberately an Ego-physics replay, not a second traffic AI authority. Each
 // tick stores the exact external collision inputs supplied by the live host.
 struct PhysicsReplayIdentity {
@@ -38,7 +40,8 @@ public:
                           std::uint64_t frame_limit,
                           std::uint64_t byte_limit = kMaximumFileBytes);
     void event(PhysicsReplayEvent event,
-               RuntimeVehicleClass vehicle_class = RuntimeVehicleClass::Unspecified);
+               RuntimeVehicleClass vehicle_class = RuntimeVehicleClass::Unspecified,
+               std::string_view loadout_id = {});
     void tick(const VehicleInput& input,
               const std::vector<KinematicCollisionProxy>& proxies,
               const VehicleState& state);
@@ -78,6 +81,7 @@ PhysicsReplayVerification verify_physics_replay(
     const PhysicsReplayIdentity& expected_identity,
     const VehicleParameters& parameters,
     std::shared_ptr<const GroundQuery> ground,
-    std::shared_ptr<const CollisionWorld> collision);
+    std::shared_ptr<const CollisionWorld> collision,
+    const RuntimeVehicleCatalog* vehicle_catalog = nullptr);
 
 } // namespace simcore_host

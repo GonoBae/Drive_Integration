@@ -197,7 +197,7 @@ void AExternalVehiclePawn::Tick(float DeltaSeconds)
 		UpdateOrbitCamera(DeltaSeconds);
 		return;
 	}
-	ConfigureVehicleClass(State.RuntimeVehicleClass);
+	ConfigureVehicleClass(State.RuntimeVehicleClass, State.VehicleLoadoutId);
 	if (IndicatorAutoCancel.Update(ManualIndicator, bHazardLights, State,
 		FMath::IsFinite(StateAgeSeconds) && StateAgeSeconds >= 0.0f && StateAgeSeconds <= StateStaleTimeoutSeconds))
 	{
@@ -223,7 +223,8 @@ void AExternalVehiclePawn::Tick(float DeltaSeconds)
 			StateStaleTimeoutSeconds,
 			VisualWheelStopSpeedMps,
 			VisualTireRadiusMeters,
-			VisualPositionOffsetCm);
+			VisualPositionOffsetCm,
+			&VisualWheelRadiiMeters);
 	SetActorLocationAndRotation(
 		Sample.ActorLocation,
 		Sample.ActorRotation,
@@ -314,10 +315,16 @@ void AExternalVehiclePawn::SetupPlayerInputComponent(UInputComponent* Input)
 		&AExternalVehiclePawn::SelectTruck);
 	Input->BindAction(TEXT("SelectMotorcycle"), IE_Pressed, this,
 		&AExternalVehiclePawn::SelectMotorcycle);
-	Input->BindAction(TEXT("DriveRecord"), IE_Pressed, DriveReplay.Get(),
-		&USimCoreDriveReplayComponent::ToggleRecording);
-	Input->BindAction(TEXT("DriveReplay"), IE_Pressed, DriveReplay.Get(),
-		&USimCoreDriveReplayComponent::ToggleReplay);
+	Input->BindAction(TEXT("DriveRecord"), IE_Pressed, this, &AExternalVehiclePawn::ToggleDriveRecording);
+	Input->BindAction(TEXT("DriveReplay"), IE_Pressed, this, &AExternalVehiclePawn::ToggleDriveReplay);
+	Input->BindAction(TEXT("Garage"), IE_Pressed, this, &AExternalVehiclePawn::ToggleGarage);
+	Input->BindAction(TEXT("GarageClose"), IE_Pressed, this, &AExternalVehiclePawn::CloseGarage);
+	Input->BindAction(TEXT("GaragePrevious"), IE_Pressed, this, &AExternalVehiclePawn::GaragePrevious);
+	Input->BindAction(TEXT("GarageNext"), IE_Pressed, this, &AExternalVehiclePawn::GarageNext);
+	Input->BindAction(TEXT("GarageApply"), IE_Pressed, this, &AExternalVehiclePawn::ApplyGarageSelection);
+	Input->BindAction(TEXT("GarageParts"), IE_Pressed, this, &AExternalVehiclePawn::ToggleGarageParts);
+	Input->BindAction(TEXT("GaragePartPrevious"), IE_Pressed, this, &AExternalVehiclePawn::GaragePartPrevious);
+	Input->BindAction(TEXT("GaragePartNext"), IE_Pressed, this, &AExternalVehiclePawn::GaragePartNext);
 	if (APlayerController* PlayerController = Cast<APlayerController>(GetController()))
 	{
 		PlayerController->bShowMouseCursor = false;
@@ -344,6 +351,7 @@ const TCHAR* PlayerVehicleClassName(
 void AExternalVehiclePawn::SelectPlayerVehicleClass(
 	const SimCoreProtocol::ERuntimeVehicleClass VehicleClass)
 {
+	if (bGarageOpen || (SimCoreClient && SimCoreClient->IsLoadoutPending())) return;
 	if (!SimCoreClient || !SimCoreClient->SelectVehicleClass(VehicleClass))
 	{
 		return;
@@ -396,7 +404,7 @@ int32 AExternalVehiclePawn::GetVisibleWheelCount() const
 }
 
 bool AExternalVehiclePawn::ConfigureVehicleClass(
-	SimCoreProtocol::ERuntimeVehicleClass VehicleClass)
+	SimCoreProtocol::ERuntimeVehicleClass VehicleClass, const FString& LoadoutId)
 {
 	const SimCoreVehicleVisualApplication::FBodySelection Selection =
 		SimCoreVehicleVisualApplication::SelectBody(VehicleClass,
@@ -407,29 +415,30 @@ bool AExternalVehiclePawn::ConfigureVehicleClass(
 	{
 		return false;
 	}
-	if (DisplayedVehicleClass == VehicleClass && VehicleMesh->GetStaticMesh() == BodyMesh)
+	if (DisplayedVehicleClass == VehicleClass && DisplayedLoadoutId == LoadoutId && VehicleMesh->GetStaticMesh() == BodyMesh)
 	{
 		return true;
 	}
 
 	SimCoreVehicleVisualProfile::FProfile Profile;
-	if (!SimCoreVehicleVisualProfile::Resolve(VehicleClass, Profile)) return false;
+	if (!SimCoreVehicleVisualProfile::Resolve(VehicleClass, LoadoutId, Profile)) return false;
 
 	DeformableBody->ResetDeformation();
 	SimCoreVehicleVisualApplication::ReplaceBodyMesh(*VehicleMesh, *BodyMesh);
+	const double MeshRadiusMeters = SharedWheelMesh->GetBoundingBox().GetExtent().Z * 0.01;
 	for (int32 Index = 0; Index < 4; ++Index)
 	{
 		WheelPivots[Index]->SetRelativeLocation(Profile.WheelOriginsCm[Index]);
 		WheelPivots[Index]->SetRelativeRotation(FRotator::ZeroRotator);
 		WheelMeshes[Index]->SetStaticMesh(SharedWheelMesh);
-		WheelMeshes[Index]->SetRelativeScale3D(Profile.WheelScales[Index]);
+		WheelMeshes[Index]->SetRelativeScale3D(Profile.PlayerWheelScale(Index, MeshRadiusMeters));
+		VisualWheelRadiiMeters[Index] = Profile.PlayerWheelRadiusMeters(Index, MeshRadiusMeters);
 		WheelMeshes[Index]->SetRelativeRotation(FRotator::ZeroRotator);
 		WheelMeshes[Index]->SetVisibility(Profile.IsWheelVisible(Index));
 		SuspensionMountLocationsCm[Index] = FVector(
 			Profile.WheelOriginsCm[Index].X, Profile.WheelOriginsCm[Index].Y, 0.0);
 	}
-	VisualTireRadiusMeters = static_cast<float>(
-		SharedWheelMesh->GetBoundingBox().GetExtent().Z * Profile.WheelScales[0].Z * 0.01);
+	VisualTireRadiusMeters = VisualWheelRadiiMeters[0];
 	SimCoreVehicleVisualApplication::ConfigureAttachments(
 		Profile, *TurnSignals, *DriverPresentation, *SuspensionPresentation);
 	VehicleHorn->SetRelativeLocation(FVector(
@@ -440,7 +449,206 @@ bool AExternalVehiclePawn::ConfigureVehicleClass(
 	LastPresentedCollisionEventSequence = 0;
 	InitializeDamagePresentation();
 	DisplayedVehicleClass = VehicleClass;
+	DisplayedLoadoutId = LoadoutId;
 	return true;
+}
+
+void AExternalVehiclePawn::ToggleGarage()
+{
+	if (bGarageOpen) { CloseGarage(); return; }
+	if (!SimCoreClient) return;
+	GarageChoices = SimCoreVehicleVisualProfile::LoadoutChoices(SimCoreClient->GetSelectedVehicleClass());
+	GarageSelection = 0;
+	bGaragePartsMode = false;
+	GaragePartsDraft = {};
+	GaragePartsLoadoutId.Reset();
+	GaragePartsError.Reset();
+	GaragePartSlot = 0;
+	for (int32 Index = 0; Index < GarageChoices.Num(); ++Index)
+		if (GarageChoices[Index].Id == SimCoreClient->GetSelectedLoadoutId()) GarageSelection = Index;
+	// Custom selections are not named preset rows. Reconstruct the committed
+	// selection locally instead of silently reopening the default row.
+	if (SimCoreClient->GetSelectedLoadoutId().StartsWith(TEXT("parts_v1_"), ESearchCase::CaseSensitive)
+		&& SimCoreVehicleVisualProfile::MakePartsDraft(SimCoreClient->GetSelectedVehicleClass(),
+			SimCoreClient->GetSelectedLoadoutId(), GaragePartsDraft, GaragePartsError))
+	{
+		for (int32 Index = 0; Index < GarageChoices.Num(); ++Index)
+			if (GarageChoices[Index].Id == GaragePartsDraft.BaseLoadoutId) GarageSelection = Index;
+		bGaragePartsMode = true;
+		RefreshGarageParts();
+	}
+	bGarageOpen = true;
+	GarageMessage.Reset();
+	ForwardPedalInput = ReversePedalInput = AnalogSteeringInput = KeyboardSteeringInput = SteeringInput = 0;
+	VehicleHorn->ResetHornState();
+	PushControl();
+}
+
+void AExternalVehiclePawn::ToggleDriveRecording()
+{
+	if (!bGarageOpen && SimCoreClient && !SimCoreClient->IsLoadoutPending()) DriveReplay->ToggleRecording();
+}
+
+void AExternalVehiclePawn::ToggleDriveReplay()
+{
+	if (!bGarageOpen && SimCoreClient && !SimCoreClient->IsLoadoutPending()) DriveReplay->ToggleReplay();
+}
+
+void AExternalVehiclePawn::CloseGarage()
+{
+	if (!bGarageOpen) return;
+	bGarageOpen = false;
+	bGaragePartsMode = false;
+	GaragePartsDraft = {};
+	GaragePartsLoadoutId.Reset();
+	GaragePartsError.Reset();
+	GaragePartNames.Reset();
+	GaragePartChoices.Reset();
+	GarageMessage.Reset();
+	ForwardPedalInput = ReversePedalInput = AnalogSteeringInput = KeyboardSteeringInput = SteeringInput = 0;
+	PushControl();
+}
+
+void AExternalVehiclePawn::GaragePrevious()
+{
+	if (bGarageOpen && bGaragePartsMode)
+	{
+		if (SimCoreClient && !SimCoreClient->IsLoadoutPending())
+		{
+			GaragePartSlot = (GaragePartSlot + 7) % 8;
+			GarageMessage.Reset();
+			RefreshGarageParts();
+		}
+		return;
+	}
+	if (bGarageOpen && GarageChoices.Num() > 0)
+	{
+		GarageSelection = (GarageSelection + GarageChoices.Num() - 1) % GarageChoices.Num();
+		GarageMessage.Reset();
+	}
+}
+
+void AExternalVehiclePawn::GarageNext()
+{
+	if (bGarageOpen && bGaragePartsMode)
+	{
+		if (SimCoreClient && !SimCoreClient->IsLoadoutPending())
+		{
+			GaragePartSlot = (GaragePartSlot + 1) % 8;
+			GarageMessage.Reset();
+			RefreshGarageParts();
+		}
+		return;
+	}
+	if (bGarageOpen && GarageChoices.Num() > 0)
+	{
+		GarageSelection = (GarageSelection + 1) % GarageChoices.Num();
+		GarageMessage.Reset();
+	}
+}
+
+void AExternalVehiclePawn::ApplyGarageSelection()
+{
+	if (!bGarageOpen || !SimCoreClient || !GarageChoices.IsValidIndex(GarageSelection)) return;
+	FString RequestedId = GarageChoices[GarageSelection].Id;
+	if (bGaragePartsMode)
+	{
+		if (!SimCoreClient->CanEditParts(GarageMessage)) return;
+		RefreshGarageParts();
+		if (!GaragePartsError.IsEmpty()) { GarageMessage = GaragePartsError; return; }
+		RequestedId = GaragePartsLoadoutId;
+	}
+	if (SimCoreClient->SelectLoadout(RequestedId, GarageMessage))
+	{
+		GarageMessage.Reset();
+		PushControl();
+	}
+}
+
+void AExternalVehiclePawn::ToggleGarageParts()
+{
+	if (!bGarageOpen || !SimCoreClient || SimCoreClient->IsLoadoutPending()) return;
+	GarageMessage.Reset();
+	if (bGaragePartsMode)
+	{
+		// Leaving this mode abandons uncommitted changes; Enter in the preset
+		// list always applies the named preset, never a hidden parts draft.
+		bGaragePartsMode = false;
+		GaragePartsDraft = {};
+		GaragePartsLoadoutId.Reset();
+		GaragePartsError.Reset();
+		GaragePartNames.Reset();
+		GaragePartChoices.Reset();
+		return;
+	}
+	if (!SimCoreClient->CanEditParts(GarageMessage) || !GarageChoices.IsValidIndex(GarageSelection)) return;
+	if (!SimCoreVehicleVisualProfile::MakePartsDraft(SimCoreClient->GetSelectedVehicleClass(),
+		GarageChoices[GarageSelection].Id, GaragePartsDraft, GarageMessage)) return;
+	bGaragePartsMode = true;
+	GaragePartSlot = 0;
+	RefreshGarageParts();
+}
+
+void AExternalVehiclePawn::RefreshGarageParts()
+{
+	GaragePartsLoadoutId.Reset();
+	GaragePartsError.Reset();
+	GaragePartNames.Reset();
+	GaragePartChoices.Reset();
+	GaragePartChoice = INDEX_NONE;
+	if (!SimCoreClient || GaragePartsDraft.PartIds.Num() != 8)
+	{
+		GaragePartsError = TEXT("Choose a modular preset before editing individual parts.");
+		return;
+	}
+	SimCoreVehicleVisualProfile::FProfile Preview;
+	SimCoreVehicleVisualProfile::ResolvePartsDraft(SimCoreClient->GetSelectedVehicleClass(),
+		GaragePartsDraft, GaragePartsLoadoutId, Preview, GaragePartsError);
+	for (int32 Slot = 0; Slot < 8; ++Slot)
+	{
+		const auto Choices = SimCoreVehicleVisualProfile::PartChoices(GaragePartsDraft, Slot);
+		FString Name = TEXT("Unavailable part");
+		for (const auto& Choice : Choices)
+			if (Choice.Id == GaragePartsDraft.PartIds[Slot]) { Name = Choice.Name; break; }
+		GaragePartNames.Add(Name);
+	}
+	GaragePartChoices = SimCoreVehicleVisualProfile::PartChoices(GaragePartsDraft, GaragePartSlot);
+	for (int32 Index = 0; Index < GaragePartChoices.Num(); ++Index)
+		if (GaragePartChoices[Index].Id == GaragePartsDraft.PartIds[GaragePartSlot]) GaragePartChoice = Index;
+}
+
+void AExternalVehiclePawn::CycleGaragePart(int32 Direction)
+{
+	if (!bGarageOpen || !bGaragePartsMode || !SimCoreClient || SimCoreClient->IsLoadoutPending()) return;
+	if (!SimCoreClient->CanEditParts(GarageMessage)) return;
+	if (GaragePartChoices.Num() < 2)
+	{
+		GarageMessage = TEXT("Only one catalog option is available for this slot.");
+		return;
+	}
+	GaragePartChoice = (FMath::Max(0, GaragePartChoice) + Direction + GaragePartChoices.Num()) % GaragePartChoices.Num();
+	GaragePartsDraft.PartIds[GaragePartSlot] = GaragePartChoices[GaragePartChoice].Id;
+	GarageMessage.Reset();
+	RefreshGarageParts();
+}
+
+void AExternalVehiclePawn::GaragePartPrevious() { CycleGaragePart(-1); }
+void AExternalVehiclePawn::GaragePartNext() { CycleGaragePart(1); }
+
+FString AExternalVehiclePawn::GetGarageStatusText() const
+{
+	if (!SimCoreClient) return TEXT("No simulation client available.");
+	if (SimCoreClient->IsLoadoutPending()) return SimCoreClient->GetLoadoutStatusText();
+	if (bGaragePartsMode)
+	{
+		FString Reason;
+		if (!SimCoreClient->CanEditParts(Reason)) return Reason;
+		if (!GaragePartsError.IsEmpty()) return TEXT("Cannot apply: ") + GaragePartsError;
+		if (!GarageMessage.IsEmpty()) return GarageMessage;
+		if (!SimCoreClient->CanSelectLoadout(Reason)) return Reason;
+		return TEXT("Ready. Enter applies these parts at spawn. Tab discards this preview.");
+	}
+	return GarageMessage.IsEmpty() ? SimCoreClient->GetLoadoutStatusText() : GarageMessage;
 }
 
 void AExternalVehiclePawn::OrbitCameraYaw(float Value)
@@ -842,6 +1050,11 @@ void AExternalVehiclePawn::SetSideBrakeReleased()
 
 void AExternalVehiclePawn::PushControl()
 {
+	if (bGarageOpen || SimCoreClient->IsLoadoutPending())
+	{
+		SimCoreClient->SetControl(0, 1, 0, false, SelectedGear);
+		return;
+	}
 	float AuthoritativeSpeedMps = 0.0f;
 	float StateAgeSeconds = 0.0f;
 	SimCoreProtocol::FVehicleState State;

@@ -71,7 +71,8 @@ private:
 	UPROPERTY(VisibleAnywhere, Category="SimCore|NPC Presentation")
 	TObjectPtr<USimCoreDriverPresentation> DriverPresentation;
 	void UpdateDamage(const SimCoreProtocol::FVehicleState& State);
-	bool ConfigureVehicleClass(SimCoreProtocol::ERuntimeVehicleClass VehicleClass);
+	bool ConfigureVehicleClass(SimCoreProtocol::ERuntimeVehicleClass VehicleClass,
+		const FString& LoadoutId = FString());
 	SimCoreDamagePresentation::FAccumulator DamageAccumulator;
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UMaterialInstanceDynamic>> DamageMaterials;
@@ -100,9 +101,12 @@ private:
 	bool bHasAuthoredFleet = false;
 	SimCoreProtocol::ERuntimeVehicleClass RuntimeVehicleClass =
 		SimCoreProtocol::ERuntimeVehicleClass::Unspecified;
+	FString RuntimeLoadoutId;
 	uint32 EntityId = 0;
 	float WheelSpinDegrees = 0.0f;
+	float RearWheelSpinDegrees = 0.0f;
 	float TireRadiusMeters = 0.32f;
+	float RearTireRadiusMeters = 0.0f; // Resolved with the front axle before presentation.
 	// Stable authored ride height for the selected model. The server collision
 	// envelope can change its projected half-height while a vehicle tumbles; that
 	// must not translate or stretch the visual model between snapshots.

@@ -149,6 +149,10 @@ message EntityState {
     RuntimeVehicleClass runtime_vehicle_class = 39;
     // NPC-only temporary measured-road detour; false retains authored-lane motion.
     bool npc_local_bypass_active = 40;
+    // Empty selects the class profile; otherwise a validated catalog loadout.
+    // vehicle-parts.v1 also permits versioned parts_v1_ selections bound to the
+    // negotiated catalog checksum (see architecture.md, individual part editing).
+    string vehicle_loadout_id = 41;
 }
 
 // 여러 엔티티를 한 패킷에 담을 때 사용
@@ -270,6 +274,8 @@ message SimulationReset {
     // Additive authoritative Ego selection. UNSPECIFIED preserves legacy
     // clients and resolves to the configured sedan profile.
     RuntimeVehicleClass requested_vehicle_class = 3;
+    // Bound to this Play identity; changing parts requires a new reset lifecycle.
+    string requested_loadout_id = 4;
 }
 
 message Envelope {

@@ -6,6 +6,7 @@
 #include "SimCoreOrbitCamera.h"
 #include "SimCoreProtocol.h"
 #include "SimCoreTurnSignals.h"
+#include "SimCoreVehicleVisualProfile.h"
 #include "ExternalVehiclePawn.generated.h"
 
 class UCameraComponent;
@@ -42,6 +43,15 @@ public:
 	int32 GetVisibleWheelCount() const;
 	SimCoreOrbitCamera::EMode GetCameraMode() const { return CameraMode; }
 	void SelectPlayerVehicleClass(SimCoreProtocol::ERuntimeVehicleClass VehicleClass);
+	bool IsGarageOpen() const { return bGarageOpen; }
+	const TArray<SimCoreVehicleVisualProfile::FLoadout>& GetGarageChoices() const { return GarageChoices; }
+	int32 GetGarageSelection() const { return GarageSelection; }
+	FString GetGarageStatusText() const;
+	bool IsGaragePartsMode() const { return bGaragePartsMode; }
+	int32 GetGaragePartSlot() const { return GaragePartSlot; }
+	int32 GetGaragePartChoice() const { return GaragePartChoice; }
+	const TArray<SimCoreVehicleVisualProfile::FPartChoice>& GetGaragePartChoices() const { return GaragePartChoices; }
+	const TArray<FString>& GetGaragePartNames() const { return GaragePartNames; }
 
 protected:
 	// Unit-scale actor root. Body-only visual scaling must never propagate into
@@ -122,6 +132,7 @@ protected:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="SimCore|Presentation", meta=(ClampMin="0.1", ClampMax="1.0"))
 	float VisualTireRadiusMeters = 0.32f;
+	TStaticArray<float, 4> VisualWheelRadiiMeters = {};
 
 	// F3 toggles a presentation-only physics overlay. It never participates in
 	// collision or sends values back to the authoritative server.
@@ -157,6 +168,7 @@ private:
 	friend class FSimCorePlayerVehiclePresentationTest;
 	friend class FSimCoreCameraModesPawnTest;
 	friend class FSimCoreFleetCabinTest;
+	friend class FSimCoreGaragePartsDraftTest;
 	UPROPERTY(VisibleAnywhere)
 	TObjectPtr<class USimCoreDeformableBody> DeformableBody;
 	UPROPERTY(VisibleAnywhere)
@@ -171,7 +183,19 @@ private:
 	void SelectCompact();
 	void SelectTruck();
 	void SelectMotorcycle();
-	bool ConfigureVehicleClass(SimCoreProtocol::ERuntimeVehicleClass VehicleClass);
+	bool ConfigureVehicleClass(SimCoreProtocol::ERuntimeVehicleClass VehicleClass, const FString& LoadoutId = FString());
+	void ToggleGarage();
+	void CloseGarage();
+	void GaragePrevious();
+	void GarageNext();
+	void ApplyGarageSelection();
+	void ToggleGarageParts();
+	void GaragePartPrevious();
+	void GaragePartNext();
+	void CycleGaragePart(int32 Direction);
+	void RefreshGarageParts();
+	void ToggleDriveRecording();
+	void ToggleDriveReplay();
 	void OrbitCameraYaw(float Value);
 	void OrbitCameraPitch(float Value);
 	void SetCameraGamepadYaw(float Value);
@@ -234,4 +258,17 @@ private:
 	TObjectPtr<UStaticMesh> SharedWheelMesh;
 	SimCoreProtocol::ERuntimeVehicleClass DisplayedVehicleClass =
 		SimCoreProtocol::ERuntimeVehicleClass::Unspecified;
+	FString DisplayedLoadoutId;
+	bool bGarageOpen = false;
+	int32 GarageSelection = 0;
+	TArray<SimCoreVehicleVisualProfile::FLoadout> GarageChoices;
+	FString GarageMessage;
+	bool bGaragePartsMode = false;
+	int32 GaragePartSlot = 0;
+	int32 GaragePartChoice = INDEX_NONE;
+	SimCoreVehicleVisualProfile::FPartsDraft GaragePartsDraft;
+	TArray<SimCoreVehicleVisualProfile::FPartChoice> GaragePartChoices;
+	TArray<FString> GaragePartNames;
+	FString GaragePartsLoadoutId;
+	FString GaragePartsError;
 };

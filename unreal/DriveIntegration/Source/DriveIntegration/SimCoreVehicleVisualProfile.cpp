@@ -1,6 +1,30 @@
 #include "SimCoreVehicleVisualProfile.h"
 
-#include "SimCoreSedanVisualContract.h"
+#include "Misc/Paths.h"
+
+DEFINE_LOG_CATEGORY_STATIC(LogSimCoreVehicleCatalog, Log, All);
+
+namespace
+{
+struct FLiveCatalog
+{
+	SimCoreVehicleVisualProfile::FCatalog Catalog;
+	FString Error;
+	bool bValid = false;
+	FLiveCatalog()
+	{
+		bValid = SimCoreVehicleVisualProfile::LoadCatalog(
+			FPaths::Combine(FPaths::ProjectConfigDir(), TEXT("VehicleCatalog/catalog.json")), Catalog, Error);
+		if (!bValid) UE_LOG(LogSimCoreVehicleCatalog, Error, TEXT("Vehicle catalog rejected: %s"), *Error);
+	}
+};
+
+const FLiveCatalog& LiveCatalog()
+{
+	static const FLiveCatalog Snapshot;
+	return Snapshot;
+}
+}
 
 namespace SimCoreVehicleVisualProfile
 {
@@ -10,78 +34,149 @@ bool FProfile::IsWheelVisible(const int32 Index) const
 		&& (VehicleClass != SimCoreProtocol::ERuntimeVehicleClass::Motorcycle || Index == 0 || Index == 2);
 }
 
-bool Resolve(SimCoreProtocol::ERuntimeVehicleClass VehicleClass, FProfile& OutProfile)
+float FProfile::PlayerWheelRadiusMeters(const int32 Index, const double MeshRadiusMeters) const
 {
-	using SimCoreProtocol::ERuntimeVehicleClass;
-	if (VehicleClass == ERuntimeVehicleClass::Unspecified) VehicleClass = ERuntimeVehicleClass::Sedan;
+	if (Index < 0 || Index >= 4 || !FMath::IsFinite(MeshRadiusMeters) || MeshRadiusMeters <= 0) return 0.0f;
+	const TOptional<float>& Selected = PlayerAxleTireRadiusMeters[Index / 2];
+	return Selected.IsSet() ? Selected.GetValue() : static_cast<float>(MeshRadiusMeters * WheelScales[Index].Z);
+}
+
+FVector FProfile::PlayerWheelScale(const int32 Index, const double MeshRadiusMeters) const
+{
+	if (Index < 0 || Index >= 4) return FVector::OneVector;
+	FVector Result = WheelScales[Index];
+	if (PlayerAxleTireRadiusMeters[Index / 2].IsSet() && FMath::IsFinite(MeshRadiusMeters)
+		&& MeshRadiusMeters > 0 && Result.Z > 0)
+	{
+		const double RadiusRatio = PlayerAxleTireRadiusMeters[Index / 2].GetValue() / (MeshRadiusMeters * Result.Z);
+		Result.X *= RadiusRatio;
+		Result.Z *= RadiusRatio;
+	}
+	return Result;
+}
+
+bool ResolveFromCatalog(const FCatalog& Catalog,
+	SimCoreProtocol::ERuntimeVehicleClass VehicleClass, FProfile& OutProfile)
+{
 	OutProfile = {};
-	OutProfile.VehicleClass = VehicleClass;
-	const TConstArrayView<FVector> SedanWheels = SimCoreSedanVisualContract::WheelOriginsCm();
-	switch (VehicleClass)
+	if (VehicleClass == SimCoreProtocol::ERuntimeVehicleClass::Unspecified)
+		VehicleClass = SimCoreProtocol::ERuntimeVehicleClass::Sedan;
+	const int32 Index = static_cast<int32>(VehicleClass) - 1;
+	if (Index < 0 || Index >= 4 || Catalog.Checksum.IsEmpty()) return false;
+	OutProfile = Catalog.Profiles[Index];
+	return true;
+}
+
+bool Resolve(const SimCoreProtocol::ERuntimeVehicleClass VehicleClass, FProfile& OutProfile)
+{
+	const auto& Snapshot = LiveCatalog();
+	OutProfile = {};
+	return Snapshot.bValid && ResolveFromCatalog(Snapshot.Catalog, VehicleClass, OutProfile);
+}
+
+bool ResolveFromCatalog(const FCatalog& Catalog, const SimCoreProtocol::ERuntimeVehicleClass VehicleClass,
+	const FString& LoadoutId, FProfile& OutProfile)
+{
+	if (LoadoutId.IsEmpty()) return ResolveFromCatalog(Catalog, VehicleClass, OutProfile);
+	OutProfile = {};
+	if (Catalog.Checksum.IsEmpty()) return false;
+	if (LoadoutId.StartsWith(TEXT("parts_v1_"), ESearchCase::CaseSensitive))
 	{
-	case ERuntimeVehicleClass::Sedan:
-	case ERuntimeVehicleClass::Compact:
+		FPartsDraft Draft;
+		FString CanonicalId, Error;
+		return MakePartsDraftFromCatalog(Catalog, VehicleClass, LoadoutId, Draft, Error)
+			&& ResolvePartsDraftFromCatalog(Catalog, VehicleClass, Draft, CanonicalId, OutProfile, Error)
+			&& CanonicalId == LoadoutId;
+	}
+	for (const FLoadout& Loadout : Catalog.Loadouts)
+		if (Loadout.Id == LoadoutId && Loadout.Profile.VehicleClass == VehicleClass)
+		{
+			OutProfile = Loadout.Profile;
+			return true;
+		}
+	return false;
+}
+
+bool Resolve(const SimCoreProtocol::ERuntimeVehicleClass VehicleClass, const FString& LoadoutId, FProfile& OutProfile)
+{
+	const auto& Snapshot = LiveCatalog();
+	OutProfile = {};
+	return Snapshot.bValid && ResolveFromCatalog(Snapshot.Catalog, VehicleClass, LoadoutId, OutProfile);
+}
+
+TArray<FLoadout> LoadoutChoices(const SimCoreProtocol::ERuntimeVehicleClass VehicleClass)
+{
+	TArray<FLoadout> Result;
+	const auto& Snapshot = LiveCatalog();
+	FProfile Profile;
+	if (!Snapshot.bValid || !ResolveFromCatalog(Snapshot.Catalog, VehicleClass, Profile)) return Result;
+	Result.Add({FString(), TEXT("Vehicle default"), Profile});
+	for (const FLoadout& Loadout : Snapshot.Catalog.Loadouts)
+		if (Loadout.Profile.VehicleClass == Profile.VehicleClass) Result.Add(Loadout);
+	return Result;
+}
+
+bool MakePartsDraft(const SimCoreProtocol::ERuntimeVehicleClass VehicleClass,
+	const FString& LoadoutId, FPartsDraft& OutDraft, FString& OutError)
+{
+	const auto& Snapshot = LiveCatalog();
+	OutDraft = {};
+	OutError = Snapshot.Error;
+	return Snapshot.bValid && MakePartsDraftFromCatalog(Snapshot.Catalog, VehicleClass, LoadoutId, OutDraft, OutError);
+}
+
+TArray<FPartChoice> PartChoices(const FPartsDraft& Draft, const int32 Slot)
+{
+	const auto& Snapshot = LiveCatalog();
+	return Snapshot.bValid ? PartChoicesFromCatalog(Snapshot.Catalog, Draft, Slot) : TArray<FPartChoice>();
+}
+
+bool ResolvePartsDraft(const SimCoreProtocol::ERuntimeVehicleClass VehicleClass,
+	const FPartsDraft& Draft, FString& OutId, FProfile& OutProfile, FString& OutError)
+{
+	const auto& Snapshot = LiveCatalog();
+	OutId.Reset();
+	OutProfile = {};
+	OutError = Snapshot.Error;
+	return Snapshot.bValid
+		&& ResolvePartsDraftFromCatalog(Snapshot.Catalog, VehicleClass, Draft, OutId, OutProfile, OutError);
+}
+
+bool CatalogChecksum(FString& OutChecksum, FString& OutError)
+{
+	const auto& Snapshot = LiveCatalog();
+	OutChecksum = Snapshot.bValid ? Snapshot.Catalog.Checksum : FString();
+	OutError = Snapshot.Error;
+	return Snapshot.bValid;
+}
+
+bool CatalogCapability(FString& OutCapability, FString& OutError)
+{
+	FString Checksum;
+	OutCapability.Reset();
+	if (!CatalogChecksum(Checksum, OutError)) return false;
+	OutCapability = TEXT("vehicle-catalog-") + Checksum.Replace(TEXT(":"), TEXT("-"));
+	return true;
+}
+
+bool ValidateServerCatalog(const TArray<FString>& Capabilities, FString& OutError)
+{
+	FString Expected;
+	if (!CatalogCapability(Expected, OutError)) return false;
+	int32 CatalogCount = 0;
+	for (const FString& Capability : Capabilities)
 	{
-		const bool bCompact = VehicleClass == ERuntimeVehicleClass::Compact;
-		for (int32 Index = 0; Index < 4; ++Index)
+		if (!Capability.StartsWith(TEXT("vehicle-catalog-"))) continue;
+		if (++CatalogCount > 1 || Capability != Expected)
 		{
-			const FVector& Origin = SedanWheels[Index];
-			const FVector Lamp = SimCoreSedanVisualContract::TurnSignalLensPointCm(
-				Index < 2, Index % 2 == 0, 0.5, 0.5);
-			OutProfile.WheelOriginsCm[Index] = bCompact
-				? FVector(Origin.X * 0.79, Origin.Y * 0.90, Origin.Z * 0.92 - 1.5) : Origin;
-			OutProfile.LampLocationsCm[Index] = bCompact
-				? FVector(Lamp.X * 0.79 - 4.0, Lamp.Y * 0.90, Lamp.Z * 0.92 - 1.5) : Lamp;
-			OutProfile.WheelScales[Index] = bCompact ? FVector(0.86, 0.82, 0.86) : FVector::OneVector;
+			OutError = TEXT("server vehicle catalog differs from this client; synchronize Config/VehicleCatalog and restart both programs");
+			return false;
 		}
-		if (bCompact)
-		{
-			OutProfile.HalfHeightMeters = 0.70f;
-			OutProfile.CgHeightMeters = 0.48f;
-			OutProfile.ExhaustLocationCm = FVector(-170.0, 48.0, -22.0);
-			OutProfile.DriverTransform = FTransform(FQuat::Identity,
-				FVector(-4.0, 0.0, -1.5), FVector(0.79, 0.90, 0.92));
-		}
-		return true;
 	}
-	case ERuntimeVehicleClass::Truck:
-		OutProfile.HalfHeightMeters = 0.965f;
-		OutProfile.CgHeightMeters = 0.75f;
-		// SM_TruckBody bounds: (-325,-105,-26) .. (295,105,167) cm.
-		OutProfile.CollisionBodyForwardOffsetMeters = -0.15f;
-		OutProfile.CollisionGroundClearanceMeters = 0.49f;
-		// Include the 32.055cm tread radius: -26 - (-28 - 32.055 * 1.22).
-		OutProfile.NpcCollisionGroundClearanceMeters = 0.411071f;
-		OutProfile.ExhaustLocationCm = FVector(-290.0, 86.0, -15.0);
-		OutProfile.DriverTransform = FTransform(FQuat::Identity,
-			FVector(110.0, 0.0, 62.0), FVector(0.8, 1.0, 1.0));
-		for (int32 Index = 0; Index < 4; ++Index)
-		{
-			const bool bFront = Index < 2;
-			const double Side = Index % 2 == 0 ? -1.0 : 1.0;
-			OutProfile.WheelOriginsCm[Index] = FVector(bFront ? 190.0 : -195.0, Side * 102.0, -28.0);
-			OutProfile.WheelScales[Index] = FVector(1.22, 1.08, 1.22);
-			OutProfile.LampLocationsCm[Index] = FVector(bFront ? 240.0 : -294.0, Side * 96.0, bFront ? 58.0 : 64.0);
-		}
-		return true;
-	case ERuntimeVehicleClass::Motorcycle:
-		OutProfile.HalfHeightMeters = 0.68f;
-		OutProfile.CgHeightMeters = 0.42f;
-		OutProfile.ExhaustLocationCm = FVector(-102.0, 18.0, 18.0);
-		OutProfile.WheelOriginsCm[0] = FVector(99.0, 0.0, -8.0);
-		OutProfile.WheelOriginsCm[2] = FVector(-82.0, 0.0, -8.0);
-		OutProfile.WheelScales[0] = OutProfile.WheelScales[2] = FVector(1.05, 0.42, 1.05);
-		for (int32 Index = 0; Index < 4; ++Index)
-		{
-			const bool bFront = Index < 2;
-			const double Side = Index % 2 == 0 ? -1.0 : 1.0;
-			OutProfile.LampLocationsCm[Index] = FVector(bFront ? 93.0 : -94.0,
-				Side * (bFront ? 29.0 : 27.0), bFront ? 61.0 : 47.0);
-		}
-		return true;
-	default:
-		return false;
-	}
+	// Old servers do not advertise a catalog. Updated servers require the matching
+	// capability from this client before accepting a reset or controls.
+	OutError.Reset();
+	return true;
 }
 
 FVector CollisionCenterOffsetCm(const FProfile& Profile, const float CollisionHalfHeightMeters)

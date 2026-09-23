@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "id": "transmission_automatic_6speed",
+  "name": "Reference six speed automatic transmission",
+  "kind": "transmission",
+  "interface_id": "transmission_sedan",
+  "mass": {
+    "mass_kg": 55.0,
+    "center_of_mass_m": [0.0, 0.0, 0.0],
+    "inertia_diagonal_kg_m2": [3.0, 4.0, 4.0]
+  },
+  "specification": {
+    "forward_ratios": [3.63, 2.09, 1.35, 1.0, 0.82, 0.69],
+    "reverse_ratio": 3.27,
+    "max_input_torque_nm": 300.0,
+    "efficiency": 0.94
+  }
+}

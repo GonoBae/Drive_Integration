@@ -1,0 +1,150 @@
+{
+  "schema_version": 1,
+  "id": "compact_standard",
+  "vehicle_class": 2,
+  "player_overrides": {
+    "mass_kg": 1050,
+    "wheelbase_m": 2.133,
+    "max_steering_angle_rad": 0.6632251,
+    "max_drive_force_n": 5200,
+    "max_reverse_force_n": 3100,
+    "max_drive_power_w": 80000,
+    "max_service_brake_n": 14500,
+    "max_handbrake_force_n": 16500,
+    "drag_coefficient": 0.31,
+    "frontal_area_m2": 1.9,
+    "tire_radius_m": 0.275,
+    "max_forward_speed_mps": 45,
+    "front_track_m": 1.422,
+    "rear_track_m": 1.422,
+    "cg_height_m": 0.48,
+    "yaw_inertia_kg_m2": 1450,
+    "pitch_inertia_kg_m2": 1250,
+    "roll_inertia_kg_m2": 450,
+    "front_tire_corner_stiffness_n_rad": 45000,
+    "rear_tire_corner_stiffness_n_rad": 39000,
+    "tire_longitudinal_stiffness_n": 68000,
+    "wheel_inertia_kg_m2": 1.2,
+    "collision_body_overhang_m": 0.6835,
+    "collision_body_side_padding_m": 0.149,
+    "collision_body_half_height_m": 0.7,
+    "chassis_shell_center_up_offset_m": 0.3,
+    "chassis_shell_half_height_m": 0.56
+  },
+  "scale_suspension_by_mass": true,
+  "rest_length_cg_tire_offset_m": null,
+  "npc": {
+    "name": "compact",
+    "half_length_m": 1.75,
+    "half_width_m": 0.86,
+    "half_height_m": 0.7,
+    "mass_kg": 1050,
+    "yaw_inertia_kg_m2": 1450,
+    "maximum_reaction_speed_mps": 32,
+    "speed_scale": 1.08,
+    "acceleration_mps2": 1.9,
+    "braking_mps2": 3.4,
+    "tumble_contact_below_cg_m": 0.32,
+    "ground_clearance_m": 0.1,
+    "minimum_turn_radius_m": 4
+  },
+  "visual": {
+    "wheel_origins_cm": [
+      [
+        95.985,
+        -71.10000000000001,
+        -22.66
+      ],
+      [
+        95.985,
+        71.10000000000001,
+        -22.66
+      ],
+      [
+        -117.31500000000001,
+        -71.10000000000001,
+        -22.66
+      ],
+      [
+        -117.31500000000001,
+        71.10000000000001,
+        -22.66
+      ]
+    ],
+    "wheel_scales": [
+      [
+        0.86,
+        0.82,
+        0.86
+      ],
+      [
+        0.86,
+        0.82,
+        0.86
+      ],
+      [
+        0.86,
+        0.82,
+        0.86
+      ],
+      [
+        0.86,
+        0.82,
+        0.86
+      ]
+    ],
+    "lamp_locations_cm": [
+      [
+        146.6056,
+        -41.598875631104,
+        18.946978984201486
+      ],
+      [
+        146.6056,
+        41.598875631104,
+        18.946978984201486
+      ],
+      [
+        -178.1318,
+        -40.681005954158614,
+        19.230396549406745
+      ],
+      [
+        -178.1318,
+        40.681005954158614,
+        19.230396549406745
+      ]
+    ],
+    "exhaust_location_cm": [
+      -170,
+      48,
+      -22
+    ],
+    "driver_translation_cm": [
+      -4,
+      0,
+      -1.5
+    ],
+    "driver_scale": [
+      0.79,
+      0.9,
+      0.92
+    ],
+    "half_height_m": 0.7,
+    "cg_height_m": 0.48,
+    "collision_body_forward_offset_m": 0,
+    "collision_ground_clearance_m": 0.1,
+    "npc_collision_ground_clearance_m": 0.1
+  },
+  "axle_modules": {
+    "front": {
+      "tire": null,
+      "suspension": null
+    },
+    "rear": {
+      "tire": null,
+      "suspension": null
+    }
+  },
+  "powertrain_modules": null
+}

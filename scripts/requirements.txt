@@ -1,0 +1,4 @@
+# Development checks and Python protobuf generation; not runtime server dependencies.
+protobuf==7.35.1
+grpcio-tools==1.83.0
+websockets==16.1.1

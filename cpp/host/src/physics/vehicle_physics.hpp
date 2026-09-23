@@ -147,12 +147,17 @@ public:
         get_last_runtime_proxy_contacts() const noexcept { return last_runtime_proxy_contacts_; }
     std::array<WheelContactSupportDiagnostics, 4>
         get_wheel_contact_support_diagnostics() const;
+    [[nodiscard]] std::optional<simcore_host::PowertrainState> get_powertrain_diagnostics() const
+    {
+        return powertrain_state_;
+    }
 
 private:
     struct SupportedPoseSnapshot;
     struct DriveForceStep {
         float force_n;
         bool suppressed;
+        std::array<float, 2> axle_torque_nm{};
     };
     SupportedPoseSnapshot capture_supported_pose() const;
     bool has_supported_ground_coverage() const;
@@ -211,6 +216,7 @@ private:
     bool support_attitude_valid_ = false;
     bool motorcycle_rider_attached_ = true;
     float applied_drive_force_n_ = 0.f;
+    std::optional<simcore_host::PowertrainState> powertrain_state_;
     std::array<float, 4> wheel_angular_speed_rad_s_{};
     std::array<float, 4> suspension_compression_m_{};
     std::array<float, 4> suspension_base_force_n_{};
