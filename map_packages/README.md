@@ -1,7 +1,23 @@
-# Map packages
+# 서버용 맵 데이터
 
-C++ SimCore와 Unreal이 같은 `map_enu` 충돌 snapshot을 사용하기 위한 버전형 데이터
-경로다. R1의 현재 package 구조는 다음과 같다.
+이 폴더에는 C++ 서버가 읽는 지면·장애물·차선·신호 파일이 있습니다. 설명에서는
+**서버용 맵 데이터(Server map data)**라고 부르며, 코드의 이름은 `MapPackage`입니다.
+Unreal 맵 자체나 게임 설치 파일이 아닙니다.
+
+SimCore는 Unreal Engine을 실행하지 않으므로 `.umap`의 지면과 충돌 정보를 직접 사용하지 않습니다.
+Unreal에서 필요한 값을 파일로 내보내고, 서버가 그 값을 읽어 주행과 충돌을 계산합니다.
+[현재 설계에서 이 파일이 필요한 이유](../docs/architecture.md#서버용-맵-데이터가-필요한-이유)를 참고하세요.
+
+**현재 기본 데이터는 `signal_city_v2`**입니다. 이전 데이터는 기존 기능이 계속 동작하는지 검사하는 데 사용합니다.
+
+![맵을 저장한 뒤 지면과 교통 정보를 내보내고 서버에 적용하는 순서](../docs/images/map-pipeline.svg)
+
+| 패키지 | 현재 용도 |
+|---|---|
+| `signal_city_v2` | 기본 도심 Play·통신·교통·주행 검증 |
+| `virtual_city_v1` | 이전 도심·traffic v1 호환과 회귀 검증 |
+| `landscape_local_v1` | Landscape 지면·경사 회귀 검증 |
+| `wall_broad_v1` | 초기 좌표·충돌 테스트용 bootstrap 자료 |
 
 2026-08-31 R1 대상은 작은 가상 도심으로 변경됐고, 실제 Unreal blockout을 측정한
 [`virtual_city_v1`](./virtual_city_v1/README.md)을 생성했다. `landscape_local_v1`은 기존
@@ -20,7 +36,8 @@ traffic format version 2를 사용하며, 실행·재생성은
   ground_surface.csv       # legacy triangle source 또는 heightfield sentinel
   ground_heightfield.bin   # 새 Unreal 측정 snapshot에서만 존재
   static_colliders.csv
-  drive_route.csv         # virtual_city_v1의 QA 전용; collision manifest 밖
+  drive_route.csv          # 가상 도심의 선택적 QA 경로; collision manifest 밖
+  traffic_network.json     # 선택적 차선·신호 sidecar; collision manifest 밖
   README.md
 ```
 

@@ -15,6 +15,8 @@
 
 ## 책임 분리
 
+![같은 Unreal 맵에서 충돌 데이터와 차선·신호 데이터를 만들고 일치를 검사하는 흐름](../images/map-pipeline.svg)
+
 9/8 변경: 가로 4등식 차량 head 8개에 독립 보호 좌회전을 추가했다. JSON의 선택 필드
 `left_group_id`와 wire의 `left_group_id`·`left_aspect`·`left_remaining_seconds`(10·11·12)가
 직진 상태와 같은 WorldState로 전달된다. 좌회전 없는 기존 지도는 0·Unknown·0으로
@@ -69,6 +71,7 @@
 - 아직 reset/control이 없거나 `safe_stop`, `reconnect_required`, EStop 상태이면 서버는 신호를 전부 적색으로 내보낸다. 이 비활성 적색의 countdown은 0으로, 재개 시간을 임의로 예고하지 않는다.
 - Unreal은 잘못된 패킷, 오래된 상태, 연결 해제 또는 알 수 없는 aspect를 녹색으로 표시하지 않는다. Parser는 같은 controller의 서로 다른 group이 동시에 permissive인 상태와 같은 `(controller, group)` head 간 불일치를 거부한다.
 - 100ms stale는 Unreal 게임스레드의 수신 처리 시각부터 측정한다. 종단 전송 지연의 상한 보장은 아니며, tick/수신 callback이 멈춘 pause·hitch 중 표시가 즉시 갱신된다는 보장도 아니다.
+- 지연 보간은 아직 후속 연구다. 차량 표시용 버퍼를 추가해도 최신 수신 상태의 Health·신호 유효성 판단을 과거 표시 상태로 대체하거나 stale 한도를 늘려서는 안 된다. [연결과 시간](../architecture.md#연결과-시간)을 따른다.
 - JSON의 double 방향값이 float wire field에서 360°로 반올림되는 경우에는 같은 방향인 0°로 내보내 `[0,360)` 계약을 유지한다. 원본 360°나 음수는 계속 거부한다.
 
 ## Traffic network version 2와 다중 controller

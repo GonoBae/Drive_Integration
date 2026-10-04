@@ -4,6 +4,7 @@
 #include "coordinates/body_frame_adapter.hpp"
 #include "physics/chassis_ground_contact.hpp"
 #include "physics/runtime_tire_support.hpp"
+#include "terrain/live_ground_patch.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -677,6 +678,48 @@ VehicleState VehiclePhysics::update(double dt)
     return update(dt, {});
 }
 
+void VehiclePhysics::clear_tick_contacts() {
+    last_resolved_dynamic_proxies_.clear();
+    last_collision_contacts_.clear();
+    last_runtime_proxy_contacts_.clear();
+}
+bool VehiclePhysics::try_update_with_ground(double dt,
+    std::vector<simcore_host::KinematicCollisionProxy> proxies,
+    std::shared_ptr<const simcore_host::GroundQuery> ground, bool initialize,
+    std::shared_ptr<const simcore_host::CollisionWorld> collision_override,
+    std::function<void(const VehicleState&)> validate_environment) {
+    if (!ground) throw std::invalid_argument("Measured ground is required");
+    auto backup = std::apply([](const auto&... members) { return std::make_tuple(members...); }, mutable_step_members());
+    const auto original_ground = ground_query_;
+    const auto original_collision = collision_world_;
+    VehicleInput command;
+    { std::lock_guard lock(input_mutex_); command = input_; }
+    ground_query_ = std::move(ground);
+    if (collision_override) collision_world_ = std::move(collision_override);
+    try {
+        if (initialize) { reset(); set_input(command); }
+        update(dt, std::move(proxies));
+        if (validate_environment) validate_environment(state_);
+        ground_query_ = original_ground;
+        collision_world_ = original_collision;
+        return true;
+    } catch (const simcore_host::GroundMeasurementUnavailable&) {
+        mutable_step_members() = std::move(backup);
+        ground_query_ = original_ground;
+        collision_world_ = original_collision;
+        if (initialize) set_input(command);
+        // Tick-local outputs must not replay the previous accepted impulses.
+        clear_tick_contacts();
+        return false;
+    } catch (...) {
+        mutable_step_members() = std::move(backup);
+        ground_query_ = original_ground;
+        collision_world_ = original_collision;
+        if (initialize) set_input(command);
+        throw;
+    }
+}
+
 void VehiclePhysics::refresh_runtime_tire_supports(
     const std::vector<simcore_host::KinematicCollisionProxy>& proxies)
 {
@@ -687,7 +730,12 @@ void VehiclePhysics::refresh_runtime_tire_supports(
         resolved_tire_parameters(parameters_, 0).radius_m,
         resolved_tire_parameters(parameters_, 2).radius_m);
     for (const auto& proxy : proxies) {
-        if (!simcore_host::is_low_tire_obstacle(proxy, *ground_query_, minimum_tire_radius)) continue;
+        try {
+            if (!simcore_host::is_low_tire_obstacle(proxy, *ground_query_, minimum_tire_radius)) continue;
+        } catch (const simcore_host::GroundMeasurementUnavailable&) {
+            // Unmeasured fallen props retain ordinary collision, never invented support.
+            continue;
+        }
         const auto& shape = std::get<simcore_host::ObbPrism>(proxy.shape);
         const double lateral = (shape.center_enu.east_m-east_m_)*std::cos(heading_rad_)
             - (shape.center_enu.north_m-north_m_)*std::sin(heading_rad_);

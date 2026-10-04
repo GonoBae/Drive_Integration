@@ -143,6 +143,16 @@ ClientMessageResult SimulationHost::handle_client_message(
         return handle_hello(*hello, connection_generation);
     }
 
+    if (const auto* result = std::get_if<simcore_host::ParsedGroundQueryResult>(&*parsed)) {
+        return handle_ground_shadow(*result, connection_generation, received_at);
+    }
+    if (const auto* revision = std::get_if<simcore_host::ParsedGroundWorldRevision>(&*parsed)) {
+        return handle_ground_world_revision(*revision,connection_generation,received_at);
+    }
+    if (const auto* result = std::get_if<simcore_host::ParsedWorldObstacleResult>(&*parsed)) {
+        return handle_world_obstacles(*result,connection_generation,received_at);
+    }
+
     const auto* command =
         std::get_if<simcore_host::ParsedControlCommand>(&*parsed);
     const auto hello_state = hello_connection_states_.find(
@@ -259,7 +269,19 @@ ClientMessageResult SimulationHost::handle_hello(
         }
     }
 
+    if (config_.live_ground && !has_capability(hello.capabilities, simcore_host::kLiveGroundCapability)) {
+        std::cerr << "[Hello] live ground requires " << simcore_host::kLiveGroundCapability << " client\n";
+        return ClientMessageResult::Rejected;
+    }
     const bool supports_parts = has_capability(hello.capabilities, "vehicle-parts.v1");
+    if (config_.live_npc_ground && !has_capability(hello.capabilities,"npc-ground.v1")) {
+        std::cerr << "[Hello] live NPC ground requires npc-ground.v1 client\n";
+        return ClientMessageResult::Rejected;
+    }
+    if (config_.live_obstacles && !has_capability(hello.capabilities,simcore_host::kLiveObstacleCapability)) {
+        std::cerr << "[Hello] live obstacles require world-obstacles.v1 client\n";
+        return ClientMessageResult::Rejected;
+    }
     if (config_.require_vehicle_catalog_identity || supports_parts) {
         const auto capability = "vehicle-catalog-fnv1a64-" + config_.vehicle_catalog->checksum().substr(8);
         const auto catalog_count = std::count_if(hello.capabilities.begin(), hello.capabilities.end(),
@@ -320,7 +342,10 @@ ClientMessageResult SimulationHost::handle_hello(
             ClientPayloadKind::Hello,
             payload_fingerprint,
             has_capability(hello.capabilities, "vehicle-loadout.v1"),
-            supports_parts});
+            supports_parts,
+            has_capability(hello.capabilities, simcore_host::kGroundQueryShadowCapability),
+            has_capability(hello.capabilities, simcore_host::kGroundQueryCaptureCapability),
+            has_capability(hello.capabilities, simcore_host::kLiveGroundCapability)});
     std::cout << "[Hello] client accepted build=" << hello.build
               << " generation=" << connection_generation
               << " capabilities=" << hello.capabilities.size() << "\n";
@@ -598,8 +623,8 @@ ClientMessageResult SimulationHost::handle_simulation_reset(
     }
     runtime_entities_ = initial_runtime_entities_;
     structure_damage_.reset();
-    rebuild_lane_npc();
-    rebuild_pedestrians();
+    live_npc_initialization_pending_ = true;
+    rebuild_lane_npc(); rebuild_pedestrians();
     last_logged_input_ = make_safe_stop_input();
     apply_vehicle_input(last_logged_input_);
     simulation_clock_.reset_elapsed();
@@ -635,6 +660,11 @@ void SimulationHost::reset_player_vehicle(
     config_.vehicle_parameters = config_.vehicle_catalog->player_parameters(
         base_vehicle_parameters_, vehicle_class, loadout_id);
     physics_.replace_parameters(config_.vehicle_parameters);
+    if (ground_capture_) ground_capture_->clear();
+    live_ground_reset_pending_ = true; live_ground_waiting_ = true;
+    live_ground_->reset_context({});
+    live_obstacles_->reset_context({});
+    live_npc_ground_->reset_context({});
     active_vehicle_class_ = vehicle_class;
     active_vehicle_loadout_id_ = loadout_id;
 }
@@ -657,6 +687,11 @@ std::string SimulationHost::make_initial_hello()
             "world-health.v1",
             "traffic-signals.v1",
             "pedestrian-signals.v1",
+            "ground-query-shadow.v1",
+            "ground-query-shadow.v2",
+            std::string(simcore_host::kLiveGroundCapability),
+            std::string(simcore_host::kLiveObstacleCapability),
+            "npc-ground.v1",
             catalog_capability,
         });
 }

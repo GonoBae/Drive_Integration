@@ -12,6 +12,8 @@
 | 배포 | `package_windows.ps1`, `smoke_windows_package.ps1` |
 | 통신 코드 생성 | `generate_proto.ps1`, `generated/`, `check_generated_proto.py` |
 | 통합 검사 | `check_core.py`, `smoke_*.py` |
+| 차량 카탈로그 검증 지원 | `runtime_vehicle_catalog.py` — 공유 설정 읽기·검사 도구에서 사용 |
+| 실제 통신 부품 검사 | `smoke_health.py --vehicle-loadouts` — 프리셋·개별 조합·재연결·기본값 복구 |
 | 측정 결과 분석 | `analyze_performance.py`, `analyze_input_latency.py` |
 | 위 도구의 회귀 시험 | `test_*.py`, `test_*.ps1` |
 
@@ -48,3 +50,12 @@ python scripts/check_core.py --skip-build --skip-unreal --preflight-only
 
 생성 파일 검사는 별도 단계이므로 `test_*.py` 자동 발견에는 중복 포함하지 않는다.
 Preflight는 테스트 통과나 실제 운전·패키지 성능 검증을 의미하지 않는다.
+
+## 측정 도구의 범위
+
+`analyze_performance.py`는 UE 캡처의 평균 FPS와 frame/state p95·최대 간격을 계산합니다.
+RTT·1% low·위치 보정량 분석기는 아닙니다. `analyze_input_latency.py`는 사람이 영상에서
+판독한 키→화면 반응을 분석하며 서버 응답 시간을 측정하지 않습니다.
+
+비동기 텔레메트리 exporter·DB 대시보드는 아직 연구 계획입니다. 기존 도구로 기준 자료를
+남긴 뒤 필요한 계측만 추가합니다. [지표 정의와 실험 순서](../docs/guides/core_validation.md#연구-실험-절차)를 참고하세요.

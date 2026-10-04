@@ -1,4 +1,5 @@
 #include "simulation_host.hpp"
+#include "terrain/live_npc_ground.hpp"
 #include "player_vehicle_profile.hpp"
 #include "traffic/pedestrian_profile.hpp"
 
@@ -55,6 +56,7 @@ simcore_host::NpcHornMotionContext horn_motion_context(
     case Reason::Disabled:
     case Reason::Terminal:
     case Reason::NoGround:
+    case Reason::AwaitingGround:
     case Reason::InvalidInput:
         return Context::Inactive;
     }
@@ -257,6 +259,24 @@ bool overlaps(const simcore_host::ObbPrism& body,
         }
     }, other);
 }
+
+void freeze_waiting_entity(simcore_host::RuntimeEntityState& entity,
+    simcore_host::RuntimeCollisionReaction& reaction,
+    std::optional<simcore_host::RuntimeEntityState>& pending,
+    std::optional<simcore_host::RuntimeEntityState>& nominal)
+{
+    entity.collision_proxy.linear_velocity_enu_mps = {};
+    entity.collision_proxy.heading_rate_rad_s = 0.0;
+    pending = nominal = entity;
+    std::visit([&](auto& shape) {
+        shape.center_enu.east_m -= reaction.offset_enu_m.east_m;
+        shape.center_enu.north_m -= reaction.offset_enu_m.north_m;
+        if constexpr (std::is_same_v<std::decay_t<decltype(shape)>,simcore_host::ObbPrism>)
+            shape.heading_rad -= reaction.heading_offset_rad;
+    },nominal->collision_proxy.shape);
+    reaction.nominal_velocity_enu_mps = {};
+    reaction.nominal_heading_rate_rad_s = 0.0;
+}
 } // namespace
 
 void SimulationHost::rebuild_lane_npc()
@@ -270,7 +290,7 @@ void SimulationHost::rebuild_lane_npc()
         return entity.collision_proxy.proxy_id.starts_with("lane-npc-");
     });
     if (config_.npc_route.empty()) return;
-    if (!config_.traffic_network || !config_.ground_query
+    if (!config_.traffic_network || !npc_ground_query()
         || config_.traffic_network->source_map_checksum != config_.map_package_checksum) return;
     if (config_.npc_autonomous) {
         npc_route_planner_.emplace(*config_.traffic_network);
@@ -316,14 +336,19 @@ void SimulationHost::rebuild_lane_npc()
             settings.front_extent_m = profile.half_length_m;
             settings.half_width_m = profile.half_width_m;
             runtime.follower = simcore_host::NpcLaneFollower(settings);
-            runtime.follower.rebuild(*config_.traffic_network, *config_.ground_query,
+            runtime.follower.rebuild(*config_.traffic_network, *npc_ground_query(),
                                      *route, config_.npc_route_loop, 0.0);
             runtime.start_offset_m = config_.npc_route_loop
                 ? std::fmod(requested_offset, runtime.follower.route_length_m())
                 : requested_offset;
             runtime.follower.reset(runtime.start_offset_m);
             runtime.navigation_route = *route;
-            if (config_.npc_autonomous) choose_npc_destination(runtime);
+            if (config_.npc_autonomous) {
+                try { choose_npc_destination(runtime); }
+                catch (const simcore_host::GroundMeasurementUnavailable&) {
+                    runtime.lane_change_wait_reason = "ground_measurement_pending";
+                }
+            }
             lane_npcs_.push_back(std::move(runtime));
         } catch (const std::exception& error) {
             std::cerr << "[NPC] entity=" << (kFirstLaneNpcId + index)
@@ -332,6 +357,7 @@ void SimulationHost::rebuild_lane_npc()
     }
 
     for (auto& npc : lane_npcs_) {
+        try {
         if (!lane_npc_blocked_distance(npc, 0.0)) {
             if (const auto anchor = npc.follower.sample_ahead(0.0)) {
                 runtime_entities_.push_back(npc_entity(npc.entity_id, *anchor,
@@ -341,6 +367,9 @@ void SimulationHost::rebuild_lane_npc()
                     npc.body_ground_clearance_m));
                 publish_npc_modules(runtime_entities_.back(), npc.vehicle_loadout_id, npc.vehicle_modules);
             }
+        }
+        } catch (const simcore_host::GroundMeasurementUnavailable&) {
+            npc.lane_change_wait_reason = "ground_measurement_pending";
         }
         std::cout << "[NPC] route ready entity=" << npc.entity_id
                   << " length_m=" << npc.follower.route_length_m()
@@ -412,9 +441,13 @@ bool SimulationHost::choose_npc_destination(LaneNpcRuntime& npc)
     npc.next_reverse_probe_m = 0.0;
     clear_npc_avoidance_state(npc);
     ++npc.destinations_selected;
-    std::cout << "[NPC] destination entity=" << npc.entity_id
-              << " lane=" << npc.destination_lane_id
-              << " trip=" << npc.destinations_selected << "\n";
+    // Live-ground preparation can be rolled back later in the same tick.
+    // Its committed destination/counter is exposed by npc_navigation(); do
+    // not log a provisional success repeatedly while another tile is pending.
+    if (!config_.live_npc_ground)
+        std::cout << "[NPC] destination entity=" << npc.entity_id
+                  << " lane=" << npc.destination_lane_id
+                  << " trip=" << npc.destinations_selected << "\n";
     return true;
 }
 
@@ -500,6 +533,9 @@ std::optional<SimulationHost::NpcRouteObstacle> SimulationHost::lane_npc_obstacl
     const LaneNpcRuntime& npc, double lookahead_m, bool stationary_only,
     bool route_end_is_blocker) const
 {
+    const auto query_priority = config_.live_npc_ground
+        ? live_npc_ground_->planning_scope() : simcore_host::LiveNpcGround::PlanningScope{};
+
     for (double distance = 0.0; distance <= lookahead_m + 1e-9; distance += kScanStepM) {
         const auto sample = sample_lane_npc(npc, distance);
         if (!sample) return stationary_only || !route_end_is_blocker ? std::nullopt
@@ -695,7 +731,7 @@ bool SimulationHost::try_npc_lane_change(LaneNpcRuntime& npc, double retreat_m, 
         for (int choice = 0; choice < 2; ++choice) {
             if (choice == 1 && preferred_length - minimum_length < 1e-6) break;
             const double length = choice == 0 ? preferred_length : minimum_length;
-            const auto plan = simcore_host::plan_npc_lane_change(network, *config_.ground_query,
+            const auto plan = simcore_host::plan_npc_lane_change(network, *npc_ground_query(),
                 state.lane_id, state.lane_offset_m, change.target_lane_id, length,
                 npc.body_half_length_m, npc.body_half_width_m);
             if (!plan || plan->source_end_m() + end_margin > change.source_end_m) continue;
@@ -863,7 +899,7 @@ SimulationHost::NpcLocalScene SimulationHost::npc_local_obstacles(
 
 bool SimulationHost::try_npc_local_bypass(LaneNpcRuntime& npc)
 {
-    if (!config_.traffic_network || !config_.ground_query || npc.local_bypass || npc.lane_change
+    if (!config_.traffic_network || !npc_ground_query() || npc.local_bypass || npc.lane_change
         || std::hypot(npc.reaction.offset_enu_m.east_m,npc.reaction.offset_enu_m.north_m)>0.15) {
         npc.local_search.reset();
         return false;
@@ -897,7 +933,7 @@ bool SimulationHost::try_npc_local_bypass(LaneNpcRuntime& npc)
         npc.local_search.emplace();
         npc.local_search_anchor_m=reference.state().distance_travelled_m;
         npc.local_search_observation_s=kNpcNavigationDecisionPeriodS;
-        npc.local_search->begin(*config_.traffic_network,*config_.ground_query,
+        npc.local_search->begin(*config_.traffic_network,*npc_ground_query(),
             reference,last_blocked,dimensions,npc_local_road_index_);
     }
     const auto scene_started=Clock::now();
@@ -1131,6 +1167,9 @@ void SimulationHost::update_npc_maneuver_recovery(LaneNpcRuntime& npc)
 
 void SimulationHost::update_npc_navigation(LaneNpcRuntime& npc, double dt_seconds)
 {
+    const auto query_priority = config_.live_npc_ground
+        ? live_npc_ground_->planning_scope() : simcore_host::LiveNpcGround::PlanningScope{};
+
     if (!npc_route_planner_) return;
     npc.navigation_cooldown_s = std::max(0.0, npc.navigation_cooldown_s - dt_seconds);
     npc.local_search_cooldown_s=std::max(0.0,npc.local_search_cooldown_s-dt_seconds);
@@ -1301,6 +1340,12 @@ void SimulationHost::prepare_lane_npc(double dt_seconds, Clock::time_point now)
     if (npc_search_entity_id_ != 0) npc_search_after_entity_id_ = npc_search_entity_id_;
 
     for (auto& npc : lane_npcs_) {
+        const auto checkpoint = config_.live_npc_ground ? std::optional<LaneNpcRuntime>(npc) : std::nullopt;
+        const auto previous = std::find_if(runtime_entities_.begin(),runtime_entities_.end(),
+            [&](const auto& entity) { return entity.entity_id == npc.entity_id; });
+        const auto previous_entity = config_.live_npc_ground && previous != runtime_entities_.end()
+            ? std::optional<simcore_host::RuntimeEntityState>(*previous) : std::nullopt;
+        try {
         npc.pending.reset();
         npc.nominal_pending.reset();
         const auto modules_before = npc.vehicle_modules;
@@ -1327,7 +1372,7 @@ void SimulationHost::prepare_lane_npc(double dt_seconds, Clock::time_point now)
             auto material = simcore_host::GroundSurfaceMaterialId::Default;
             double friction = 1.0;
             if (anchor) {
-                if (const auto hit = config_.ground_query->query_down({
+                if (const auto hit = npc_ground_query()->query_down({
                         {anchor->position_enu.east_m, anchor->position_enu.north_m,
                          anchor->position_enu.up_m + 2.0}, 4.0})) {
                     material = hit->surface_material_id;
@@ -1673,7 +1718,7 @@ void SimulationHost::prepare_lane_npc(double dt_seconds, Clock::time_point now)
                 previous_tumble.pitch_rad(), previous_tumble.roll_rad());
             for (int index = 1; index <= samples; ++index) {
                 const double t = static_cast<double>(index) / samples;
-                const auto ground = supported_point(*config_.ground_query,
+                const auto ground = supported_point(*npc_ground_query(),
                     {before.center_enu.east_m + (after.center_enu.east_m - before.center_enu.east_m) * t,
                      before.center_enu.north_m + (after.center_enu.north_m - before.center_enu.north_m) * t,
                      before.center_up_m - old_support.support_height_m - npc.body_ground_clearance_m});
@@ -1733,6 +1778,18 @@ void SimulationHost::prepare_lane_npc(double dt_seconds, Clock::time_point now)
             npc.reaction.nominal_velocity_enu_mps;
         npc.nominal_pending->collision_proxy.heading_rate_rad_s =
             npc.reaction.nominal_heading_rate_rad_s;
+        } catch (const simcore_host::GroundMeasurementUnavailable&) {
+            if (!checkpoint) throw;
+            npc = *checkpoint;
+            npc.pending.reset(); npc.nominal_pending.reset();
+            npc.lane_change_wait_reason = "ground_measurement_pending";
+            const auto entity = std::find_if(runtime_entities_.begin(),runtime_entities_.end(),
+                [&](const auto& value) { return value.entity_id == npc.entity_id; });
+            if (previous_entity && entity != runtime_entities_.end()) {
+                *entity = *previous_entity;
+                freeze_waiting_entity(*entity,npc.reaction,npc.pending,npc.nominal_pending);
+            } else if (entity != runtime_entities_.end()) runtime_entities_.erase(entity);
+        }
     }
 }
 
@@ -1758,7 +1815,7 @@ void SimulationHost::finish_runtime_impact_contacts(
             pedestrian->reaction.publish(entity, contacts);
             const auto center = shape_center(entity.collision_proxy.shape);
             const double center_up = std::visit([](const auto& shape) { return shape.center_up_m; }, entity.collision_proxy.shape);
-            const auto ground = supported_point(*config_.ground_query, {center.east_m, center.north_m,
+            const auto ground = supported_point(*npc_ground_query(), {center.east_m, center.north_m,
                 pedestrian->start.up_m});
             if (ground) {
                 simcore_host::PedestrianImpactGeometry geometry;
@@ -1800,7 +1857,7 @@ void SimulationHost::rebuild_pedestrians()
     std::erase_if(runtime_entities_, [](const auto& entity) {
         return entity.collision_proxy.proxy_id.starts_with("pedestrian-");
     });
-    if (!config_.traffic_network || !config_.ground_query
+    if (!config_.traffic_network || !npc_ground_query()
         || config_.traffic_network->source_map_checksum != config_.map_package_checksum) return;
 
     using SignalKey = std::pair<std::uint32_t, std::uint32_t>;
@@ -1839,8 +1896,20 @@ void SimulationHost::rebuild_pedestrians()
             pedestrian.direction = side > 0 ? 1 : -1;
             const auto authored = pedestrian.progress == 0.0
                 ? pedestrian.start : pedestrian.end;
-            const auto ground = supported_point(*config_.ground_query, authored);
-            if (!ground) continue;
+            std::optional<simcore_host::GroundPointEnu> ground;
+            try { ground = supported_point(*npc_ground_query(),authored); }
+            catch (const simcore_host::GroundMeasurementUnavailable&) {
+                pedestrians_.push_back(std::move(pedestrian));
+                continue;
+            }
+            if (!ground) {
+                if (config_.live_npc_ground) {
+                    std::cerr << "[Pedestrian] entity=" << pedestrian.entity_id << " spawn has measured NoGround\n";
+                    pedestrian.spawn_no_ground_reported = true;
+                    pedestrians_.push_back(std::move(pedestrian));
+                }
+                continue;
+            }
             runtime_entities_.push_back(pedestrian_entity(pedestrian.entity_id, *ground,
                 std::atan2(dx * pedestrian.direction, dy * pedestrian.direction)));
             pedestrians_.push_back(std::move(pedestrian));
@@ -1852,12 +1921,18 @@ void SimulationHost::rebuild_pedestrians()
 
 void SimulationHost::prepare_pedestrians(double dt_seconds, Clock::time_point now)
 {
-    if (!config_.traffic_network || !config_.ground_query) return;
+    if (!config_.traffic_network || !npc_ground_query()) return;
     const bool enabled = lifecycle_active_ && !estop_latched_
         && make_health_snapshot(now).status == simcore_host::HealthStatus::Active;
     const auto signals = current_traffic_signals(enabled);
 
     for (auto& pedestrian : pedestrians_) {
+        const auto checkpoint = config_.live_npc_ground ? std::optional<PedestrianRuntime>(pedestrian) : std::nullopt;
+        const auto previous = std::find_if(runtime_entities_.begin(),runtime_entities_.end(),
+            [&](const auto& entity) { return entity.entity_id == pedestrian.entity_id; });
+        const auto previous_entity = config_.live_npc_ground && previous != runtime_entities_.end()
+            ? std::optional<simcore_host::RuntimeEntityState>(*previous) : std::nullopt;
+        try {
         pedestrian.pending.reset();
         pedestrian.nominal_pending.reset();
         auto current = std::find_if(runtime_entities_.begin(), runtime_entities_.end(),
@@ -1892,7 +1967,7 @@ void SimulationHost::prepare_pedestrians(double dt_seconds, Clock::time_point no
             const auto before_center = shape_center(before_proxy.shape);
             const auto old_body = pedestrian.body;
             const auto old_offset = pedestrian.reaction.offset_enu_m;
-            const auto anchor = supported_point(*config_.ground_query, {
+            const auto anchor = supported_point(*npc_ground_query(), {
                 pedestrian.start.east_m + (pedestrian.end.east_m - pedestrian.start.east_m) * pedestrian.progress,
                 pedestrian.start.north_m + (pedestrian.end.north_m - pedestrian.start.north_m) * pedestrian.progress,
                 pedestrian.start.up_m});
@@ -1906,7 +1981,7 @@ void SimulationHost::prepare_pedestrians(double dt_seconds, Clock::time_point no
                 pedestrian.body.airborne() ? 0.12 : simcore_host::RuntimeCollisionReaction::kDefaultVelocityDampingPerSecond);
             const simcore_host::CollisionVector2 target{anchor->east_m + pedestrian.reaction.offset_enu_m.east_m,
                 anchor->north_m + pedestrian.reaction.offset_enu_m.north_m};
-            const auto ground = supported_point(*config_.ground_query,
+            const auto ground = supported_point(*npc_ground_query(),
                 {target.east_m, target.north_m, anchor->up_m});
             const bool recovering = pedestrian.reaction.recovery.phase() == simcore_host::ImpactRecoveryPhase::Recovering;
             if (ground) {
@@ -1984,7 +2059,7 @@ void SimulationHost::prepare_pedestrians(double dt_seconds, Clock::time_point no
                 + (pedestrian.end.north_m - pedestrian.start.north_m) * next_progress,
             pedestrian.start.up_m
                 + (pedestrian.end.up_m - pedestrian.start.up_m) * next_progress};
-        const auto ground = supported_point(*config_.ground_query, authored);
+        const auto ground = supported_point(*npc_ground_query(), authored);
         if (!ground) {
             pedestrian.crossing = false;
             current->collision_proxy.linear_velocity_enu_mps = {};
@@ -2036,7 +2111,7 @@ void SimulationHost::prepare_pedestrians(double dt_seconds, Clock::time_point no
             pedestrian.nominal_pending->collision_proxy.linear_velocity_enu_mps = {};
         };
         const auto displaced_ground = supported_point(
-            *config_.ground_query,
+            *npc_ground_query(),
             {after.center_enu.east_m, after.center_enu.north_m,
              nominal_after.center_up_m - profile.half_height_m});
         if (displaced_ground) {
@@ -2102,7 +2177,7 @@ void SimulationHost::prepare_pedestrians(double dt_seconds, Clock::time_point no
                 auto candidate = before;
                 candidate.center_enu.east_m += (after.center_enu.east_m - before.center_enu.east_m) * t;
                 candidate.center_enu.north_m += (after.center_enu.north_m - before.center_enu.north_m) * t;
-                const auto candidate_ground = supported_point(*config_.ground_query,
+                const auto candidate_ground = supported_point(*npc_ground_query(),
                     {candidate.center_enu.east_m, candidate.center_enu.north_m,
                      before.center_up_m - profile.half_height_m});
                 if (!candidate_ground) { clear = false; break; }
@@ -2135,5 +2210,108 @@ void SimulationHost::prepare_pedestrians(double dt_seconds, Clock::time_point no
             pedestrian.crossing = false;
             pedestrian.direction = -pedestrian.direction;
         }
+        } catch (const simcore_host::GroundMeasurementUnavailable&) {
+            if (!checkpoint) throw;
+            pedestrian = *checkpoint;
+            pedestrian.pending.reset(); pedestrian.nominal_pending.reset();
+            const auto entity = std::find_if(runtime_entities_.begin(),runtime_entities_.end(),
+                [&](const auto& value) { return value.entity_id == pedestrian.entity_id; });
+            if (previous_entity && entity != runtime_entities_.end()) {
+                *entity = *previous_entity;
+                freeze_waiting_entity(*entity,pedestrian.reaction,pedestrian.pending,pedestrian.nominal_pending);
+            }
+        }
+    }
+}
+
+bool SimulationHost::initialize_live_npc_ground_entities()
+{
+    if (!config_.live_npc_ground) return true;
+    if (!live_npc_ground_->ready()) return false;
+    bool waiting = false;
+    const auto exists = [&](std::uint32_t id) {
+        return std::any_of(runtime_entities_.begin(),runtime_entities_.end(),
+            [id](const auto& entity) { return entity.entity_id == id; });
+    };
+    for (auto& npc : lane_npcs_) {
+        if (exists(npc.entity_id)) continue;
+        try {
+            const auto anchor = sample_lane_npc(npc,0.0);
+            if (!anchor) {
+                if (npc.lane_change_wait_reason != "spawn_no_ground")
+                    std::cerr << "[NPC] entity=" << npc.entity_id << " spawn has measured NoGround\n";
+                npc.lane_change_wait_reason = "spawn_no_ground";
+                continue;
+            }
+            if (npc_sample_blocked(npc,*anchor)) continue;
+            npc.follower.step(0.0,current_traffic_signals(false),true);
+            runtime_entities_.push_back(npc_entity(npc.entity_id,*anchor,npc.vehicle_profile_index,
+                npc.body_half_length_m,npc.body_half_width_m,npc.body_half_height_m,
+                npc.mass_kg,npc.yaw_inertia_kg_m2,npc.maximum_reaction_speed_mps,npc.body_ground_clearance_m));
+            publish_npc_modules(runtime_entities_.back(),npc.vehicle_loadout_id,npc.vehicle_modules);
+            npc.lane_change_wait_reason.clear();
+        } catch (const simcore_host::GroundMeasurementUnavailable&) {
+            npc.lane_change_wait_reason = "ground_measurement_pending";
+            waiting = true;
+        }
+    }
+    for (auto& pedestrian : pedestrians_) {
+        if (exists(pedestrian.entity_id)) continue;
+        const auto authored = pedestrian.progress == 0.0 ? pedestrian.start : pedestrian.end;
+        try {
+            const auto ground = supported_point(*npc_ground_query(),authored);
+            if (!ground) {
+                if (!pedestrian.spawn_no_ground_reported)
+                    std::cerr << "[Pedestrian] entity=" << pedestrian.entity_id << " spawn has measured NoGround\n";
+                pedestrian.spawn_no_ground_reported = true;
+                continue;
+            }
+            pedestrian.spawn_no_ground_reported = false;
+            const double heading = std::atan2((pedestrian.end.east_m-pedestrian.start.east_m)*pedestrian.direction,
+                (pedestrian.end.north_m-pedestrian.start.north_m)*pedestrian.direction);
+            runtime_entities_.push_back(pedestrian_entity(pedestrian.entity_id,*ground,heading));
+        } catch (const simcore_host::GroundMeasurementUnavailable&) { waiting = true; }
+    }
+    return !waiting;
+}
+
+void SimulationHost::validate_live_npc_ground_after_collision() const
+{
+    if (!config_.live_npc_ground) return;
+    const auto& resolved = physics_.get_last_resolved_dynamic_proxies();
+    for (const auto& entity : runtime_entities_) {
+        const auto npc = std::find_if(lane_npcs_.begin(),lane_npcs_.end(),
+            [&](const auto& value) { return value.entity_id == entity.entity_id; });
+        const auto pedestrian = std::find_if(pedestrians_.begin(),pedestrians_.end(),
+            [&](const auto& value) { return value.entity_id == entity.entity_id; });
+        if (npc == lane_npcs_.end() && pedestrian == pedestrians_.end()) continue;
+        const auto final = std::find_if(resolved.begin(),resolved.end(),
+            [&](const auto& value) { return value.proxy_id == entity.collision_proxy.proxy_id; });
+        const auto& proxy = final == resolved.end() ? entity.collision_proxy : *final;
+        // Use the same authored layer as the motion/impact paths. In particular,
+        // an airborne pedestrian's centre must not select an upper road deck.
+        const double reference_up = npc != lane_npcs_.end()
+            ? npc->follower.state().position_enu.up_m : pedestrian->start.up_m;
+        std::visit([&](const auto& shape) {
+            const auto require_support = [&](double east, double north) {
+                // A measured miss follows the controller's existing NoGround
+                // stop policy. Only an unknown measurement rolls the whole
+                // finite-body contact step back.
+                (void)npc_ground_query()->query_down({{east,north,reference_up+2.0},4.0});
+            };
+            require_support(shape.center_enu.east_m,shape.center_enu.north_m);
+            if constexpr (std::is_same_v<std::decay_t<decltype(shape)>,simcore_host::ObbPrism>) {
+                const double sine = std::sin(shape.heading_rad), cosine = std::cos(shape.heading_rad);
+                for (const double forward : {-shape.half_length_m,0.0,shape.half_length_m})
+                    for (const double side : {-shape.half_width_m,0.0,shape.half_width_m})
+                        require_support(shape.center_enu.east_m+sine*forward+cosine*side,
+                            shape.center_enu.north_m+cosine*forward-sine*side);
+            } else {
+                require_support(shape.center_enu.east_m-shape.radius_m,shape.center_enu.north_m);
+                require_support(shape.center_enu.east_m+shape.radius_m,shape.center_enu.north_m);
+                require_support(shape.center_enu.east_m,shape.center_enu.north_m-shape.radius_m);
+                require_support(shape.center_enu.east_m,shape.center_enu.north_m+shape.radius_m);
+            }
+        },proxy.shape);
     }
 }

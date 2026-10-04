@@ -117,9 +117,12 @@ struct TrafficNetwork {
 // Loads the complete immutable network or throws std::runtime_error. JSON
 // schema/types, resource bounds, topology, stopline groups and sampled lane
 // footprints are validated before a caller can install it in a running world.
+enum class TrafficGroundValidation { ValidateImmediately, DeferredLive };
+
 [[nodiscard]] TrafficNetwork load_traffic_network(
     const std::filesystem::path& path,
     const std::string& expected_map_checksum,
-    const GroundQuery& ground);
+    const GroundQuery& ground,
+    TrafficGroundValidation ground_validation = TrafficGroundValidation::ValidateImmediately);
 
 } // namespace simcore_host

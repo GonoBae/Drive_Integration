@@ -439,7 +439,7 @@ LaneSample lane_sample(const TrafficLane& lane, double station)
 }
 
 void validate_lane_changes(const TrafficNetwork& network, const GroundQuery& ground,
-                           std::size_t& query_count)
+                           std::size_t& query_count, bool validate_support)
 {
     std::map<std::uint32_t, const TrafficLane*> by_id;
     for (const auto& lane : network.lanes) { by_id.emplace(lane.id, &lane); }
@@ -501,7 +501,7 @@ void validate_lane_changes(const TrafficNetwork& network, const GroundQuery& gro
             }
             // Validate the union's two edges and middle, not only the separately
             // supported lanes: a median, hole or raised divider is not drivable.
-            validate_ground(corridor, ground, query_count);
+            if (validate_support) validate_ground(corridor, ground, query_count);
         }
     }
 }
@@ -607,8 +607,10 @@ void validate_signal_plans(const TrafficNetwork& network)
 
 TrafficNetwork load_traffic_network(const std::filesystem::path& path,
                                     const std::string& expected_map_checksum,
-                                    const GroundQuery& ground)
+                                    const GroundQuery& ground, TrafficGroundValidation ground_validation)
 {
+    if (ground_validation != TrafficGroundValidation::ValidateImmediately
+        && ground_validation != TrafficGroundValidation::DeferredLive) fail("invalid ground validation mode");
     if (!checksum_valid(expected_map_checksum)) { fail("expected map checksum is malformed"); }
     std::ifstream input(path, std::ios::binary);
     if (!input) { fail("cannot open " + path.string()); }
@@ -847,8 +849,10 @@ TrafficNetwork load_traffic_network(const std::filesystem::path& path,
     validate_signal_plans(result);
     validate_topology(result);
     std::size_t ground_queries = 0;
-    for (const auto& lane : result.lanes) { validate_ground(lane, ground, ground_queries); }
-    validate_lane_changes(result, ground, ground_queries);
+    const bool validate_support = ground_validation == TrafficGroundValidation::ValidateImmediately;
+    if (validate_support)
+        for (const auto& lane : result.lanes) { validate_ground(lane, ground, ground_queries); }
+    validate_lane_changes(result, ground, ground_queries, validate_support);
     return result;
 }
 

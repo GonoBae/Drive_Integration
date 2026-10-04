@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 
 #include "collision/collision_world.hpp"
 #include "collision/vehicle_dent.hpp"
@@ -11,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <vector>
+#include <tuple>
 
 enum class VehicleGear : uint8_t {
     Neutral = 0,
@@ -130,6 +132,14 @@ public:
         double dt,
         std::vector<simcore_host::KinematicCollisionProxy> dynamic_proxies);
     VehicleState get_state() const;
+    // Experimental measured-ground step. A missing ray rolls back every solver
+    // history; no partial impulse or fuel consumption may escape to the host.
+    bool try_update_with_ground(double dt,
+        std::vector<simcore_host::KinematicCollisionProxy> proxies,
+        std::shared_ptr<const simcore_host::GroundQuery> ground, bool initialize,
+        std::shared_ptr<const simcore_host::CollisionWorld> collision_override = {},
+        std::function<void(const VehicleState&)> validate_environment = {});
+    void clear_tick_contacts();
     [[nodiscard]] bool ground_coverage_limited() const noexcept {
         return ground_coverage_limited_;
     }
@@ -244,6 +254,20 @@ private:
         last_resolved_dynamic_proxies_;
     std::vector<simcore_host::CollisionContact> last_collision_contacts_;
     std::vector<simcore_host::RuntimeProxyContact> last_runtime_proxy_contacts_;
+
+    auto mutable_step_members() {
+        return std::tie(state_, runtime_tire_supports_, east_m_, north_m_, heading_rad_,
+            body_longitudinal_speed_mps_, solver_lateral_speed_mps_, solver_yaw_rate_rad_s_,
+            solver_road_wheel_angle_rad_, pitch_rad_, roll_rad_, pitch_rate_rad_s_, roll_rate_rad_s_,
+            vertical_speed_mps_, ground_pitch_rad_, ground_roll_rad_, support_pitch_rad_,
+            support_roll_rad_, support_attitude_valid_, motorcycle_rider_attached_,
+            applied_drive_force_n_, powertrain_state_, wheel_angular_speed_rad_s_,
+            suspension_compression_m_, suspension_base_force_n_, suspension_had_contact_,
+            wheel_contact_support_, previous_hard_stop_normal_force_n_, compression_stop_active_,
+            ground_query_hit_count_, ground_coverage_limited_, ground_surface_hit_by_wheel_,
+            ground_surface_material_by_wheel_, ground_friction_multiplier_by_wheel_,
+            last_resolved_dynamic_proxies_, last_collision_contacts_, last_runtime_proxy_contacts_);
+    }
 
     static constexpr float  STOP_EPSILON     = 0.01f;
     static constexpr double EARTH_R          = 6371000.0; // meters

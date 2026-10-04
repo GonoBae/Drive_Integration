@@ -54,6 +54,12 @@ RuntimeOptions make_runtime_option_defaults(
 
 void validate_runtime_options(const RuntimeOptions& options)
 {
+    if (options.live_ground && options.ground_query_shadow)
+        throw std::invalid_argument("--live-ground cannot be combined with shadow sampling");
+    if (options.live_obstacles && !options.live_ground)
+        throw std::invalid_argument("--live-obstacles requires --live-ground");
+    if (options.live_npc_ground && !options.live_ground)
+        throw std::invalid_argument("--live-npc-ground requires --live-ground");
     if (options.record_physics_path && options.verify_physics_replay_path) {
         throw std::invalid_argument("record-physics and verify-physics-replay are mutually exclusive");
     }
@@ -234,6 +240,10 @@ std::string runtime_options_help(const RuntimeOptions& defaults)
         << "  --source-id ID                  Printable non-space ASCII, 1..64 bytes\n"
         << "  --demo-entities                 Enable built-in NPC/pedestrian proxies\n"
         << "  --no-demo-entities              Disable proxies set true by a cfg\n"
+        << "  --live-ground                   Experimental Unreal Ego ground patches; measured replay v2\n"
+        << "  --live-obstacles                Unreal box obstacles; requires --live-ground\n"
+        << "  --live-npc-ground               Revision-leased NPC/pedestrian ground; requires --live-ground\n"
+        << "  --ground-query-shadow           Compare Unreal ground probes; physics stays file-based\n"
         << "  -h, --help                      Show this help\n";
     return output.str();
 }

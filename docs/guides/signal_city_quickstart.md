@@ -5,6 +5,9 @@
 서로 다른 phase offset으로 동작하고, 바깥쪽 비정형 loop와 중앙 avenue를 연결한다.
 배경은 Engine 기본 도형과 프로젝트 재질로 만든 검증용 blockout이며 최종 도시 아트가 아니다.
 
+이 문서의 `MapPackage`는 **서버용 맵 데이터**를 뜻합니다. Unreal 맵에서 측정한 지면·장애물과
+도로 정보를 담습니다. Bake는 지면 정보를 파일로 저장하는 작업입니다. 일반 Play에는 다시 할 필요가 없습니다.
+
 ## 고정 identity
 
 | 항목 | 값 |
@@ -43,7 +46,7 @@ traffic JSON의 `source_map_checksum`은 manifest의 collision checksum과
 9/2 당시 publisher build의 Health와 traffic v2 WebSocket smoke는 통과했다. 서버는 아래
 공통 launcher가 시작한 프로세스의 port 9000 소유권과 고유 stdout/stderr 로그를 확인한다.
 PID는 일시 상태이므로 시험 때마다 listener와 로그의 map identity를 다시 확인한다.
-사용자 PIE는 아직 대기다.
+이 기록은 당시 통신 검사이며 최신 사용자 Play 인수 결과는 아니다. 현재 남은 인수는 위 상태 문서를 따른다.
 
 Unreal 기본 시작 맵은 `L_SignalCity`다. 다른 레벨이 열리면 Content Browser에서
 `L_SignalCity`를 직접 연다. 일반 `ExternalVehiclePawn`이나 다른 맵의 exporter를 추가 배치하지
@@ -69,11 +72,9 @@ checksum gate가 조작을 거부하는 것이 정상이다.
    foreground 로그가 필요하면 `-Background`를 빼고 종료할 때 `Ctrl+C`를 누른다.
    background 실행은 출력된 PID만 `Stop-Process -Id <PID>`로 종료한다. launcher는 host
    실행 파일, runtime cfg, MapPackage payload와 `traffic_network.json`을 모두 preflight하고
-   하나라도 없으면 서버를 시작하지 않는다. 2026-09-02 실제 전환 중 발견한 PowerShell
-   multiline `if` parse 오류는 중첩 `if`로 수정했으며, 수정된 launcher로 PID 23880의 bind를
-   확인했다.
+   하나라도 없으면 서버를 시작하지 않는다. 예전 작업 기록의 PID를 재사용하지 않는다.
 3. launcher가 출력한 stdout에서 `[Map] ... id=signal_city_v2`, manifest와 일치하는
-   collision checksum, 최신 작업일지와 일치하는 traffic checksum,
+   collision checksum, 현재 `traffic_network.json`을 읽은 traffic checksum,
    `lanes=59 signal_heads=16`을 확인한다. 같은 `[Traffic]` 줄의 controller 진단은
    `id=1,cycle_seconds=116,offset_seconds=0`과
    `id=2,cycle_seconds=116,offset_seconds=14`여야 한다.
@@ -86,8 +87,12 @@ checksum gate가 조작을 거부하는 것이 정상이다.
    PlaySession으로 연결해 출발점에서 다시 시작한다. `F3`는 차량 collision/contact 디버그
    오버레이, `R`은 권한 snapshot CSV 기록, `F6`는 마지막 CSV의 collision-free 시각 ghost
    재생이다.
+   `G`는 부품 조합 화면, `Tab`은 개별 부품 편집 전환이다. `↑/↓`로 항목, `←/→`로 부품을
+   고르고 정차 후 `Enter`로 적용한다. 적용 시 새 PlaySession으로 초기화하며 `G`로 닫거나
+   `Tab`으로 편집 모드를 나가면 미적용 초안은 버린다. 현재 편집 기준은 세단 조합 2종이며,
+   자세한 호환 조건은 [개별 부품 선택](../architecture.md#개별-부품-선택)을 따른다.
 6. 새 Play에서는 차량·simulation clock·신호가 reset된다. 같은 PlaySession의 일시적
-   socket reconnect는 simulation time을 되감지 않는다.
+   socket reconnect는 simulation time을 되감지 않고 적용 중인 부품 조합을 유지한다.
 
 PowerShell execution policy 때문에 launcher를 사용할 수 없으면 전역 정책을 바꾸지 말고
 같은 config를 직접 지정한다.
@@ -149,6 +154,8 @@ version 2의 controller·phase·wire 검증 계약은
 
 ## 빌드와 생성 순서
 
+![Unreal 맵 저장, Ground Bake, Traffic export, 검증, 서버 적용의 순서](../images/map-pipeline.svg)
+
 Editor commandlet을 사용하기 전에 Unreal Editor target과 host를 빌드한다.
 
 ```powershell
@@ -190,6 +197,8 @@ cmake --build 'B:\Portfolio\Drive_Integration\cpp\host\build' `
 `unreal/DriveIntegration/Saved/Backups/SignalCityTraffic-20260903-181259-460BE41D`,
 보도 대기점·정지선 보정 전 백업은
 `unreal/DriveIntegration/Saved/Backups/SignalCityTraffic-20260903-183949-6E097719`다.
+이 두 과거 백업은 폴더 정리 후 [외부 보관 폴더](../README.md#이전-자료)의 `project_cleanup/` 아래
+같은 상대 경로로 옮겼다. 새 migration 백업은 계속 현재 프로젝트의 `Saved/Backups/`에 생성된다.
 갱신 후에는 아래 `-UpdateExisting` traffic export를 이어서 실행해야 한다.
 
 collector 전환부는 저장된 생성 버전에 맞는 원본과 비교한 뒤 백업·갱신한다. 수동으로

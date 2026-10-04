@@ -32,6 +32,10 @@ add_executable(simcore_vehicle_catalog src/vehicle_catalog/catalog_main.cpp)
 target_link_libraries(simcore_vehicle_catalog PRIVATE simcore_vehicle_catalog_core simcore_runtime_vehicle_catalog)
 
 add_library(simcore_protocol
+    src/terrain/ground_query_shadow.cpp
+    src/terrain/live_ground_patch.cpp
+    src/terrain/live_obstacle_snapshot.cpp
+    src/terrain/live_npc_ground.cpp
     src/protocol/vehicle_message_decoder.cpp
     src/protocol/vehicle_messages.cpp
 )
@@ -51,6 +55,7 @@ target_include_directories(simcore_protocol PUBLIC
 
 target_link_libraries(simcore_protocol PUBLIC
     protobuf::libprotobuf
+    simcore_collision
 )
 
 add_library(simcore_collision
@@ -135,6 +140,7 @@ add_library(simcore_host_core
     src/simulation_host.cpp
     src/simulation_host_npc.cpp
     src/simulation_host_session.cpp
+    src/simulation_host_ground_shadow.cpp
 )
 
 target_include_directories(simcore_host_core PUBLIC
@@ -175,6 +181,24 @@ endif()
 include(CTest)
 
 if(BUILD_TESTING)
+    add_executable(ground_query_shadow_tests tests/ground_query_shadow_test.cpp)
+    add_executable(live_ground_patch_tests tests/live_ground_patch_test.cpp)
+    add_executable(live_world_protocol_tests tests/live_world_protocol_test.cpp)
+    target_link_libraries(live_world_protocol_tests PRIVATE simcore_host_core)
+    add_test(NAME live_world_protocol_tests COMMAND live_world_protocol_tests)
+    add_executable(live_npc_ground_tests tests/live_npc_ground_test.cpp)
+    target_link_libraries(live_npc_ground_tests PRIVATE simcore_protocol simcore_traffic)
+    add_test(NAME live_npc_ground_tests COMMAND live_npc_ground_tests)
+    add_executable(live_npc_ground_host_tests tests/live_npc_ground_host_test.cpp)
+    target_link_libraries(live_npc_ground_host_tests PRIVATE simcore_host_core)
+    add_test(NAME live_npc_ground_host_tests COMMAND live_npc_ground_host_tests)
+    add_executable(live_obstacle_snapshot_tests tests/live_obstacle_snapshot_test.cpp)
+    target_link_libraries(live_obstacle_snapshot_tests PRIVATE simcore_protocol)
+    add_test(NAME live_obstacle_snapshot_tests COMMAND live_obstacle_snapshot_tests)
+    target_link_libraries(live_ground_patch_tests PRIVATE simcore_host_core simcore_runtime_options)
+    add_test(NAME live_ground_patch_tests COMMAND live_ground_patch_tests)
+    target_link_libraries(ground_query_shadow_tests PRIVATE simcore_host_core simcore_runtime_options)
+    add_test(NAME ground_query_shadow_tests COMMAND ground_query_shadow_tests)
     add_executable(runtime_vehicle_catalog_tests tests/runtime_vehicle_catalog_test.cpp)
     target_link_libraries(runtime_vehicle_catalog_tests PRIVATE simcore_runtime_vehicle_catalog)
     target_compile_definitions(runtime_vehicle_catalog_tests PRIVATE

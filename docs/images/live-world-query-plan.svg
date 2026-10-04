@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="640" viewBox="0 0 960 640" role="img" aria-labelledby="title desc">
+  <title id="title">Planned live world queries</title>
+  <desc id="desc">Experimental live player ground, supported box obstacles, and NPC ground. World revision invalidates old measurements. Default startup and traffic metadata remain file-based.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#50677c"/></marker></defs>
+  <rect width="960" height="640" rx="16" fill="#f8fafc"/>
+  <g font-family="'Segoe UI','Malgun Gothic',sans-serif">
+    <text x="32" y="48" font-size="30" fill="#172d43" font-weight="700">Live world queries</text>
+    <text x="32" y="80" font-size="19" fill="#9b6200">EXPERIMENTAL — player ground, box obstacles, NPC ground, measured replay</text>
+    <rect x="32" y="118" width="280" height="338" rx="14" fill="#edf3ff" stroke="#2563eb" stroke-width="1.5"/>
+    <text x="52" y="157" font-size="25" fill="#2563eb" font-weight="700">Unreal Engine</text>
+    <text x="52" y="198" font-size="20" fill="#172d43">Measure the live world</text>
+    <text x="52" y="233" font-size="18" fill="#50677c">Ground and obstacles</text>
+    <text x="52" y="263" font-size="18" fill="#50677c">Trace at requested poses</text>
+    <text x="52" y="330" font-size="20" fill="#172d43">Show server results</text>
+    <text x="52" y="365" font-size="18" fill="#50677c">Vehicles, people, effects</text>
+    <text x="52" y="420" font-size="18" fill="#50677c">Invalidate on world change</text>
+    <rect x="648" y="118" width="280" height="338" rx="14" fill="#e7f6f3" stroke="#087d77" stroke-width="1.5"/>
+    <text x="668" y="157" font-size="25" fill="#087d77" font-weight="700">C++ SimCore</text>
+    <text x="668" y="198" font-size="20" fill="#172d43">Request and validate</text>
+    <text x="668" y="233" font-size="18" fill="#50677c">Session, pose, age, area</text>
+    <text x="668" y="263" font-size="18" fill="#50677c">Use a valid result batch</text>
+    <text x="668" y="330" font-size="20" fill="#172d43">Compute motion</text>
+    <text x="668" y="365" font-size="18" fill="#50677c">Forces and impact response</text>
+    <text x="668" y="420" font-size="18" fill="#50677c">Own the final vehicle state</text>
+    <path d="M 648 215 H 312" stroke="#50677c" stroke-width="2.5" marker-end="url(#arrow)"/>
+    <text x="480" y="191" text-anchor="middle" font-size="20" fill="#172d43">1. Query batch</text>
+    <path d="M 312 297 H 648" stroke="#50677c" stroke-width="2.5" marker-end="url(#arrow)"/>
+    <text x="480" y="274" text-anchor="middle" font-size="20" fill="#172d43">2. Measured contacts</text>
+    <path d="M 648 389 H 312" stroke="#50677c" stroke-width="2.5" marker-end="url(#arrow)"/>
+    <text x="480" y="366" text-anchor="middle" font-size="20" fill="#172d43">3. Simulation state</text>
+    <rect x="32" y="485" width="896" height="121" rx="14" fill="#fff6e6" stroke="#d99a28" stroke-width="1.5"/>
+    <text x="52" y="519" font-size="21" fill="#9b6200" font-weight="700">No network wait inside a physics step</text>
+    <text x="52" y="552" font-size="19" fill="#50677c">If results are missing or invalid, hold affected motion and keep the connection alive.</text>
+    <text x="52" y="581" font-size="19" fill="#50677c">Saved startup data, NPC obstacles and structure damage still remain.</text>
+  </g>
+</svg>

@@ -38,6 +38,10 @@ struct RuntimeOptions {
     std::chrono::nanoseconds hard_command_timeout{1'000'000'000};
     std::string source_id = "simcore-cpp-host";
     bool demo_entities = false;
+    bool live_ground = false; // CLI-only experimental Ego input
+    bool live_obstacles = false; // requires live ground; local measured static boxes
+    bool live_npc_ground = false; // shared revision-leased ground tiles for traffic
+    bool ground_query_shadow = false; // CLI-only diagnostic; does not replace baked physics
     // CLI-only capture/verification: never silently enabled by a runtime cfg.
     std::optional<std::filesystem::path> record_physics_path;
     std::optional<std::filesystem::path> verify_physics_replay_path;

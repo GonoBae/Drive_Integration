@@ -233,6 +233,91 @@ message WorldState {
     repeated TrafficSignalState traffic_signals = 3;
     string traffic_network_checksum = 4;
     repeated StructureState structures = 5;
+    // Opt-in ground-query-shadow.v1/v2. Repeated until answered/expired.
+    // Diagnostic only: these contacts never drive physics in this version.
+    GroundQueryBatch ground_query_shadow = 6;
+    // Experimental ground-patch.v2: one origin, depth 32m. Expand into a
+    // 25x25 XY lattice using patch_step_enu, centred on the origin, X first.
+    // Unlike shadow probes, this measured single-layer patch drives Ego physics.
+    GroundQueryBatch live_ground_patch = 7;
+    WorldObstacleRequest world_obstacles = 8;
+    GroundQueryBatch npc_ground_tile = 9; // npc-ground.v1, one shared static tile at a time
+}
+
+message GroundQueryBatch {
+    uint64 request_id = 1;
+    uint64 environment_epoch = 2;
+    uint64 reference_simulation_time_ns = 3;
+    uint32 entity_id = 4;
+    repeated Vector3d origins_enu = 5; // meters; v1: 1..5, v2: 1..64 ordered probes
+    double max_distance_m = 6; // vertically downward, (0,20]
+    // ground-query-shadow.v2 only. 1..64 solver query origins with matching
+    // depths in (0,32]; max_distance_m must be zero. Still diagnostic, not physics.
+    repeated double query_distances_m = 7 [packed = false];
+    // ground-patch.v2 only: XY grid spacings in [0.5,2] metres, zero Z.
+    // Required for live patches; diagnostic shadow batches omit this field.
+    Vector3d patch_step_enu = 8;
+    uint64 world_revision = 9; // ground-patch.v3; zero requests the initial world notice
+}
+
+message GroundProbeResult {
+    enum Status { UNSPECIFIED = 0; NO_HIT = 1; HIT = 2; FAILED = 3; }
+    Status status = 1;
+    Vector3d point_enu = 2;
+    Vector3d normal_enu = 3;
+    uint32 surface_material_id = 4; // append-only GroundSurfaceMaterialId
+}
+
+// ground-patch.v2 only. At most 128 unique row-major 24x24 cell indices.
+// The point locates the measured cliff; the horizontal unit normal points
+// from the high surface toward the low surface (normal Z is zero).
+message GroundCellBoundary {
+    uint32 cell_index = 1; // [0,575]
+    Vector3d point_enu = 2;
+    Vector3d normal_enu = 3;
+}
+
+message GroundQueryResult {
+    uint64 request_id = 1;
+    uint64 environment_epoch = 2;
+    uint64 reference_simulation_time_ns = 3;
+    repeated GroundProbeResult probes = 4; // same order/count as the request
+    double measurement_duration_ms = 5; // local elapsed time, not cross-clock age
+    repeated GroundCellBoundary boundaries = 6; // live result only, never diagnostic
+    uint64 world_revision = 7; // nonzero live revision; omitted in diagnostics
+}
+
+message GroundWorldRevision {
+    uint64 world_revision = 1;
+    bool measurements_ready = 2;
+}
+
+message WorldObstacleRequest {
+    uint64 request_id = 1;
+    uint64 environment_epoch = 2;
+    uint64 reference_simulation_time_ns = 3;
+    uint64 world_revision = 4;
+    Vector3d centre_enu = 5;
+    Vector3d half_extent_enu = 6;
+}
+
+message WorldStaticBox {
+    string collider_id = 1;
+    uint32 semantic = 2; // 0 wall, 1 curb, 2 barrier
+    Vector3d centre_enu = 3;
+    double heading_rad = 4;
+    Vector3d half_extent_enu = 5; // x length, y width, z height
+    double friction = 6;
+    double restitution = 7;
+}
+
+message WorldObstacleResult {
+    uint64 request_id = 1;
+    uint64 environment_epoch = 2;
+    uint64 reference_simulation_time_ns = 3;
+    uint64 world_revision = 4;
+    uint32 status = 5; // 1 complete (including empty), 2 unsupported, 3 overflow
+    repeated WorldStaticBox colliders = 6; // at most 128, empty on incomplete status
 }
 
 message ControlCommand {
@@ -293,5 +378,10 @@ message Envelope {
         WorldState world_state = 12;
         Health health = 13;
         SimulationReset simulation_reset = 14;
+        GroundQueryResult ground_query_result = 15;
+        GroundQueryResult live_ground_patch_result = 16; // 625 probes, at most 128 boundaries
+        GroundWorldRevision ground_world_revision = 17;
+        WorldObstacleResult world_obstacle_result = 18;
+        GroundQueryResult npc_ground_tile_result = 19;
     }
 }

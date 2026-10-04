@@ -23,7 +23,8 @@ public:
         std::filesystem::path map_package_path,
         ReadyCallback on_ready,
         std::chrono::milliseconds poll_interval =
-            std::chrono::milliseconds(250));
+            std::chrono::milliseconds(250),
+        TrafficGroundValidation ground_validation = TrafficGroundValidation::ValidateImmediately);
     ~TrafficNetworkHotReloader();
 
     TrafficNetworkHotReloader(const TrafficNetworkHotReloader&) = delete;
@@ -40,6 +41,7 @@ private:
     std::filesystem::path map_package_path_;
     ReadyCallback on_ready_;
     std::chrono::milliseconds poll_interval_;
+    TrafficGroundValidation ground_validation_;
     std::jthread worker_;
 };
 

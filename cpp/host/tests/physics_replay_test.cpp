@@ -1,6 +1,7 @@
 #include "replay/physics_replay.hpp"
 #include "runtime_options.hpp"
 #include "simulation_host.hpp"
+#include "terrain/live_ground_patch.hpp"
 #include "vehicle.pb.h"
 
 #include <boost/asio/io_context.hpp>
@@ -497,6 +498,198 @@ void test_custom_parts_replay(const std::filesystem::path& directory)
     write_file(wrong_path, resign_recording(bytes));
     rejects([&] { verify_physics_replay(wrong_path, wrong_identity, {}, {}, {}, nullptr); });
 }
+
+class ScriptedMeasuredGround final : public simcore_host::GroundQuery {
+public:
+    mutable std::size_t calls = 0;
+    std::size_t unavailable_at = 0;
+    bool no_hit = false;
+    double height = .35;
+    double slope = .12;
+    std::optional<simcore_host::GroundHit> query_down(const simcore_host::GroundQueryRequest& request) const override
+    {
+        if (++calls == unavailable_at) throw simcore_host::GroundMeasurementUnavailable{};
+        if (no_hit) return std::nullopt;
+        const double z = height + slope * request.origin_enu.north_m;
+        const double distance = request.origin_enu.up_m - z;
+        if (distance < 0 || distance > request.max_distance_m) return std::nullopt;
+        const double norm = std::hypot(1., slope);
+        return simcore_host::GroundHit{{request.origin_enu.east_m, request.origin_enu.north_m, z},
+            {0, -slope / norm, 1. / norm}, distance, simcore_host::GroundSurfaceMaterialId::LowFriction, .35};
+    }
+};
+
+class ForbiddenGround final : public simcore_host::GroundQuery {
+public:
+    std::optional<simcore_host::GroundHit> query_down(const simcore_host::GroundQueryRequest&) const override
+    {
+        throw std::runtime_error("measured replay consulted file terrain");
+    }
+};
+
+void test_measured_ground_replay(const std::filesystem::path& directory)
+{
+    using namespace simcore_host;
+    PhysicsReplayIdentity identity{"test-build", "test-vehicle", "test-map", 0, 0, 0, 0, 60, true};
+    const auto path = directory / "measured-ground.replay";
+    PhysicsReplayRecorder recorder(path, identity, 120);
+    VehiclePhysics physics(0, 0, 0, 0);
+    auto source = std::make_shared<ScriptedMeasuredGround>();
+    auto measured = std::make_shared<MeasuredGroundQueryRecorder>(source);
+    std::uint64_t waits = 0, query_count = 0;
+    bool initialize = true, saw_caught_unavailable = false, saw_no_hit = false, saw_static_contact = false;
+    for (int tick = 0; tick < 120; ++tick) {
+        if (tick == 50) {
+            physics.replace_parameters(default_runtime_vehicle_catalog().player_parameters({}, RuntimeVehicleClass::Truck));
+            recorder.event(PhysicsReplayEvent::Reset, RuntimeVehicleClass::Truck);
+            initialize = true;
+            source->height = .65;
+            source->slope = -.08;
+        }
+        VehicleInput input;
+        input.throttle = .6f;
+        input.steering = tick > 30 ? .03f : 0.f;
+        physics.set_input(input);
+        std::vector<KinematicCollisionProxy> proxies;
+        if (tick == 45) {
+            KinematicCollisionProxy proxy{"fallen-object", ObbPrism{{40, 40}, .1, 0, 1.0, .1, .1}, {}, 0,
+                {.65, .05}, 180, 230, 60};
+            proxy.tire_support_candidate = true;
+            proxies.push_back(proxy);
+        }
+        PhysicsReplayGroundFrame frame;
+        frame.attempted = tick != 0 && tick != 90;
+        frame.initialize = initialize;
+        frame.environment_epoch = tick < 50 ? 1 : 2;
+        frame.world_revision = tick < 50 ? 10 : 11;
+        frame.collision_coverage_valid = tick != 35;
+        if (tick >= 60 && tick < 75) {
+            const auto pose = physics.get_state();
+            frame.static_colliders.push_back({"measured-wall", StaticColliderSemantic::Wall,
+                {{pose.position_enu.x, pose.position_enu.y + pose.collision_half_length_m},
+                    pose.position_enu.z, 0, .2, 10, 2}, {.8, .03}});
+        }
+        source->calls = 0;
+        source->unavailable_at = (tick == 1 || tick == 51) ? 5 : tick == 25 ? 10 : tick == 45 ? 1 : 0;
+        source->no_hit = tick == 40;
+        measured->begin_frame();
+        if (frame.attempted) {
+            frame.accepted = physics.try_update_with_ground(1. / 60, proxies, measured, initialize,
+                std::make_shared<CollisionWorld>(frame.static_colliders),
+                [&](const VehicleState&) {
+                    if (!frame.collision_coverage_valid) throw GroundMeasurementUnavailable{};
+                });
+            if (frame.accepted) initialize = false;
+        } else physics.clear_tick_contacts();
+        frame.samples = measured->samples();
+        saw_static_contact |= !physics.get_last_collision_contacts().empty();
+        for (const auto& sample : frame.samples) {
+            saw_no_hit |= sample.outcome == GroundReplayOutcome::NoHit;
+            saw_caught_unavailable |= frame.accepted && sample.outcome == GroundReplayOutcome::Unavailable;
+        }
+        waits += !frame.accepted;
+        query_count += frame.samples.size();
+        recorder.tick_measured(input, proxies, physics.get_state(), frame);
+    }
+    require(waits == 6 && saw_caught_unavailable && saw_no_hit && saw_static_contact,
+        "fixture must include initialization/late rollback, skipped ticks, normal misses and caught unavailability");
+    require(recorder.complete() && recorder.measured_ground(), "measured replay did not finish");
+    auto wrong_collision = std::make_shared<CollisionWorld>(std::vector<StaticObbCollider>{
+        {"must-ignore", StaticColliderSemantic::Barrier, {{0, 0}, 1, 0, 100, 100, 3}, {.8, 0}}});
+    const auto result = verify_physics_replay(path, identity, {}, std::make_shared<ForbiddenGround>(), wrong_collision);
+    require(result.frames == 120 && result.measured_ground_frames == 120
+        && result.measured_ground_waits == waits && result.measured_ground_queries == query_count
+        && result.resets == 1 && result.maximum_position_error_m == 0 && result.maximum_yaw_error_deg == 0,
+        "live query replay must reproduce every accepted and skipped state without file ground");
+
+    auto file_identity = identity;
+    file_identity.measured_ground = false;
+    rejects([&] { verify_physics_replay(path, file_identity, {}, {}, {}); });
+    const auto original = read_file(path);
+    int corrupt_index = 0;
+    const auto corrupt = [&](std::string bytes) {
+        const auto changed_path = directory / ("measured-corrupt-" + std::to_string(corrupt_index++) + ".replay");
+        write_file(changed_path, resign_recording(bytes));
+        rejects([&] { verify_physics_replay(changed_path, identity, {}, {}, {}); });
+    };
+    auto changed = original;
+    auto begin = changed.find("QUERY ");
+    require(begin != std::string::npos, "measured query fixture missing");
+    auto end = changed.find('\n', begin);
+    changed.insert(end + 1, changed.substr(begin, end - begin + 1));
+    corrupt(changed);
+    changed = original;
+    begin = changed.find("QUERY ") + 6;
+    changed.replace(begin, changed.find(' ', begin) - begin, "999");
+    corrupt(changed);
+    changed = original;
+    begin = changed.find("UNAVAILABLE");
+    require(begin != std::string::npos, "unavailable fixture missing");
+    changed.replace(begin, 11, "NO_HIT");
+    corrupt(changed);
+    changed = original;
+    changed.replace(changed.find("GROUND 0 1 0 1 10 0"), std::string("GROUND 0 1 0 1 10 0").size(),
+        "GROUND 0 1 1 1 10 0");
+    corrupt(changed);
+    changed = original;
+    begin = changed.find("GROUND 1 1 0 1 10 ");
+    require(begin != std::string::npos, "failed initialization fixture missing");
+    auto count_begin = begin + std::string("GROUND 1 1 0 1 10 ").size();
+    changed.replace(count_begin, changed.find('\n', count_begin) - count_begin, "8193 0 1");
+    corrupt(changed);
+    changed = original;
+    begin = changed.find("STATIC measured-wall 0");
+    require(begin != std::string::npos, "static collision snapshot missing");
+    changed.replace(begin, std::string("STATIC measured-wall 0").size(), "STATIC measured-wall 7");
+    corrupt(changed);
+    changed = original;
+    begin = changed.find("GROUND 0 1 0 1 10 0 0");
+    require(begin != std::string::npos, "empty initial frame missing");
+    changed.replace(begin, std::string("GROUND 0 1 0 1 10 0 0").size(), "GROUND 0 1 0 1 10 0 4097");
+    corrupt(changed);
+    changed = original;
+    begin = changed.find("GROUND 1 0 0 1 10 ", changed.find("TICK 35 "));
+    require(begin != std::string::npos, "post-step rejection fixture missing");
+    end = changed.find('\n', begin);
+    changed[end - 1] = '1';
+    corrupt(changed);
+    corrupt(original.substr(0, original.rfind("END ")));
+    changed = original;
+    begin = changed.find(" HIT ") + 5;
+    require(begin >= 5, "measured hit fixture missing");
+    changed.replace(begin, changed.find(' ', begin) - begin, "nan");
+    corrupt(changed);
+}
+
+void test_measured_ground_bounds(const std::filesystem::path& directory)
+{
+    using namespace simcore_host;
+    auto source = std::make_shared<FlatGroundQuery>();
+    MeasuredGroundQueryRecorder captured(source);
+    for (std::size_t index = 0; index < MeasuredGroundQueryRecorder::kMaximumQueriesPerFrame; ++index)
+        (void)captured.query_down({{0, 0, 4}, 10});
+    rejects([&] { (void)captured.query_down({{0, 0, 4}, 10}); });
+    captured.begin_frame();
+    require(captured.samples().empty(), "frame reset must clear previous solver calls");
+    PhysicsReplayIdentity identity{"build", "vehicle", "map", 0, 0, 0, 0, 60, true};
+    const auto limited_path = directory / "limited-measured.replay";
+    PhysicsReplayRecorder recorder(limited_path, identity, 100, 4096);
+    VehiclePhysics physics(0, 0, 0, 0);
+    PhysicsReplayGroundFrame frame;
+    frame.attempted = frame.accepted = true;
+    frame.environment_epoch = 1;
+    frame.world_revision = 1;
+    for (int index = 0; index < 100; ++index) (void)captured.query_down({{0, 0, 4}, 10});
+    frame.samples = captured.samples();
+    rejects([&] { recorder.tick({}, {}, physics.get_state()); });
+    rejects([&] { recorder.tick_measured({}, {}, physics.get_state(), frame); });
+    require(!recorder.valid() && std::filesystem::file_size(limited_path) <= 4096,
+        "measured recording must invalidate before byte bound");
+    rejects([&] { verify_physics_replay(limited_path, identity, {}, {}, {}); });
+    identity.measured_ground = false;
+    PhysicsReplayRecorder old_recorder(directory / "wrong-mode.replay", identity, 1);
+    rejects([&] { old_recorder.tick_measured({}, {}, physics.get_state(), frame); });
+}
 } // namespace
 
 int main()
@@ -509,6 +702,8 @@ int main()
         test_explicit_runtime_catalog_replay(scratch.path);
         test_named_loadout_replay(scratch.path);
         test_custom_parts_replay(scratch.path);
+        test_measured_ground_replay(scratch.path);
+        test_measured_ground_bounds(scratch.path);
         std::cout << "physics replay tests passed\n";
         return 0;
     } catch (const std::exception& error) {

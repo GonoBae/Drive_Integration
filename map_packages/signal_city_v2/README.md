@@ -125,6 +125,8 @@ controller cycle36·offset0/9, lane NPC route 8 lanes/578.211m를 확인한다. 
 `unreal/DriveIntegration/Saved/Backups/SignalCityTraffic-20260903-181259-460BE41D`에 있다.
 보도 대기점·정지선 추가 보정 전 백업은
 `unreal/DriveIntegration/Saved/Backups/SignalCityTraffic-20260903-183949-6E097719`다.
+두 경로는 당시 위치이며 현재는 [외부 보관 폴더](../../docs/README.md#이전-자료)의
+`project_cleanup/` 아래 같은 상대 경로에 보관한다. 새 백업은 현재 프로젝트의 `Saved/Backups/`에 생성된다.
 두 교차로 head의 위치·가독성,
 NPC 적색 정지/녹색 재출발, Ego 전체 loop, reconnect/all-red, 1920×1080 60fps와 30분
 안정성은 PIE에서 별도로 인수한다.

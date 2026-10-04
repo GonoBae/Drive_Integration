@@ -41,6 +41,11 @@ UAT 로그는 새 배포 폴더의 `build_logs/`, 생성 캐시는 저장소의 
 
 SensorRig가 직접 읽는 `Config/sensors.json`은 일반 INI와 별도로 `Windows/DriveIntegration/Config/sensors.json`에 원본 그대로 포함합니다. 빌드 규칙에서 loose runtime dependency로 지정하며, 패키징 스크립트가 누락 여부와 원본 SHA-256 일치를 확인합니다. 센서 메타데이터 설정이 패키지에서 빠진 상태로 성공 처리하지 않습니다.
 
+차종·부품·조합 파일도 `Windows/DriveIntegration/Config/VehicleCatalog/`에 포함합니다.
+서버의 배포용 `signal_city_server.cfg`는 이 공유 카탈로그를 가리키도록 경로를 바꿉니다.
+서버와 클라이언트가 별도 복사본을 읽는 구조가 아니며, 원본 대비 파일 목록·해시와 부품/조합 경로를 검사합니다.
+배포 후 한쪽 설정만 임의 변경하면 연결 체크섬이나 기록 재생 조건이 달라질 수 있습니다.
+
 ## 실행하기
 
 생성된 **폴더 전체**를 옮깁니다. `Windows/DriveIntegration.exe`만 복사하면 서버와 MapPackage가 빠집니다.
@@ -54,6 +59,7 @@ DriveIntegration-.../
 ├─ source_snapshot.json         # 미추적 파일을 포함한 빌드 입력 식별
 ├─ evidence/                    # 선택적으로 첨부한 생성 전 검사 보고서
 ├─ Windows/                     # Cook된 Unreal 게임과 실행 전제 프로그램
+│  └─ DriveIntegration/Config/  # sensors.json과 공유 VehicleCatalog/ (차종·부품·조합)
 ├─ cpp/host/build/Release/       # 서버 EXE와 app-local DLL
 ├─ cpp/host/config/              # 서버·기본 차량 설정
 ├─ map_packages/signal_city_v2/  # 지면·충돌·교통 데이터
@@ -88,12 +94,15 @@ MapPackageDirectory=map_packages/signal_city_v2
 
 ## 완료 판정
 
+![자동 검사와 별개로 실제 Play 및 최신 패키지 인수가 필요한 단계](../images/validation-gates.svg)
+
 패키지 생성 성공은 **빌드와 Cook, 파일 구성 성공**입니다. 자동으로 게임이나 서버를 켜거나 인수 테스트를 실행하지 않습니다. `package_manifest.json`에도 `assembled_unverified`, `manual_acceptance=not_run`으로 기록합니다.
 
 작업이 끝난 뒤 다음을 별도로 확인해야 합니다.
 
 - 저장소 밖의 공백 포함 경로에서 서버·클라이언트 실행 및 연결
 - 네 차종 선택, 카메라 전환, 차량·캐릭터 에셋 누락 여부
+- G/Tab 개별 부품 선택·정차 적용·재연결·기록 재생, 공유 카탈로그 일치
 - 지면·충돌·NPC·HUD·재연결·기록 재생
 - 실제 렌더링 1080p·60fps와 입력 지연, 30분 연속 주행
 
@@ -109,9 +118,11 @@ frame/state CSV·JSON을 저장합니다. `-CaptureSeconds 60`은 짧은 경로 
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test_package_windows.ps1
 ```
 
-2026-09-17에 최신 Windows 패키지를 생성하고, 저장소 밖 공백 포함 경로에서 파일95개의
+2026-09-17 당시 소스로 Windows 패키지를 생성하고, 저장소 밖 공백 포함 경로에서 파일95개의
 무결성과 NullRHI 서버 연결·지도 일치·상태 수신을 확인했습니다.
-실제 화면·주행·다른 PC 배포는 아직 인수하지 않았습니다.
+이 후보에는 이후 차량 모듈화·9/23 개별 부품 선택 변경이 포함되지 않았습니다.
+9/23까지 패키지 계획·파일 검사는 수행했지만, 그 코드 기준의 새 Cook/패키지는 아직 만들지 않았습니다.
+실제 화면·주행·다른 PC 배포도 아직 인수하지 않았습니다.
 검증 요약은 [현재 상태](../status.md)에 있습니다. 기존 배포 후보와 당시 작업일지는
 [외부 보관 폴더](../README.md#이전-자료)로 옮겼으며, 새 패키지는 위 생성 경로에 만들어집니다.
 

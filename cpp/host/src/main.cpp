@@ -218,7 +218,7 @@ int run_simcore(const simcore_host::RuntimeOptions& options,
             simcore_host::physics_replay_file_checksum(executable_path),
             vehicle_identity, map_package_checksum,
             options.origin_lat_deg, options.origin_lon_deg, options.origin_alt_m,
-            options.spawn_heading_deg, options.physics_frequency_hz};
+            options.spawn_heading_deg, options.physics_frequency_hz, options.live_ground};
         if (options.verify_physics_replay_path) {
             const auto result = simcore_host::verify_physics_replay(
                 *options.verify_physics_replay_path, replay_identity,
@@ -287,7 +287,9 @@ int run_simcore(const simcore_host::RuntimeOptions& options,
         try {
             traffic_network = std::make_shared<const simcore_host::TrafficNetwork>(
                 simcore_host::load_traffic_network(*options.traffic_network_path,
-                    map_package_checksum, *map_package.ground_query));
+                    map_package_checksum, *map_package.ground_query, options.live_npc_ground
+                        ? simcore_host::TrafficGroundValidation::DeferredLive
+                        : simcore_host::TrafficGroundValidation::ValidateImmediately));
             std::cout << "[Traffic] verified network=" << options.traffic_network_path->string()
                       << " checksum=" << traffic_network->checksum
                       << " lanes=" << traffic_network->lanes.size()
@@ -342,6 +344,10 @@ int run_simcore(const simcore_host::RuntimeOptions& options,
     host_config.npc_spacing_m = options.npc_spacing_m;
     host_config.runtime_entities = std::move(runtime_entities);
     host_config.require_client_hello = true;
+    host_config.ground_query_shadow = options.ground_query_shadow;
+    host_config.live_ground = options.live_ground;
+    host_config.live_obstacles = options.live_obstacles;
+    host_config.live_npc_ground = options.live_npc_ground;
     host_config.physics_replay = physics_replay;
     SimulationHost host(
         ioc,
@@ -393,7 +399,9 @@ int run_simcore(const simcore_host::RuntimeOptions& options,
                     std::shared_ptr<const simcore_host::TrafficNetwork>
                         candidate) {
                     host.queue_traffic_network_reload(std::move(candidate));
-                });
+                },std::chrono::milliseconds(250),options.live_npc_ground
+                    ? simcore_host::TrafficGroundValidation::DeferredLive
+                    : simcore_host::TrafficGroundValidation::ValidateImmediately);
         traffic_watcher->start();
     }
 

@@ -207,6 +207,15 @@ namespace
 	}
 }
 
+bool ClassifyDefaultSurface(const FHitResult& Hit, uint32& OutId)
+{
+	FSurfaceProfile Profile;
+	FString Error;
+	if (!ClassifySurface(Hit, FBuildRequest{}, Profile, Error)) return false;
+	OutId = static_cast<uint32>(Profile.Id);
+	return true;
+}
+
 bool Build(
 	const FBuildRequest& Request,
 	FBuildResult& OutResult,

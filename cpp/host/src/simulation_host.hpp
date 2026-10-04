@@ -8,6 +8,7 @@
 #include "runtime_collision_reaction.hpp"
 #include "vehicle_catalog/runtime_vehicle_catalog.hpp"
 #include "terrain/map_package_runtime.hpp"
+#include "terrain/live_npc_ground.hpp"
 #include "traffic/npc_horn_policy.hpp"
 #include "traffic/npc_lane_follower.hpp"
 #include "traffic/npc_vehicle_modules.hpp"
@@ -68,6 +69,10 @@ struct SimulationHostConfig {
     std::shared_ptr<simcore_host::PhysicsReplayRecorder> physics_replay;
     std::shared_ptr<const simcore_host::RuntimeVehicleCatalog> vehicle_catalog;
     bool require_vehicle_catalog_identity = false;
+    bool ground_query_shadow = false;
+    bool live_ground = false;
+    bool live_obstacles = false;
+    bool live_npc_ground = false;
 };
 
 struct SimulationHostCallbacks {
@@ -83,6 +88,9 @@ enum class ClientMessageResult {
     EmergencyStopLatched,
     SimulationReset,
     DuplicateSimulationReset,
+    GroundQueryResultAccepted,
+    GroundWorldRevisionAccepted,
+    WorldObstacleResultAccepted,
     Accepted = ControlAccepted,
 };
 
@@ -170,6 +178,9 @@ public:
         return runtime_entities_;
     }
     bool running() const { return running_; }
+    const simcore_host::GroundShadowStatistics& ground_shadow_statistics() const {
+        return ground_shadow_.statistics();
+    }
     std::vector<NpcNavigationSnapshot> npc_navigation() const;
     const std::string& map_package_checksum() const {
         return config_.map_package_checksum;
@@ -181,6 +192,33 @@ public:
     }
 
 private:
+    const simcore_host::GroundQueryBatch* prepare_ground_shadow(Clock::time_point now);
+    ClientMessageResult handle_ground_shadow(const simcore_host::ParsedGroundQueryResult& result,
+        std::uint64_t generation, Clock::time_point received_at);
+    const simcore_host::GroundQueryBatch* prepare_live_ground(Clock::time_point now);
+    ClientMessageResult handle_ground_world_revision(const simcore_host::ParsedGroundWorldRevision& revision,
+        std::uint64_t generation, Clock::time_point now);
+    ClientMessageResult handle_world_obstacles(const simcore_host::ParsedWorldObstacleResult& result,
+        std::uint64_t generation, Clock::time_point now);
+    const simcore_host::LiveObstacleRequest* prepare_live_obstacles(Clock::time_point now);
+    const simcore_host::GroundQueryBatch* prepare_live_npc_ground(Clock::time_point now);
+    std::shared_ptr<const simcore_host::GroundQuery> npc_ground_query() const {
+        return config_.live_npc_ground ? live_npc_ground_ : config_.ground_query;
+    }
+    bool initialize_live_npc_ground_entities();
+    void validate_live_npc_ground_after_collision() const;
+    std::shared_ptr<simcore_host::LiveNpcGround> live_npc_ground_ = std::make_shared<simcore_host::LiveNpcGround>();
+    bool live_npc_initialization_pending_ = true;
+    std::shared_ptr<simcore_host::LiveObstacleSnapshot> live_obstacles_ = std::make_shared<simcore_host::LiveObstacleSnapshot>();
+    std::string live_waiting_reason_ = "initial_measurement";
+    bool live_ground_session_ready() const;
+    std::shared_ptr<simcore_host::LiveGroundPatch> live_ground_ = std::make_shared<simcore_host::LiveGroundPatch>();
+    std::shared_ptr<simcore_host::MeasuredGroundQueryRecorder> live_ground_recording_;
+    bool live_ground_reset_pending_ = true, live_ground_waiting_ = true;
+    std::uint64_t live_ground_steps_ = 0, live_ground_waits_ = 0;
+    Clock::time_point last_live_ground_log_{};
+    simcore_host::GroundQueryShadow ground_shadow_;
+    Clock::time_point last_shadow_log_{};
     void apply_vehicle_input(const VehicleInput& input)
     {
         applied_input_ = input;
@@ -257,6 +295,7 @@ private:
     SimulationHostConfig config_;
     VehicleParameters base_vehicle_parameters_;
     SimulationHostCallbacks callbacks_;
+    std::shared_ptr<simcore_host::CapturingGroundQuery> ground_capture_;
     VehiclePhysics physics_;
     SimulationClock simulation_clock_;
     ControlLease control_lease_;
@@ -334,6 +373,7 @@ private:
         std::vector<std::uint32_t> lane_change_route;
     };
     struct PedestrianRuntime {
+        bool spawn_no_ground_reported = false;
         std::uint32_t entity_id = 0;
         std::uint32_t controller_id = 0;
         std::uint32_t group_id = 0;
@@ -358,6 +398,9 @@ private:
         Hello,
         ControlCommand,
         SimulationReset,
+        GroundQueryResult,
+        GroundWorldRevision,
+        WorldObstacleResult,
     };
     struct HelloConnectionState {
         std::string source_id;
@@ -372,6 +415,9 @@ private:
         std::string last_payload_fingerprint;
         bool supports_vehicle_loadout = false;
         bool supports_vehicle_parts = false;
+        bool supports_ground_shadow = false;
+        bool supports_ground_capture = false;
+        bool supports_live_ground = false;
     };
     // The transport generation alone is not an application identity. Bind the
     // accepted Hello identity and global envelope ordering to that generation

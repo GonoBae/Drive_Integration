@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="560" viewBox="0 0 960 560" role="img" aria-labelledby="title desc">
+<title id="title">같은 차도 부품을 바꾸면 다르게 움직입니다</title><desc id="desc">부품 위치 설명 그림 · 실제 게임의 차체 모양이나 치수는 아닙니다</desc>
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#50677c"/></marker></defs>
+<rect width="960" height="560" rx="16" fill="#f8fafc"/>
+<g font-family="'Malgun Gothic','Noto Sans KR','Apple SD Gothic Neo',sans-serif">
+<text x="32" y="48" font-size="30" fill="#172d43" font-weight="700" text-anchor="start">같은 차도 부품을 바꾸면 다르게 움직입니다</text><text x="32" y="81" font-size="18" fill="#50677c" font-weight="400" text-anchor="start">부품 위치 설명 그림 · 실제 게임의 차체 모양이나 치수는 아닙니다</text>
+<path d="M 211 218 L 245 194 L 347 189 L 390 138 L 533 138 L 599 192 L 727 213 L 745 235 L 739 265 H 209 Z" fill="#d8e8ff" stroke="#2563eb" stroke-width="3"/>
+<path d="M 368 187 L 404 152 H 457 V 187 Z M 472 152 H 526 L 570 187 H 472 Z" fill="#fff" stroke="#2563eb" stroke-width="2"/>
+<path d="M 233 256 H 724" stroke="#172d43" stroke-width="9"/>
+<rect x="620" y="209" width="68" height="33" rx="6" fill="#087d77"/>
+<path d="M 315 196 V 204 L 301 211 L 329 218 L 301 225 L 329 232 L 315 239 V 256 M 666 196 V 204 L 652 211 L 680 218 L 652 225 L 680 232 L 666 239 V 256" fill="none" stroke="#a9650a" stroke-width="3"/>
+<circle cx="315" cy="273" r="37" fill="#172d43"/><circle cx="315" cy="273" r="22" fill="#d7e1ea"/><circle cx="666" cy="273" r="37" fill="#172d43"/><circle cx="666" cy="273" r="22" fill="#d7e1ea"/>
+<path d="M 154 313 H 808" stroke="#94a9bc" stroke-width="3"/>
+<path d="M 791 222 H 842 L 832 214 M 842 222 L 832 230" fill="none" stroke="#50677c" stroke-width="2"/><text x="792" y="200" font-size="18" fill="#50677c">전방</text>
+<g fill="#fff" stroke="#087d77" stroke-width="2"><circle cx="704" cy="204" r="19"/><circle cx="716" cy="289" r="19"/><circle cx="269" cy="210" r="19"/></g>
+<g fill="#087d77" font-size="21" text-anchor="middle" font-weight="700"><text x="704" y="211">1</text><text x="716" y="296">2</text><text x="269" y="217">3</text></g>
+<g fill="#e7f6f3" stroke="#087d77" stroke-width="1.5"><rect x="32" y="350" width="286" height="125" rx="14"/><rect x="337" y="350" width="286" height="125" rx="14"/><rect x="642" y="350" width="286" height="125" rx="14"/></g>
+<g fill="#087d77" font-size="24" font-weight="700"><text x="52" y="387">1  엔진 · 동력계</text><text x="357" y="387">2  앞 / 뒤 타이어</text><text x="662" y="387">3  서스펜션</text></g>
+<g fill="#50677c" font-size="19"><text x="52" y="425">토크 · 기어비 · 구동축</text><text x="52" y="454">연료탱크 · 소비량</text><text x="357" y="425">반지름 · 마찰 · 강성</text><text x="357" y="454">구동력 · 제동력 · 접지</text><text x="662" y="425">스프링 · 댐퍼 · 가동 범위</text><text x="662" y="454">플레이어의 접지 · 자세</text></g>
+<text x="32" y="512" font-size="19" fill="#172d43">현재 세단 부품 조합 2개를 제공합니다. 같은 차종 NPC도 구동력·타이어 마찰에 반영합니다.</text>
+<text x="32" y="542" font-size="19" fill="#a9650a">부품 교체 후 총무게를 다시 계산하거나 NPC 바퀴별 서스펜션 진동을 계산하지는 않습니다.</text>
+</g></svg>

@@ -3,6 +3,10 @@
 Unreal Editor에서 만든 Landscape와 정적 지면 충돌을 로컬 물리 시험에 사용하는 개발용
 MapPackage다.
 
+현재 기본 Play 맵은 `signal_city_v2`이며 이 패키지는 Landscape 회귀용으로 유지한다.
+아래 날짜별 검사·PID는 당시 이력이지 현재 서버 상태가 아니다. 최신 구현·검증 결과는
+[현재 상태](../../docs/status.md), 실행 맵 선택은 [패키지 목록](../README.md)을 따른다.
+
 현재 tracked package collision contract:
 
 - `manifest.cfg`: `ground_surface.csv,ground_heightfield.bin,static_colliders.csv`를 선언하고
@@ -115,7 +119,7 @@ source의 UE 5.6 `DriveIntegrationEditor` build도 `UBT Result: Succeeded`로 �
 `ground_max_candidates=8`, `static_colliders=0`이었다. 시작 확인 때 stderr는 0 bytes였고
 연결 프로브 종료 뒤에는 정상 close 진단 한 줄만 추가됐다. PID는 이후 실행에서도 유지된다는
 계약이 아니다. 그 뒤의 bbox/span smoke도 정상 종료까지 확인했다. 이 문단의 프로세스
-상태는 historical 기록이며 현재 인계 상태는 아래 최신 절을 따른다.
+상태는 historical 기록이며 8/28 당시 후속 결과는 아래 절에 남긴다.
 
 위 2026-08-27 항목은 당시 좁은 package에 대한 historical 기록이다. 2026-08-28에는
 full-bounds Bake와 확대 package 자동 hot reload smoke를 완료했다. 실제 PIE 경사·조향·
@@ -140,7 +144,7 @@ runtime smoke도 통과했다. 로그는 후보 검증과 tick-boundary 적용�
 비어 있었다. 이 결과는 자동 package 교체와 유한 경계 안전성을 검증한 것이며, 확대된
 Landscape의 실제 PIE 조향·경사 주행과 authored wall collision은 아직 수동 확인 대상이다.
 
-## 2026-08-28 현재 인계 상태
+## 2026-08-28 인계 이력
 
 Unreal-owned 100cm `SIMGHF1` payload를 실제 Bake해 257,556 samples/256,542 cells와
 checksum `fnv1a64:b8b0a6ccd89614de`를 확정했고, 같은 PID의 C++ host가 재시작 없이
@@ -149,8 +153,8 @@ checksum `fnv1a64:b8b0a6ccd89614de`를 확정했고, 같은 PID의 C++ host가 �
 payload와 노면별 체감을 확인한다.
 
 최종 Windows Release build, CTest 14/14, 전체 suite 20회 280/280, UE 5.6 Editor/Game
-build와 GeoTransform Automation 1/1이 통과했다. 최종 검증 서버 PID `6648`은
-`127.0.0.1:9000`에만 실행 중이고, client Hello 전 WorldState 차단·invalid Hello 1008·
-동일 sequence altered-payload 거부·정상 Reset/Control 복구 smoke를 통과했다. 현재
+build와 GeoTransform Automation 1/1이 통과했다. 당시 최종 검증 서버 PID `6648`은
+`127.0.0.1:9000`에만 실행됐으며, client Hello 전 WorldState 차단·invalid Hello 1008·
+동일 sequence altered-payload 거부·정상 Reset/Control 복구 smoke를 통과했다. 이 패키지는
 `static_colliders=0`이므로 marker Bake와 실제 PIE 경사·요철·차체 자세·벽/커브 충돌은
 완료 선언 전 수동 gate로 남는다.

@@ -460,11 +460,72 @@ std::string serialize_world_state_envelope(
     const std::vector<TrafficSignalSnapshot>& traffic_signals,
     std::string_view traffic_network_checksum,
     const std::vector<StructureDamageSnapshot>& structures,
-    RuntimeVehicleClass ego_vehicle_class)
+    RuntimeVehicleClass ego_vehicle_class,
+    const GroundQueryBatch* ground_shadow, const GroundQueryBatch* live_patch,
+    const LiveObstacleRequest* world_obstacles,const GroundQueryBatch* npc_tile)
 {
     simcore::Envelope envelope;
     fill_envelope(envelope, metadata);
     auto* world_state = envelope.mutable_world_state();
+    if (world_obstacles) {
+        auto* request=world_state->mutable_world_obstacles();
+        request->set_request_id(world_obstacles->request_id);
+        request->set_environment_epoch(world_obstacles->environment_epoch);
+        request->set_reference_simulation_time_ns(world_obstacles->reference_simulation_time_ns);
+        request->set_world_revision(world_obstacles->world_revision);
+        const auto copy=[](simcore::Vector3d* target,GroundPointEnu p) {
+            target->set_x(p.east_m); target->set_y(p.north_m); target->set_z(p.up_m);
+        };
+        copy(request->mutable_centre_enu(),world_obstacles->centre_enu);
+        copy(request->mutable_half_extent_enu(),world_obstacles->half_extent_enu);
+    }
+    if (live_patch) {
+        const auto& step = live_patch->patch_step_enu;
+        if (live_patch->origins.size() != 1
+            || !std::isfinite(step.east_m) || !std::isfinite(step.north_m)
+            || step.east_m < .5 || step.east_m > 2
+            || step.north_m < .5 || step.north_m > 2 || step.up_m != 0) {
+            throw std::invalid_argument("invalid live ground patch request");
+        }
+        auto* batch = world_state->mutable_live_ground_patch();
+        batch->set_request_id(live_patch->request_id);
+        batch->set_environment_epoch(live_patch->environment_epoch);
+        batch->set_reference_simulation_time_ns(live_patch->reference_simulation_time_ns);
+        batch->set_entity_id(1);
+        batch->set_world_revision(live_patch->world_revision);
+        batch->set_max_distance_m(0);
+        batch->add_query_distances_m(32);
+        const auto& p = live_patch->origins.at(0);
+        auto* origin = batch->add_origins_enu();
+        origin->set_x(p.east_m); origin->set_y(p.north_m); origin->set_z(p.up_m);
+        auto* wire_step = batch->mutable_patch_step_enu();
+        wire_step->set_x(step.east_m); wire_step->set_y(step.north_m); wire_step->set_z(0);
+    }
+    if (ground_shadow) {
+        auto* batch = world_state->mutable_ground_query_shadow();
+        batch->set_request_id(ground_shadow->request_id);
+        batch->set_environment_epoch(ground_shadow->environment_epoch);
+        batch->set_reference_simulation_time_ns(ground_shadow->reference_simulation_time_ns);
+        batch->set_entity_id(ground_shadow->entity_id);
+        batch->set_max_distance_m(ground_shadow->max_distance_m);
+        for (double depth : ground_shadow->query_distances_m) batch->add_query_distances_m(depth);
+        for (const auto& p : ground_shadow->origins) {
+            auto* origin = batch->add_origins_enu();
+            origin->set_x(p.east_m); origin->set_y(p.north_m); origin->set_z(p.up_m);
+        }
+    }
+    if (npc_tile) {
+        auto* batch=world_state->mutable_npc_ground_tile();
+        batch->set_request_id(npc_tile->request_id); batch->set_environment_epoch(npc_tile->environment_epoch);
+        batch->set_reference_simulation_time_ns(npc_tile->reference_simulation_time_ns);
+        batch->set_entity_id(1); batch->set_max_distance_m(0); batch->add_query_distances_m(32);
+        batch->set_world_revision(npc_tile->world_revision);
+        const auto p=npc_tile->origins.at(0);
+        batch->add_origins_enu()->set_x(p.east_m);
+        batch->mutable_origins_enu(0)->set_y(p.north_m); batch->mutable_origins_enu(0)->set_z(p.up_m);
+        batch->mutable_patch_step_enu()->set_x(npc_tile->patch_step_enu.east_m);
+        batch->mutable_patch_step_enu()->set_y(npc_tile->patch_step_enu.north_m);
+    }
     fill_entity_state(*world_state->add_entities(), state, ego_vehicle_class);
     if (!valid_vehicle_loadout_id(metadata.vehicle_loadout_id))
         throw std::invalid_argument("invalid Ego vehicle loadout ID");

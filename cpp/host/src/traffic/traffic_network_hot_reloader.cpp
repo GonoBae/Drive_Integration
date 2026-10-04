@@ -15,11 +15,12 @@ TrafficNetworkHotReloader::TrafficNetworkHotReloader(
     std::filesystem::path traffic_network_path,
     std::filesystem::path map_package_path,
     ReadyCallback on_ready,
-    std::chrono::milliseconds poll_interval)
+    std::chrono::milliseconds poll_interval, TrafficGroundValidation ground_validation)
     : traffic_network_path_(std::move(traffic_network_path))
     , map_package_path_(std::move(map_package_path))
     , on_ready_(std::move(on_ready))
     , poll_interval_(poll_interval)
+    , ground_validation_(ground_validation)
 {
 }
 
@@ -75,7 +76,7 @@ void TrafficNetworkHotReloader::run(std::stop_token stop_token)
                     load_traffic_network(
                         traffic_network_path_,
                         candidate_map.collision_checksum,
-                        *candidate_map.ground_query));
+                        *candidate_map.ground_query,ground_validation_));
                 on_ready_(std::move(candidate));
                 last_success = stamp;
                 last_error.clear();

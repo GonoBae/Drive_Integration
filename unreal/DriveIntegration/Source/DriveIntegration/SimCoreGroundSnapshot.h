@@ -4,6 +4,7 @@
 
 class AActor;
 class UWorld;
+struct FHitResult;
 
 /**
  * Unreal-owned collision measurement and serialization boundary.
@@ -13,6 +14,8 @@ class UWorld;
  */
 namespace SimCoreGroundSnapshot
 {
+	/** Default authored material mapping shared by Bake and the shadow sampler. */
+	DRIVEINTEGRATION_API bool ClassifyDefaultSurface(const FHitResult& Hit, uint32& OutId);
 	inline constexpr int64 HardMaximumSampleCount = 2000000;
 
 	/** Append-only IDs shared with C++ GroundSurfaceMaterialId. */

@@ -1,4 +1,5 @@
 #include "traffic/npc_lane_change.hpp"
+#include "terrain/live_ground_patch.hpp"
 #include "traffic/signal_approach.hpp"
 
 #include <algorithm>
@@ -108,7 +109,8 @@ std::optional<GroundPointEnu> supported(const GroundQuery& ground, const GroundP
             return std::nullopt;
         }
         return hit->point_enu;
-    } catch (...) { return std::nullopt; }
+    } catch (const GroundMeasurementUnavailable&) { throw; }
+      catch (...) { return std::nullopt; }
 }
 
 bool footprint_supported(const GroundQuery& ground, const NpcLaneSample& sample,

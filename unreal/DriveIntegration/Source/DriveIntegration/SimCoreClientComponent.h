@@ -6,6 +6,7 @@
 #include "SimCoreClientDiagnostics.h"
 #include "SimCorePerformanceCapture.h"
 #include "SimCoreProtocol.h"
+#include "SimCoreLiveGroundPatch.h"
 #include "SimCoreClientComponent.generated.h"
 
 class AActor;
@@ -132,6 +133,9 @@ public:
 	void DrawRuntimeEntityDebug() const;
 	/** Local command intent only; this is not an authoritative host acknowledgement. */
 	bool IsSideBrakeRequested() const { return PendingControl.bHandbrake; }
+	/** Call after custom in-place collision edits that do not rebuild a body setup. */
+	UFUNCTION(BlueprintCallable, Category="SimCore|World")
+	void NotifyLiveWorldChanged() { LiveGroundSampler.NotifyWorldChanged(); }
 
 protected:
 	virtual void BeginPlay() override;
@@ -157,6 +161,17 @@ private:
 	bool PrepareMapPackageIdentity();
 	void TickConnection();
 	void TickControlTransmission(float DeltaTime);
+	void TickGroundQueryShadow();
+	void TickLiveGroundPatch();
+	void TickWorldObstacles();
+	void TickNpcGroundTile();
+	SimCoreLiveGroundPatch::FSampler LiveGroundSampler;
+	SimCoreLiveGroundPatch::FSampler NpcGroundSampler;
+	uint64 LastLiveWorldRevisionSent = 0;
+	bool bLastLiveWorldReadySent = false;
+	double LastLiveWorldRevisionSendTime = 0;
+	uint64 LastWorldObstacleRequest = 0, LastWorldObstacleEpoch = 0, LastWorldObstacleRevision = 0;
+	uint64 WorldObstacleComplete = 0, WorldObstacleIncomplete = 0, WorldObstacleFailed = 0;
 	void TickTelemetry(float DeltaTime);
 	void TickDebugHud(float DeltaTime);
 	FString BuildDebugStatusText(const SimCoreClientDiagnostics::FHealthDisplay* DisplayOverride = nullptr) const;
@@ -236,6 +251,11 @@ private:
 	FString SelectedLoadoutId;
 	bool bServerSupportsLoadouts = false;
 	bool bServerSupportsParts = false;
+	bool bServerSupportsGroundShadow = false;
+	bool bServerSupportsLiveGround = false;
+	bool bServerSupportsWorldObstacles = false;
+	bool bServerSupportsNpcGround = false;
+	uint64 LastGroundShadowRequest = 0;
 	bool bServerMatchesCatalog = false;
 	bool bLoadoutPending = false;
 	double LoadoutRequestedAtSeconds = 0;

@@ -7,6 +7,76 @@ namespace SimCoreProtocol
 	inline constexpr uint32 SchemaVersion = 2;
 	inline constexpr const TCHAR* SchemaName = TEXT("simcore-envelope-v2");
 
+	struct FGroundQueryBatch
+	{
+		uint64 RequestId = 0, EnvironmentEpoch = 0, ReferenceSimulationTimeNs = 0;
+		uint64 WorldRevision = 0;
+		uint32 EntityId = 0;
+		TArray<FVector3d> OriginsEnu;
+		double MaxDistanceMeters = 0;
+		TArray<double> QueryDistancesMeters;
+		// Nonzero only for negotiated live ground-patch.v3 grids.
+		FVector3d PatchStepEnu = FVector3d::ZeroVector;
+	};
+	enum class EGroundProbeStatus : uint8 { NoHit = 1, Hit = 2, Failed = 3 };
+	struct FGroundProbeResult
+	{
+		EGroundProbeStatus Status = EGroundProbeStatus::Failed;
+		FVector3d PointEnu = FVector3d::ZeroVector;
+		FVector3d NormalEnu = FVector3d::ZeroVector;
+		uint32 SurfaceMaterialId = 0;
+	};
+	struct FGroundQueryResult
+	{
+		uint64 RequestId = 0, EnvironmentEpoch = 0, ReferenceSimulationTimeNs = 0;
+		uint64 WorldRevision = 0;
+		TArray<FGroundProbeResult> Probes;
+		double MeasurementDurationMs = 0;
+		struct FCellBoundary
+		{
+			uint32 CellIndex = 0;
+			FVector3d PointEnu = FVector3d::ZeroVector;
+			// Horizontal unit normal points from the higher side to the lower side.
+			FVector3d NormalEnu = FVector3d::ZeroVector;
+		};
+		TArray<FCellBoundary> Boundaries;
+	};
+	DRIVEINTEGRATION_API bool ParseGroundQueryBatch(TArrayView<const uint8> Data, FGroundQueryBatch& Out);
+	DRIVEINTEGRATION_API bool IsValidGroundQueryBatch(const FGroundQueryBatch& Batch);
+	DRIVEINTEGRATION_API TArray<uint8> SerializeGroundQueryResult(const FGroundQueryResult& Result,
+		uint64 Sequence, const FString& SourceId, const FString& SessionId,
+		const FString& PlaySessionId, const FString& MapChecksum, bool bLivePatch = false, bool bNpcTile = false);
+	DRIVEINTEGRATION_API TArray<uint8> SerializeGroundWorldRevision(uint64 WorldRevision, bool bMeasurementsReady,
+		uint64 Sequence, const FString& SourceId, const FString& SessionId,
+		const FString& PlaySessionId, const FString& MapChecksum);
+	struct FWorldObstacleRequest
+	{
+		uint64 RequestId = 0, EnvironmentEpoch = 0, ReferenceSimulationTimeNs = 0, WorldRevision = 0;
+		FVector3d CentreEnu = FVector3d::ZeroVector;
+		FVector3d HalfExtentEnu = FVector3d::ZeroVector;
+	};
+	struct FWorldStaticBox
+	{
+		FString ColliderId;
+		uint32 Semantic = 2;
+		FVector3d CentreEnu = FVector3d::ZeroVector;
+		double HeadingRad = 0;
+		FVector3d HalfExtentEnu = FVector3d::ZeroVector;
+		double Friction = .8, Restitution = 0;
+	};
+	enum class EWorldObstacleStatus : uint32 { Complete = 1, Unsupported = 2, Overflow = 3 };
+	struct FWorldObstacleResult
+	{
+		uint64 RequestId = 0, EnvironmentEpoch = 0, ReferenceSimulationTimeNs = 0, WorldRevision = 0;
+		EWorldObstacleStatus Status = EWorldObstacleStatus::Unsupported;
+		TArray<FWorldStaticBox> Colliders;
+	};
+	DRIVEINTEGRATION_API bool ParseWorldObstacleRequest(TArrayView<const uint8> Data, FWorldObstacleRequest& Out);
+	DRIVEINTEGRATION_API bool IsValidWorldObstacleRequest(const FWorldObstacleRequest& Request);
+	DRIVEINTEGRATION_API TArray<uint8> SerializeWorldObstacleResult(const FWorldObstacleResult& Result,
+		uint64 Sequence, const FString& SourceId, const FString& SessionId,
+		const FString& PlaySessionId, const FString& MapChecksum);
+
 	struct FHelloInfo
 	{
 		uint64 Sequence = 0;
@@ -221,6 +291,10 @@ namespace SimCoreProtocol
 		TArray<FTrafficSignalState> TrafficSignals;
 		FString TrafficNetworkChecksum;
 		TArray<FStructureState> Structures;
+		TOptional<FGroundQueryBatch> GroundQueryShadow;
+		TOptional<FGroundQueryBatch> LiveGroundPatch;
+		TOptional<FGroundQueryBatch> NpcGroundTile;
+		TOptional<FWorldObstacleRequest> WorldObstacles;
 		FVector3d PositionEnu = FVector3d::ZeroVector; // map_enu polar, E/N/U meters
 		FVector3d LinearVelocityBody = FVector3d::ZeroVector; // base_link polar FLU, m/s
 		FVector3d AngularVelocityBody = FVector3d::ZeroVector; // base_link axial FLU, rad/s

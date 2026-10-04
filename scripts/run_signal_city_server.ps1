@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([switch]$Background)
+param([switch]$Background, [switch]$GroundQueryShadow, [switch]$LiveGround, [switch]$LiveObstacles, [switch]$LiveNpcGround)
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'server_launcher_common.ps1')
@@ -19,6 +19,10 @@ $serverArguments = @(
     '--map-package', $mapPackagePath,
     '--no-demo-entities'
 )
+if ($LiveGround -or $LiveObstacles -or $LiveNpcGround) { $serverArguments += '--live-ground' }
+if ($LiveObstacles) { $serverArguments += '--live-obstacles' }
+if ($LiveNpcGround) { $serverArguments += '--live-npc-ground' }
+if ($GroundQueryShadow) { $serverArguments += '--ground-query-shadow' }
 $exitCode = Invoke-SimCoreServerLauncher `
     -ProfileName 'Signal city' `
     -RepositoryRoot $repositoryRoot `

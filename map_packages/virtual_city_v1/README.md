@@ -3,7 +3,8 @@
 2026-08-31 Unreal 5.6의 실제 저장 맵
 `/Game/VirtualCity/Maps/L_VirtualCity`에서 측정한 충돌 package다.
 충돌 package와 별도로 방향성 lane 25개·신호 head 3개의 `traffic_network.json`을
-추가했다. 완성 도시 아트·NPC/보행자·자율주행 기능은 포함하지 않는다.
+추가했다. 런타임 기본 NPC 1대의 차선·신호 회귀 시험에 사용하며, Signal City의 NPC 10대·보행자
+8명 구성과 구분한다. 완성 도시 아트나 플레이어 자율주행 기능은 포함하지 않는다.
 이전 실행·편집 안내는 [이전 자료](../../docs/README.md#이전-자료)에 보관한다.
 현재 기본 맵 실행은 [Signal City 안내](../../docs/guides/signal_city_quickstart.md)를 따른다.
 

@@ -1,5 +1,7 @@
 #include "SimCoreClientComponent.h"
 #include "SimCoreDriveReplay.h"
+#include "SimCoreGroundQueryShadow.h"
+#include "SimCoreWorldObstacleQuery.h"
 
 #include "Async/Async.h"
 #include "Engine/Engine.h"
@@ -77,6 +79,10 @@ void USimCoreClientComponent::TickComponent(
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 	TickConnection();
 	TickControlTransmission(DeltaTime);
+	TickGroundQueryShadow();
+	TickLiveGroundPatch();
+	TickWorldObstacles();
+	TickNpcGroundTile();
 	TickRuntimeProxyActors(DeltaTime);
 	TickTrafficSignals();
 	TickStructureDamage(DeltaTime);
@@ -409,6 +415,106 @@ void USimCoreClientComponent::TickControlTransmission(float DeltaTime)
 	}
 }
 
+void USimCoreClientComponent::TickGroundQueryShadow()
+{
+	if (!bServerSupportsGroundShadow || !bMapHandshakeComplete || !bHasState
+		|| !Socket.IsValid() || !Socket->IsConnected() || !LatestState.GroundQueryShadow.IsSet()
+		|| LatestState.PlaySessionId != PlaySessionId || LatestState.MapPackageChecksum != MapPackageChecksum) return;
+	const auto& Batch = LatestState.GroundQueryShadow.GetValue();
+	if (Batch.RequestId <= LastGroundShadowRequest || Batch.EntityId != LatestState.EntityId
+		|| FPlatformTime::Seconds()-LatestStateReceiveTimeSeconds > 0.1) return;
+	LastGroundShadowRequest = Batch.RequestId;
+	const auto Result = SimCoreGroundQueryShadow::Measure(GetWorld(), GetOwner(), RuntimeEntityPresentationOffsetCm, Batch);
+	const auto Message = SimCoreProtocol::SerializeGroundQueryResult(Result, OutgoingSequence++,
+		SourceId, SessionId, PlaySessionId, MapPackageChecksum);
+	if (!Message.IsEmpty()) Socket->Send(Message.GetData(), Message.Num(), true);
+}
+
+void USimCoreClientComponent::TickLiveGroundPatch()
+{
+	// A completed patch may leave a brief interval before the next request.
+	// The first revision notice activates polling for this connection; ordinary
+	// file-mode connections never send one and keep the zero-cost early exit.
+	if (!bServerSupportsLiveGround || !bMapHandshakeComplete || !bHasState
+		|| !Socket.IsValid() || !Socket->IsConnected()
+		|| (!LatestState.LiveGroundPatch.IsSet() && LastLiveWorldRevisionSent == 0)
+		|| LatestState.PlaySessionId != PlaySessionId || LatestState.MapPackageChecksum != MapPackageChecksum
+		|| FPlatformTime::Seconds()-LatestStateReceiveTimeSeconds > 0.1)
+	{
+		LiveGroundSampler.Reset();
+		return;
+	}
+	const SimCoreProtocol::FGroundQueryResult* Result = nullptr;
+	if (LatestState.LiveGroundPatch.IsSet())
+		Result = LiveGroundSampler.Tick(GetWorld(), GetOwner(), RuntimeEntityPresentationOffsetCm,
+			LatestState.LiveGroundPatch.GetValue());
+	else LiveGroundSampler.PollWorld(GetWorld(), GetOwner(), RuntimeEntityPresentationOffsetCm);
+	const uint64 Revision = LiveGroundSampler.GetWorldRevision();
+	const bool bReady = LiveGroundSampler.IsWorldReady();
+	const double Now = FPlatformTime::Seconds();
+	if (Revision && (LastLiveWorldRevisionSent != Revision || bLastLiveWorldReadySent != bReady
+		|| Now-LastLiveWorldRevisionSendTime >= .1))
+	{
+		const auto Notice = SimCoreProtocol::SerializeGroundWorldRevision(Revision, bReady, OutgoingSequence++,
+			SourceId, SessionId, PlaySessionId, MapPackageChecksum);
+		if (!Notice.IsEmpty()) {
+			Socket->Send(Notice.GetData(), Notice.Num(), true);
+			LastLiveWorldRevisionSent = Revision; bLastLiveWorldReadySent = bReady; LastLiveWorldRevisionSendTime = Now;
+		}
+	}
+	if (!Result) return;
+	const auto Message = SimCoreProtocol::SerializeGroundQueryResult(*Result, OutgoingSequence++,
+		SourceId, SessionId, PlaySessionId, MapPackageChecksum, true);
+	if (!Message.IsEmpty()) Socket->Send(Message.GetData(), Message.Num(), true);
+}
+
+void USimCoreClientComponent::TickNpcGroundTile()
+{
+	if (!bServerSupportsNpcGround || !bServerSupportsLiveGround || !bMapHandshakeComplete || !bHasState
+		|| !Socket.IsValid() || !Socket->IsConnected() || LastLiveWorldRevisionSent == 0
+		|| !LatestState.NpcGroundTile.IsSet() || LatestState.PlaySessionId != PlaySessionId
+		|| LatestState.MapPackageChecksum != MapPackageChecksum
+		|| FPlatformTime::Seconds()-LatestStateReceiveTimeSeconds > .1)
+	{
+		NpcGroundSampler.Reset();
+		return;
+	}
+	const auto* Result=NpcGroundSampler.TickObservedRevision(GetWorld(),GetOwner(),RuntimeEntityPresentationOffsetCm,
+		LatestState.NpcGroundTile.GetValue(),LiveGroundSampler.GetWorldRevision(),LiveGroundSampler.IsWorldReady());
+	if (!Result) return;
+	const auto Message=SimCoreProtocol::SerializeGroundQueryResult(*Result,OutgoingSequence++,
+		SourceId,SessionId,PlaySessionId,MapPackageChecksum,true,true);
+	if (!Message.IsEmpty()) Socket->Send(Message.GetData(),Message.Num(),true);
+}
+
+void USimCoreClientComponent::TickWorldObstacles()
+{
+	if (!bServerSupportsWorldObstacles || !bServerSupportsLiveGround || !bMapHandshakeComplete || !bHasState
+		|| !Socket.IsValid() || !Socket->IsConnected() || LastLiveWorldRevisionSent == 0
+		|| !LatestState.WorldObstacles.IsSet() || !LiveGroundSampler.IsWorldReady()
+		|| LatestState.PlaySessionId != PlaySessionId || LatestState.MapPackageChecksum != MapPackageChecksum
+		|| FPlatformTime::Seconds()-LatestStateReceiveTimeSeconds > .1) return;
+	const auto& Request=LatestState.WorldObstacles.GetValue();
+	if (Request.WorldRevision != LiveGroundSampler.GetWorldRevision()
+		|| (Request.RequestId == LastWorldObstacleRequest && Request.EnvironmentEpoch == LastWorldObstacleEpoch
+			&& Request.WorldRevision == LastWorldObstacleRevision)) return;
+	LastWorldObstacleRequest=Request.RequestId; LastWorldObstacleEpoch=Request.EnvironmentEpoch;
+	LastWorldObstacleRevision=Request.WorldRevision;
+	const auto Result=SimCoreWorldObstacleQuery::Measure(GetWorld(),GetOwner(),RuntimeEntityPresentationOffsetCm,Request);
+	const auto Message=SimCoreProtocol::SerializeWorldObstacleResult(Result,OutgoingSequence++,
+		SourceId,SessionId,PlaySessionId,MapPackageChecksum);
+	if (Message.IsEmpty()) ++WorldObstacleFailed;
+	else {
+		Socket->Send(Message.GetData(),Message.Num(),true);
+		if (Result.Status == SimCoreProtocol::EWorldObstacleStatus::Complete) ++WorldObstacleComplete;
+		else ++WorldObstacleIncomplete;
+	}
+	if ((Result.Status != SimCoreProtocol::EWorldObstacleStatus::Complete || Message.IsEmpty())
+		&& WorldObstacleIncomplete+WorldObstacleFailed == 1)
+		UE_LOG(LogSimCoreClient, Warning, TEXT("World obstacle query status=%u complete=%llu incomplete=%llu failed=%llu"),
+			static_cast<uint32>(Result.Status), WorldObstacleComplete, WorldObstacleIncomplete, WorldObstacleFailed);
+}
+
 void USimCoreClientComponent::TickTelemetry(float DeltaTime)
 {
 	TelemetryAccumulator += DeltaTime;
@@ -434,6 +540,9 @@ void USimCoreClientComponent::TickTelemetry(float DeltaTime)
 		MaxStateIntervalSeconds * 1000.0,
 		static_cast<unsigned long long>(MissingStateSequenceCount),
 		DroppedOutOfOrderStateCount);
+	if (WorldObstacleComplete+WorldObstacleIncomplete+WorldObstacleFailed)
+		UE_LOG(LogSimCoreClient, Log, TEXT("World obstacle telemetry: complete=%llu incomplete=%llu failed=%llu"),
+			WorldObstacleComplete,WorldObstacleIncomplete,WorldObstacleFailed);
 
 	TelemetryAccumulator = FMath::Fmod(TelemetryAccumulator, 1.0f);
 	ReceivedStateCount = 0;
@@ -624,6 +733,18 @@ void USimCoreClientComponent::ResetConnectionSession()
 	bProtocolHandshakeComplete = false;
 	bServerSupportsLoadouts = false;
 	bServerSupportsParts = false;
+	bServerSupportsGroundShadow = false;
+	bServerSupportsLiveGround = false;
+	bServerSupportsWorldObstacles = false;
+	bServerSupportsNpcGround = false;
+	NpcGroundSampler.Reset();
+	LastWorldObstacleRequest = LastWorldObstacleEpoch = LastWorldObstacleRevision = 0;
+	WorldObstacleComplete = WorldObstacleIncomplete = WorldObstacleFailed = 0;
+	LastLiveWorldRevisionSent = 0;
+	bLastLiveWorldReadySent = false;
+	LastLiveWorldRevisionSendTime = 0;
+	LiveGroundSampler.Reset();
+	LastGroundShadowRequest = 0;
 	bServerMatchesCatalog = false;
 }
 
@@ -922,6 +1043,11 @@ void USimCoreClientComponent::SendHello()
 		TEXT("runtime-entities.v1"),
 		TEXT("traffic-signals.v1"),
 		TEXT("pedestrian-signals.v1"),
+		TEXT("ground-query-shadow.v1"),
+		TEXT("ground-query-shadow.v2"),
+		TEXT("ground-patch.v3"),
+		TEXT("world-obstacles.v1"),
+		TEXT("npc-ground.v1"),
 	};
 	Capabilities.Add(VehicleCatalogCapability);
 	const TArray<uint8> Message = SimCoreProtocol::SerializeHelloEnvelope(
@@ -1137,6 +1263,10 @@ void USimCoreClientComponent::ApplyBinaryMessage(
 		bProtocolHandshakeComplete = true;
 		bServerSupportsLoadouts = Hello.Capabilities.Contains(TEXT("vehicle-loadout.v1"));
 		bServerSupportsParts = Hello.Capabilities.Contains(TEXT("vehicle-parts.v1"));
+		bServerSupportsGroundShadow = Hello.Capabilities.Contains(TEXT("ground-query-shadow.v1"));
+		bServerSupportsLiveGround = Hello.Capabilities.Contains(TEXT("ground-patch.v3"));
+		bServerSupportsWorldObstacles = Hello.Capabilities.Contains(TEXT("world-obstacles.v1"));
+		bServerSupportsNpcGround = Hello.Capabilities.Contains(TEXT("npc-ground.v1"));
 		FString ExpectedCatalogCapability;
 		bServerMatchesCatalog = SimCoreVehicleVisualProfile::CatalogCapability(ExpectedCatalogCapability, Error)
 			&& Hello.Capabilities.Contains(ExpectedCatalogCapability);

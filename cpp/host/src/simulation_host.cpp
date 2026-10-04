@@ -12,6 +12,7 @@
 #include <set>
 #include <stdexcept>
 #include <type_traits>
+#include <tuple>
 #include <unordered_set>
 #include <utility>
 
@@ -176,15 +177,28 @@ SimulationHost::SimulationHost(boost::asio::io_context& ioc,
     : config_(std::move(config))
     , base_vehicle_parameters_(config_.vehicle_parameters)
     , callbacks_(std::move(callbacks))
+    , ground_capture_(config_.ground_query_shadow && config_.ground_query
+        ? std::make_shared<simcore_host::CapturingGroundQuery>(config_.ground_query) : nullptr)
     , physics_(config_.origin_lat, config_.origin_lon, config_.origin_alt,
                config_.spawn_heading, config_.vehicle_parameters,
-               config_.ground_query, config_.collision_world)
+               config_.live_ground ? std::shared_ptr<const simcore_host::GroundQuery>(std::make_shared<simcore_host::FlatGroundQuery>())
+                   : ground_capture_ ? ground_capture_ : config_.ground_query, config_.collision_world)
     , simulation_clock_(config_.physics_frequency_hz)
     , control_lease_(config_.command_timeout,
                      config_.max_command_queue_age,
                      config_.hard_command_timeout)
     , timer_(ioc)
 {
+    if (config_.live_ground && config_.ground_query_shadow)
+        throw std::invalid_argument("Live ground excludes shadow mode");
+    if (config_.live_obstacles && !config_.live_ground)
+        throw std::invalid_argument("Live obstacles require live ground");
+    if (config_.live_npc_ground && !config_.live_ground)
+        throw std::invalid_argument("Live NPC ground requires live ground");
+    if (config_.physics_replay && config_.physics_replay->measured_ground() != config_.live_ground)
+        throw std::invalid_argument("Replay ground mode must match simulation mode");
+    if (config_.live_ground && config_.physics_replay)
+        live_ground_recording_ = std::make_shared<simcore_host::MeasuredGroundQueryRecorder>(live_ground_);
     if (!config_.vehicle_catalog) {
         config_.vehicle_catalog = std::make_shared<const simcore_host::RuntimeVehicleCatalog>(
             simcore_host::default_runtime_vehicle_catalog());
@@ -256,17 +270,36 @@ std::string SimulationHost::make_initial_world_state()
 
 std::string SimulationHost::serialize_current_world_state(Clock::time_point now)
 {
-    const auto health = make_health_snapshot(now);
+    auto health = make_health_snapshot(now);
+    auto player = physics_.get_state();
+    const std::string waiting_message = "Waiting for Unreal measurements: " + live_waiting_reason_;
+    if (config_.live_ground && live_ground_waiting_) {
+        health.message = waiting_message;
+        player.speed = 0; player.accel = 0; player.yaw_rate = 0;
+        player.linear_velocity_body = {}; player.angular_velocity_body = {};
+        for (auto& wheel : player.wheels) wheel.angular_speed = 0;
+    }
     const auto& network = config_.traffic_network;
+    std::optional<std::vector<simcore_host::RuntimeEntityState>> held_entities;
+    if (config_.live_npc_ground && live_ground_waiting_) {
+        held_entities = runtime_entities_;
+        for (auto& entity : *held_entities) {
+            entity.collision_proxy.linear_velocity_enu_mps = {};
+            entity.collision_proxy.heading_rate_rad_s = 0;
+            entity.vertical_velocity_mps = 0;
+            entity.pitch_rate_rad_s = 0; entity.roll_rate_rad_s = 0;
+        }
+    }
     const bool traffic_enabled = network && lifecycle_active_ && !estop_latched_
         && network->source_map_checksum == config_.map_package_checksum
         && health.status == simcore_host::HealthStatus::Active;
     return simcore_host::serialize_world_state_envelope(
-        physics_.get_state(), runtime_entities_, make_metadata(), health,
+        player, held_entities ? *held_entities : runtime_entities_, make_metadata(), health,
         current_traffic_signals(traffic_enabled),
         network && !network->signals.empty()
             ? std::string_view(network->checksum) : std::string_view{},
-        structure_damage_.snapshots(), active_vehicle_class_);
+        structure_damage_.snapshots(), active_vehicle_class_, prepare_ground_shadow(now), prepare_live_ground(now),
+        prepare_live_obstacles(now), prepare_live_npc_ground(now));
 }
 
 std::vector<simcore_host::TrafficSignalSnapshot> SimulationHost::current_traffic_signals(bool enabled) const
@@ -313,8 +346,8 @@ void SimulationHost::apply_pending_traffic_network_reload()
         }
         config_.traffic_network = std::move(pending_traffic_network_);
         rebuild_structure_damage();
-        rebuild_lane_npc();
-        rebuild_pedestrians();
+        live_npc_initialization_pending_ = true;
+        rebuild_lane_npc(); rebuild_pedestrians();
         std::cout << "[Traffic] applied verified network checksum="
                   << config_.traffic_network->checksum << " lanes="
                   << config_.traffic_network->lanes.size() << "\n";
@@ -670,18 +703,117 @@ void SimulationHost::run_tick()
     }
 
     const double dt_seconds = 1.0 / config_.physics_frequency_hz;
+    if (config_.live_npc_ground) {
+        prepare_live_ground(started_at);
+        live_npc_ground_->begin_tick(started_at);
+        if (live_ground_session_ready() && live_npc_initialization_pending_)
+            live_npc_initialization_pending_ = !initialize_live_npc_ground_entities();
+    }
+    // NPC preparation and finite-body contact solving form one transaction.
+    // Keep pending measurements, but never commit half of a rejected tick.
+    using TrafficRollback = std::tuple<decltype(runtime_entities_),decltype(lane_npcs_),
+        decltype(pedestrians_),decltype(structure_damage_),std::uint32_t,std::uint32_t>;
+    std::optional<TrafficRollback> traffic_rollback;
+    if (config_.live_npc_ground) traffic_rollback.emplace(runtime_entities_,lane_npcs_,
+        pedestrians_,structure_damage_,npc_search_entity_id_,npc_search_after_entity_id_);
     const bool structures_enabled = lifecycle_active_ && !estop_latched_
         && make_health_snapshot(started_at).status == simcore_host::HealthStatus::Active;
     // Consume last tick's solved contacts before taking this tick's collision
     // snapshot. Wire pose and the pole's actual collision geometry stay atomic.
     structure_damage_.tick(dt_seconds, structures_enabled);
-    prepare_lane_npc(dt_seconds, started_at);
-    prepare_pedestrians(dt_seconds, started_at);
+    if (!config_.live_npc_ground || !live_npc_initialization_pending_) {
+        prepare_lane_npc(dt_seconds, started_at);
+        prepare_pedestrians(dt_seconds, started_at);
+    }
     auto collision_snapshot = make_runtime_collision_snapshot();
     // Copy only in capture mode; ordinary ticks still transfer one snapshot.
     const auto recorded_proxies = config_.physics_replay
         ? collision_snapshot : std::vector<simcore_host::KinematicCollisionProxy>{};
-    const auto state = physics_.update(dt_seconds, std::move(collision_snapshot));
+    if (ground_capture_) ground_capture_->begin_frame(simulation_clock_.simulation_time_ns());
+    simcore_host::PhysicsReplayGroundFrame measured_frame;
+    std::shared_ptr<const simcore_host::CollisionWorld> measured_collision =
+        config_.live_obstacles ? nullptr : config_.collision_world;
+    if (config_.live_ground) {
+        prepare_live_ground(started_at);
+        prepare_live_obstacles(started_at);
+        live_ground_->begin_tick(started_at);
+        measured_frame.attempted = live_ground_session_ready();
+        if (config_.live_npc_ground && live_npc_initialization_pending_) {
+            measured_frame.attempted = false;
+            live_waiting_reason_ = "npc_initial_measurement";
+        }
+        measured_frame.initialize = live_ground_reset_pending_;
+        measured_frame.environment_epoch = live_ground_->environment_epoch();
+        measured_frame.world_revision = live_ground_->world_revision();
+        if (live_ground_recording_) live_ground_recording_->begin_frame();
+        const std::shared_ptr<const simcore_host::GroundQuery> measured_ground = live_ground_recording_
+            ? std::static_pointer_cast<const simcore_host::GroundQuery>(live_ground_recording_) : live_ground_;
+        const auto measured_body=[&](const VehicleState& pose) {
+            const double yaw=pose.heading*std::numbers::pi/180;
+            const auto& parameters=config_.vehicle_parameters;
+            const double offset=parameters.collision_body_center_forward_offset_m;
+            // Include COM rotation and a small integration/correction margin.
+            return simcore_host::ObbPrism{{pose.position_enu.x+std::sin(yaw)*offset,
+                pose.position_enu.y+std::cos(yaw)*offset},pose.position_enu.z-parameters.cg_height_m
+                +parameters.collision_body_ground_clearance_m+pose.collision_half_height_m,yaw,
+                pose.collision_half_length_m+std::abs(offset)+.5,
+                pose.collision_half_width_m+.5,pose.collision_half_height_m+.5};
+        };
+        if (config_.live_obstacles && measured_frame.attempted) {
+            const auto pose=physics_.get_state(); const double yaw=pose.heading*std::numbers::pi/180;
+            try {
+                measured_collision=live_obstacles_->world_for_swept_body(measured_body(pose),
+                    {pose.linear_velocity_body.x*std::sin(yaw)-pose.linear_velocity_body.y*std::cos(yaw),
+                     pose.linear_velocity_body.x*std::cos(yaw)+pose.linear_velocity_body.y*std::sin(yaw),0},
+                    dt_seconds,started_at,std::max(std::abs(pose.yaw_rate),1.0f));
+            } catch (const simcore_host::GroundMeasurementUnavailable&) {
+                measured_frame.attempted=false; measured_collision.reset();
+                live_waiting_reason_=live_obstacles_->last_missing_reason();
+            }
+        }
+        const auto validate_collision=[&](const VehicleState& pose) {
+            try {
+                if (config_.live_obstacles && live_obstacles_->world_for_swept_body(
+                        measured_body(pose),{},0,started_at)!=measured_collision)
+                    throw simcore_host::GroundMeasurementUnavailable{};
+                if (config_.live_npc_ground) validate_live_npc_ground_after_collision();
+            } catch (const simcore_host::GroundMeasurementUnavailable&) {
+                measured_frame.collision_coverage_valid=false;
+                throw;
+            }
+        };
+        const bool accepted = measured_frame.attempted && physics_.try_update_with_ground(
+            dt_seconds, std::move(collision_snapshot), measured_ground, live_ground_reset_pending_,
+            config_.live_obstacles ? measured_collision : nullptr,validate_collision);
+        measured_frame.accepted = accepted;
+        if (live_ground_recording_) measured_frame.samples = live_ground_recording_->samples();
+        live_ground_waiting_ = !accepted;
+        if (accepted) { live_ground_reset_pending_ = false; ++live_ground_steps_; live_waiting_reason_="ready"; }
+        else {
+            physics_.clear_tick_contacts(); ++live_ground_waits_;
+            if (measured_frame.attempted) live_waiting_reason_=measured_frame.collision_coverage_valid
+                ? live_ground_->last_missing_reason() : "post_contact_measurement_unavailable";
+        }
+        if (started_at-last_live_ground_log_ >= std::chrono::seconds(1)) {
+            std::cout << "[LiveGround] patches=" << live_ground_->accepted() << " rejected=" << live_ground_->rejected()
+                << " revision=" << live_ground_->world_revision() << " invalidations=" << live_ground_->invalidations()
+                << " expired=" << live_ground_->expired() << " steps=" << live_ground_steps_
+                << " waits=" << live_ground_waits_ << " waiting=" << live_ground_waiting_
+                << " reason=" << live_waiting_reason_
+                << " obstacle_patches=" << live_obstacles_->accepted()
+                << " obstacle_rejected=" << live_obstacles_->rejected()
+                << " npc_tiles=" << live_npc_ground_->tile_count()
+                << " npc_patches=" << live_npc_ground_->accepted()
+                << " npc_rejected=" << live_npc_ground_->rejected()
+                << " npc_rejection_reason=" << live_npc_ground_->last_rejection_reason()
+                << " physics=unreal-patch\n";
+            last_live_ground_log_ = started_at;
+        }
+    } else {
+        physics_.update(dt_seconds, std::move(collision_snapshot));
+    }
+    const auto state = physics_.get_state();
+    if (ground_capture_) ground_capture_->end_frame();
     if (applied_input_.throttle > 0.2f && applied_input_.brake < 0.1f
         && !applied_input_.handbrake && applied_input_.gear != VehicleGear::Neutral
         && std::abs(state.speed) < 0.15f) {
@@ -709,10 +841,16 @@ void SimulationHost::run_tick()
         drive_stall_next_log_s_ = 1.0;
     }
     if (config_.physics_replay) {
-        config_.physics_replay->tick(applied_input_, recorded_proxies, state);
+        if (config_.live_ground) {
+            if (measured_collision) measured_frame.static_colliders = measured_collision->static_colliders();
+            config_.physics_replay->tick_measured(applied_input_,recorded_proxies,state,measured_frame);
+        } else config_.physics_replay->tick(applied_input_, recorded_proxies, state);
     }
-    advance_runtime_entities(dt_seconds);
-    if (structures_enabled) {
+    const bool traffic_committed = !traffic_rollback || measured_frame.accepted;
+    if (traffic_committed) advance_runtime_entities(dt_seconds);
+    else std::tie(runtime_entities_,lane_npcs_,pedestrians_,structure_damage_,
+        npc_search_entity_id_,npc_search_after_entity_id_) = std::move(*traffic_rollback);
+    if (structures_enabled && traffic_committed) {
         const auto& parameters = config_.vehicle_parameters;
         const double heading_rad = state.heading * std::numbers::pi / 180.0;
         const double body_offset_m = parameters.collision_body_center_forward_offset_m;
@@ -786,14 +924,22 @@ bool SimulationHost::apply_pending_map_package_reload(
     }
 
     const std::string previous_checksum = config_.map_package_checksum;
+    live_ground_reset_pending_ = true; live_ground_waiting_ = true;
+    live_ground_->reset_context({});
+    live_obstacles_->reset_context({});
+    live_npc_ground_->reset_context({});
+    live_npc_initialization_pending_ = true;
     if (config_.physics_replay) {
         config_.physics_replay->invalidate("map_package_reloaded");
     }
     // The follower's ground pointer must be retired before releasing the map.
     lane_npcs_.clear();
     pedestrians_.clear();
+    ground_capture_ = config_.ground_query_shadow
+        ? std::make_shared<simcore_host::CapturingGroundQuery>(pending->package.ground_query) : nullptr;
     physics_.replace_environment(
-        pending->package.ground_query,
+        config_.live_ground ? std::shared_ptr<const simcore_host::GroundQuery>(std::make_shared<simcore_host::FlatGroundQuery>())
+            : ground_capture_ ? ground_capture_ : pending->package.ground_query,
         pending->package.collision_world);
     config_.ground_query = std::move(pending->package.ground_query);
     config_.collision_world = std::move(pending->package.collision_world);
@@ -830,8 +976,7 @@ bool SimulationHost::apply_pending_map_package_reload(
     lifecycle_active_ = false;
     hello_connection_states_.clear();
     rebuild_structure_damage();
-    rebuild_lane_npc();
-    rebuild_pedestrians();
+    rebuild_lane_npc(); rebuild_pedestrians();
 
     std::cout << "[MapReload] applied at tick boundary map_id="
               << pending->package.map_id << " previous=" << previous_checksum

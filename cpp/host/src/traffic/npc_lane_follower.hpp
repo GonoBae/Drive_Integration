@@ -28,6 +28,7 @@ enum class NpcLaneStopReason {
     Blocked,
     Terminal,
     NoGround,
+    AwaitingGround,
     InvalidInput,
 };
 

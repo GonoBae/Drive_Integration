@@ -43,6 +43,10 @@ const std::unordered_map<std::string, CliSpecification>& cli_specifications()
         {"--npc-spacing", {"npc_spacing_m", true}},
         {"--ws-port", {"ws_port", true}},
         {"--physics-hz", {"physics_hz", true}},
+        {"--ground-query-shadow", {"ground_query_shadow", false}},
+        {"--live-ground", {"live_ground", false}},
+        {"--live-obstacles", {"live_obstacles", false}},
+        {"--live-npc-ground", {"live_npc_ground", false}},
         {"--origin-lat", {"origin_lat_deg", true}},
         {"--origin-lon", {"origin_lon_deg", true}},
         {"--origin-alt", {"origin_alt_m", true}},
@@ -116,7 +120,12 @@ void apply_cli_option(RuntimeOptions& options, const CliOption& option)
         || option.canonical_key == "help") {
         return;
     }
-    if (option.canonical_key == "vehicle_config") {
+    if (option.canonical_key == "live_ground") { options.live_ground = true; return; }
+    if (option.canonical_key == "live_obstacles") { options.live_obstacles = true; return; }
+    if (option.canonical_key == "live_npc_ground") { options.live_npc_ground = true; return; }
+    if (option.canonical_key == "ground_query_shadow") {
+        options.ground_query_shadow = true;
+    } else if (option.canonical_key == "vehicle_config") {
         options.vehicle_config_path = require_nonempty_path(
             "vehicle_config", require_value());
     } else if (option.canonical_key == "vehicle_catalog") {

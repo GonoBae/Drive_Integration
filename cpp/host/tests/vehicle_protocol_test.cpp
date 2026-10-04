@@ -1161,9 +1161,170 @@ void test_protected_left_signal_is_additive_and_atomic()
     rejects({absent});
 }
 
+void test_live_ground_v2_request_step_is_bounded_and_separate()
+{
+    using namespace simcore_host;
+    GroundQueryBatch live;
+    live.request_id = 7;
+    live.environment_epoch = 3;
+    live.reference_simulation_time_ns = 1000;
+    live.origins = {{12, -8, 16}};
+    live.max_distance_m = 0;
+    live.query_distances_m = {32};
+    live.patch_step_enu = {.5, 2, 0};
+    GroundQueryBatch shadow = live;
+    shadow.query_distances_m = {8};
+    shadow.patch_step_enu = {};
+    const auto encode = [&](const GroundQueryBatch& batch) {
+        return serialize_world_state_envelope(VehicleState{}, {}, make_metadata(),
+            std::nullopt, {}, {}, {}, RuntimeVehicleClass::Unspecified, &shadow, &batch);
+    };
+    for (const auto step : {GroundPointEnu{.5, 2, 0}, GroundPointEnu{2, .5, 0}}) {
+        live.patch_step_enu = step;
+        simcore::Envelope wire;
+        require(wire.ParseFromString(encode(live)), "live v2 request parses");
+        const auto& batch = wire.world_state().live_ground_patch();
+        require(batch.request_id() == 7 && batch.environment_epoch() == 3
+            && batch.reference_simulation_time_ns() == 1000 && batch.entity_id() == 1
+            && batch.origins_enu_size() == 1 && batch.origins_enu(0).x() == 12
+            && batch.origins_enu(0).y() == -8 && batch.origins_enu(0).z() == 16
+            && batch.max_distance_m() == 0 && batch.query_distances_m_size() == 1
+            && batch.query_distances_m(0) == 32 && batch.has_patch_step_enu()
+            && batch.patch_step_enu().x() == step.east_m
+            && batch.patch_step_enu().y() == step.north_m && batch.patch_step_enu().z() == 0,
+            "live v2 wire preserves its bounded rectangular lattice and identity");
+        require(wire.world_state().has_ground_query_shadow()
+            && !wire.world_state().ground_query_shadow().has_patch_step_enu()
+            && wire.world_state().ground_query_shadow().query_distances_m(0) == 8,
+            "live v2 spacing must not leak into diagnostic queries");
+    }
+    for (int invalid = 0; invalid < 9; ++invalid) {
+        auto bad = live;
+        switch (invalid) {
+        case 0: bad.patch_step_enu.east_m = .499; break;
+        case 1: bad.patch_step_enu.north_m = 2.001; break;
+        case 2: bad.patch_step_enu.east_m = std::numeric_limits<double>::quiet_NaN(); break;
+        case 3: bad.patch_step_enu.north_m = std::numeric_limits<double>::infinity(); break;
+        case 4: bad.patch_step_enu.up_m = .001; break;
+        case 5: bad.patch_step_enu.up_m = std::numeric_limits<double>::quiet_NaN(); break;
+        case 6: bad.patch_step_enu = {}; break;
+        case 7: bad.origins.clear(); break;
+        case 8: bad.origins.push_back({}); break;
+        }
+        bool rejected = false;
+        try { (void)encode(bad); } catch (const std::invalid_argument&) { rejected = true; }
+        require(rejected, "malformed or legacy live spacing must not serialize");
+    }
+}
+
+void test_live_ground_v2_boundary_wire_is_bounded_and_validated()
+{
+    using namespace simcore_host;
+    simcore::Envelope envelope;
+    envelope.set_schema_version(kProtocolSchemaVersion);
+    envelope.set_sequence(42);
+    envelope.set_source_id("ue-ground");
+    envelope.set_session_id("connection-1");
+    envelope.set_play_session_id("play-1");
+    envelope.set_map_package_checksum("map-checksum");
+    auto* result = envelope.mutable_live_ground_patch_result();
+    result->set_world_revision(17);
+    result->set_request_id(7);
+    result->set_environment_epoch(3);
+    result->set_reference_simulation_time_ns(1000);
+    result->set_measurement_duration_ms(12.5);
+    for (int i = 0; i < kGroundPatchSamples; ++i) {
+        auto* probe = result->add_probes();
+        probe->set_status(simcore::GroundProbeResult::HIT);
+        probe->mutable_point_enu()->set_x(100 + i % kGroundPatchSide);
+        probe->mutable_point_enu()->set_y(200 + i / kGroundPatchSide);
+        probe->mutable_point_enu()->set_z(3);
+        probe->mutable_normal_enu()->set_x(.6);
+        probe->mutable_normal_enu()->set_y(.48);
+        probe->mutable_normal_enu()->set_z(.64);
+        probe->set_surface_material_id(std::numeric_limits<std::uint32_t>::max());
+    }
+    for (std::size_t i = 0; i < kMaxGroundCellBoundaries; ++i) {
+        auto* boundary = result->add_boundaries();
+        boundary->set_cell_index(i == 0 ? 575 : static_cast<std::uint32_t>(i));
+        boundary->mutable_point_enu()->set_x(100.25 + i % 24);
+        boundary->mutable_point_enu()->set_y(200.5 + i / 24);
+        boundary->mutable_point_enu()->set_z(3);
+        boundary->mutable_normal_enu()->set_x(.6);
+        boundary->mutable_normal_enu()->set_y(-.8);
+    }
+    const auto payload = envelope.SerializeAsString();
+    require(payload.size() < 64 * 1024,
+        "625 full hit probes and 128 measured boundaries must fit below 64 KiB");
+    const auto parsed = parse_client_message_envelope(payload);
+    require(parsed && std::holds_alternative<ParsedGroundQueryResult>(*parsed),
+        "maximum live v2 result must decode");
+    const auto& decoded = std::get<ParsedGroundQueryResult>(*parsed);
+    const auto& boundary = decoded.result.boundaries.front();
+    require(decoded.live_patch && decoded.sequence == 42 && decoded.source_id == "ue-ground"
+        && decoded.session_id == "connection-1" && decoded.play_session_id == "play-1"
+        && decoded.map_package_checksum == "map-checksum" && decoded.result.request_id == 7
+        && decoded.result.environment_epoch == 3 && decoded.result.reference_simulation_time_ns == 1000
+        && decoded.result.measurement_duration_ms == 12.5
+        && decoded.result.probes.size() == kGroundPatchSamples
+        && decoded.result.boundaries.size() == kMaxGroundCellBoundaries
+        && boundary.cell_index == 575 && boundary.point.east_m == 100.25
+        && boundary.point.north_m == 200.5 && boundary.point.up_m == 3
+        && boundary.normal.east_m == .6 && boundary.normal.north_m == -.8
+        && boundary.normal.up_m == 0,
+        "live v2 boundary orientation, positions and request identity must roundtrip");
+    require(parse_client_message_envelope(payload + std::string("\xa0\x06\x01", 3)).has_value(),
+        "unrelated future protobuf fields must remain additive");
+    require(!parse_client_message_envelope(payload.substr(0, payload.size() - 1)),
+        "truncated live boundary payload must fail parsing");
+
+    for (int invalid = 0; invalid < 13; ++invalid) {
+        auto bad = envelope;
+        auto* wire = bad.mutable_live_ground_patch_result();
+        auto* b = wire->mutable_boundaries(0);
+        switch (invalid) {
+        case 0: b->set_cell_index(576); break;
+        case 1: b->set_cell_index(wire->boundaries(1).cell_index()); break;
+        case 2: wire->add_boundaries()->CopyFrom(*b); break;
+        case 3: b->clear_normal_enu(); break;
+        case 4: b->mutable_normal_enu()->set_x(2); break;
+        case 5: b->mutable_normal_enu()->set_z(.01); break;
+        case 6: b->mutable_point_enu()->set_x(std::numeric_limits<double>::quiet_NaN()); break;
+        case 7: b->mutable_normal_enu()->set_y(std::numeric_limits<double>::infinity()); break;
+        case 8: b->mutable_point_enu()->set_z(1e6 + 1); break;
+        case 9: wire->mutable_probes()->RemoveLast(); break;
+        case 10: wire->add_probes()->CopyFrom(wire->probes(0)); break;
+        case 11: wire->set_measurement_duration_ms(std::numeric_limits<double>::quiet_NaN()); break;
+        case 12: wire->mutable_probes(0)->set_status(simcore::GroundProbeResult::UNSPECIFIED); break;
+        }
+        require(!parse_client_message_envelope(bad.SerializeAsString()),
+            "malformed, duplicate, excess or out-of-range live results must fail closed");
+    }
+    auto no_boundaries = envelope;
+    no_boundaries.mutable_live_ground_patch_result()->clear_boundaries();
+    require(parse_client_message_envelope(no_boundaries.SerializeAsString()).has_value(),
+        "smooth live patches may omit boundaries");
+
+    simcore::GroundQueryResult diagnostic = *result;
+    while (diagnostic.probes_size() > kMaxCapturedGroundProbes)
+        diagnostic.mutable_probes()->RemoveLast();
+    auto shadow = envelope;
+    shadow.mutable_ground_query_result()->CopyFrom(diagnostic);
+    require(!parse_client_message_envelope(shadow.SerializeAsString()),
+        "diagnostic field 15 must reject live boundaries even within its probe limit");
+    shadow.mutable_ground_query_result()->clear_boundaries();
+    require(!parse_client_message_envelope(shadow.SerializeAsString()),"diagnostics reject world revision");
+    shadow.mutable_ground_query_result()->clear_world_revision();
+    const auto shadow_parsed = parse_client_message_envelope(shadow.SerializeAsString());
+    require(shadow_parsed && !std::get<ParsedGroundQueryResult>(*shadow_parsed).live_patch,
+        "bounded diagnostic replies remain valid without live boundary data");
+}
+
 int main()
 {
     try {
+        test_live_ground_v2_request_step_is_bounded_and_separate();
+        test_live_ground_v2_boundary_wire_is_bounded_and_validated();
         test_world_state_envelope_roundtrip();
         test_contact_local_vehicle_dents();
         test_traffic_snapshot_is_additive_and_atomic();

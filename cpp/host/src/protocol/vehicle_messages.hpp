@@ -3,6 +3,9 @@
 #include "physics/vehicle_physics.hpp"
 #include "collision/structure_damage.hpp"
 #include "traffic/traffic_network.hpp"
+#include "terrain/ground_query_shadow.hpp"
+#include "terrain/live_ground_patch.hpp"
+#include "terrain/live_obstacle_snapshot.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -135,9 +138,28 @@ struct ParsedSimulationReset {
 
 [[nodiscard]] bool valid_vehicle_loadout_id(std::string_view id);
 
+struct ParsedGroundQueryResult {
+    std::uint64_t sequence = 0;
+    std::string source_id, session_id, play_session_id, map_package_checksum;
+    GroundQueryResult result;
+    bool live_patch = false;
+    bool npc_tile = false;
+};
+struct ParsedGroundWorldRevision {
+    std::uint64_t sequence = 0, world_revision = 0;
+    std::string source_id, session_id, play_session_id, map_package_checksum;
+    bool measurements_ready = false;
+};
+struct ParsedWorldObstacleResult {
+    std::uint64_t sequence = 0;
+    std::string source_id, session_id, play_session_id, map_package_checksum;
+    LiveObstacleResult result;
+};
+
 using ParsedClientMessage = std::variant<ParsedHello,
                                           ParsedControlCommand,
-                                          ParsedSimulationReset>;
+                                          ParsedSimulationReset, ParsedGroundQueryResult, ParsedGroundWorldRevision,
+                                          ParsedWorldObstacleResult>;
 
 std::string serialize_entity_state_packet(
     const VehicleState& state,
@@ -154,7 +176,11 @@ std::string serialize_world_state_envelope(
     const std::vector<TrafficSignalSnapshot>& traffic_signals = {},
     std::string_view traffic_network_checksum = {},
     const std::vector<StructureDamageSnapshot>& structures = {},
-    RuntimeVehicleClass ego_vehicle_class = RuntimeVehicleClass::Unspecified);
+    RuntimeVehicleClass ego_vehicle_class = RuntimeVehicleClass::Unspecified,
+    const GroundQueryBatch* ground_shadow = nullptr,
+    const GroundQueryBatch* live_patch = nullptr,
+    const LiveObstacleRequest* world_obstacles = nullptr,
+    const GroundQueryBatch* npc_tile = nullptr);
 
 std::string serialize_hello_envelope(
     const EnvelopeMetadata& metadata,

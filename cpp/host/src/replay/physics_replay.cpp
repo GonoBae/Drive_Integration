@@ -1,6 +1,7 @@
 #include "replay/physics_replay.hpp"
 
 #include "player_vehicle_profile.hpp"
+#include "terrain/live_ground_patch.hpp"
 #include "vehicle_catalog/runtime_vehicle_catalog.hpp"
 
 #include <algorithm>
@@ -114,6 +115,168 @@ void validate_input(const VehicleInput& input)
             && std::isfinite(input.steering) && std::abs(input.steering) <= 1
             && static_cast<unsigned>(input.gear) <= 2, "invalid applied input");
 }
+
+void validate_ground_sample(const GroundReplaySample& sample)
+{
+    const auto& request = sample.request;
+    const std::array values{request.origin_enu.east_m, request.origin_enu.north_m,
+        request.origin_enu.up_m, request.max_distance_m};
+    require(std::all_of(values.begin(), values.end(), [](double value) {
+        return std::isfinite(value) && std::abs(value) <= 1e8;
+    }) && request.max_distance_m > 0, "invalid recorded ground request");
+    require(sample.outcome == GroundReplayOutcome::Hit
+        || sample.outcome == GroundReplayOutcome::NoHit
+        || sample.outcome == GroundReplayOutcome::Unavailable, "unknown ground outcome");
+    if (sample.outcome != GroundReplayOutcome::Hit) return;
+    const auto& hit = sample.hit;
+    const std::array hit_values{hit.point_enu.east_m, hit.point_enu.north_m, hit.point_enu.up_m,
+        hit.normal_enu.east_m, hit.normal_enu.north_m, hit.normal_enu.up_m,
+        hit.distance_m, hit.friction_multiplier};
+    const double norm = std::hypot(hit.normal_enu.east_m, hit.normal_enu.north_m, hit.normal_enu.up_m);
+    require(std::all_of(hit_values.begin(), hit_values.end(), [](double value) {
+        return std::isfinite(value) && std::abs(value) <= 1e8;
+    }) && std::abs(norm - 1.0) <= .01 && hit.normal_enu.up_m > 0
+        && hit.distance_m >= 0 && hit.distance_m <= request.max_distance_m + 1e-6
+        && hit.friction_multiplier >= 0 && hit.friction_multiplier <= 100
+        && std::abs(hit.point_enu.east_m - request.origin_enu.east_m) <= 1e-6
+        && std::abs(hit.point_enu.north_m - request.origin_enu.north_m) <= 1e-6
+        && std::abs(request.origin_enu.up_m - hit.point_enu.up_m - hit.distance_m) <= 1e-6,
+        "invalid recorded ground hit");
+}
+
+void validate_static_collider(const StaticObbCollider& collider)
+{
+    const auto& shape = collider.shape;
+    const std::array values{shape.center_enu.east_m, shape.center_enu.north_m, shape.center_up_m,
+        shape.heading_rad, shape.half_length_m, shape.half_width_m, shape.half_height_m,
+        collider.material.friction, collider.material.restitution};
+    require(identifier(collider.collider_id)
+        && (collider.semantic == StaticColliderSemantic::Wall
+            || collider.semantic == StaticColliderSemantic::Curb
+            || collider.semantic == StaticColliderSemantic::Barrier)
+        && std::all_of(values.begin(), values.end(), [](double value) {
+            return std::isfinite(value) && std::abs(value) <= 1e8;
+        }) && shape.half_length_m > 0 && shape.half_length_m <= 1e6
+        && shape.half_width_m > 0 && shape.half_width_m <= 1e6
+        && shape.half_height_m > 0 && shape.half_height_m <= 1e6
+        && collider.material.friction >= 0 && collider.material.restitution >= 0
+        && collider.material.restitution <= 1, "invalid recorded static collider");
+}
+
+std::string static_collider_line(const StaticObbCollider& collider)
+{
+    const auto& shape = collider.shape;
+    auto output = output_line();
+    output << "STATIC " << collider.collider_id << ' ' << static_cast<unsigned>(collider.semantic)
+        << ' ' << shape.center_enu.east_m << ' ' << shape.center_enu.north_m << ' '
+        << shape.center_up_m << ' ' << shape.heading_rad << ' ' << shape.half_length_m
+        << ' ' << shape.half_width_m << ' ' << shape.half_height_m << ' '
+        << collider.material.friction << ' ' << collider.material.restitution;
+    return output.str();
+}
+
+StaticObbCollider parse_static_collider(const std::string& line)
+{
+    auto input = input_line(line);
+    StaticObbCollider collider;
+    std::string kind;
+    unsigned semantic = 3;
+    auto& shape = collider.shape;
+    input >> kind >> collider.collider_id >> semantic >> shape.center_enu.east_m >> shape.center_enu.north_m
+        >> shape.center_up_m >> shape.heading_rad >> shape.half_length_m >> shape.half_width_m
+        >> shape.half_height_m >> collider.material.friction >> collider.material.restitution;
+    end_line(input);
+    require(kind == "STATIC" && semantic <= 2, "invalid static collider record");
+    collider.semantic = static_cast<StaticColliderSemantic>(semantic);
+    validate_static_collider(collider);
+    return collider;
+}
+
+void validate_ground_frame(const PhysicsReplayGroundFrame& frame)
+{
+    require(frame.samples.size() <= MeasuredGroundQueryRecorder::kMaximumQueriesPerFrame,
+        "ground query count exceeds frame bound");
+    require(frame.attempted ? !frame.samples.empty() && frame.environment_epoch != 0
+        : !frame.accepted && frame.samples.empty(), "invalid measured-ground tick flags");
+    require(frame.collision_coverage_valid || (frame.attempted && !frame.accepted),
+        "invalid recorded collision coverage outcome");
+    for (const auto& sample : frame.samples) validate_ground_sample(sample);
+    require(frame.static_colliders.size() <= PhysicsReplayGroundFrame::kMaximumStaticColliders,
+        "static collider count exceeds frame bound");
+    std::unordered_set<std::string> ids;
+    for (const auto& collider : frame.static_colliders) {
+        validate_static_collider(collider);
+        require(ids.insert(collider.collider_id).second, "duplicate recorded static collider ID");
+    }
+}
+
+std::string ground_sample_line(const GroundReplaySample& sample)
+{
+    auto output = output_line();
+    output << "QUERY " << sample.request.origin_enu.east_m << ' '
+        << sample.request.origin_enu.north_m << ' ' << sample.request.origin_enu.up_m
+        << ' ' << sample.request.max_distance_m << ' ';
+    if (sample.outcome == GroundReplayOutcome::Hit) {
+        const auto& hit = sample.hit;
+        output << "HIT " << hit.point_enu.east_m << ' ' << hit.point_enu.north_m << ' '
+            << hit.point_enu.up_m << ' ' << hit.normal_enu.east_m << ' '
+            << hit.normal_enu.north_m << ' ' << hit.normal_enu.up_m << ' '
+            << hit.distance_m << ' ' << static_cast<std::uint32_t>(hit.surface_material_id)
+            << ' ' << hit.friction_multiplier;
+    } else output << (sample.outcome == GroundReplayOutcome::NoHit ? "NO_HIT" : "UNAVAILABLE");
+    return output.str();
+}
+
+GroundReplaySample parse_ground_sample(const std::string& line)
+{
+    auto input = input_line(line);
+    std::string kind, outcome;
+    GroundReplaySample sample;
+    input >> kind >> sample.request.origin_enu.east_m >> sample.request.origin_enu.north_m
+        >> sample.request.origin_enu.up_m >> sample.request.max_distance_m >> outcome;
+    require(kind == "QUERY", "expected measured ground QUERY");
+    if (outcome == "HIT") {
+        sample.outcome = GroundReplayOutcome::Hit;
+        std::uint64_t material = std::numeric_limits<std::uint64_t>::max();
+        auto& hit = sample.hit;
+        input >> hit.point_enu.east_m >> hit.point_enu.north_m >> hit.point_enu.up_m
+            >> hit.normal_enu.east_m >> hit.normal_enu.north_m >> hit.normal_enu.up_m
+            >> hit.distance_m >> material >> hit.friction_multiplier;
+        require(material <= std::numeric_limits<std::uint32_t>::max(), "invalid ground material");
+        hit.surface_material_id = static_cast<GroundSurfaceMaterialId>(material);
+    } else {
+        require(outcome == "NO_HIT" || outcome == "UNAVAILABLE", "unknown ground outcome");
+        sample.outcome = outcome == "NO_HIT" ? GroundReplayOutcome::NoHit : GroundReplayOutcome::Unavailable;
+    }
+    end_line(input);
+    validate_ground_sample(sample);
+    return sample;
+}
+
+class ReplayGroundQuery final : public GroundQuery {
+public:
+    explicit ReplayGroundQuery(const std::vector<GroundReplaySample>& samples) : samples_(samples) {}
+    std::optional<GroundHit> query_down(const GroundQueryRequest& request) const override
+    {
+        require(cursor_ < samples_.size(), "solver requested an unrecorded ground query");
+        const auto& sample = samples_[cursor_++];
+        const auto& expected = sample.request;
+        // The same executable and max_digits10 round-trip preserve exact input
+        // doubles. A mismatch is not missing terrain: it must fail verification.
+        require(request.origin_enu.east_m == expected.origin_enu.east_m
+            && request.origin_enu.north_m == expected.origin_enu.north_m
+            && request.origin_enu.up_m == expected.origin_enu.up_m
+            && request.max_distance_m == expected.max_distance_m,
+            "solver ground query differs from recording");
+        if (sample.outcome == GroundReplayOutcome::Unavailable) throw GroundMeasurementUnavailable{};
+        if (sample.outcome == GroundReplayOutcome::NoHit) return std::nullopt;
+        return sample.hit;
+    }
+    void require_consumed() const { require(cursor_ == samples_.size(), "unused recorded ground queries"); }
+private:
+    const std::vector<GroundReplaySample>& samples_;
+    mutable std::size_t cursor_ = 0;
+};
 
 void validate_proxy(const KinematicCollisionProxy& proxy)
 {
@@ -280,6 +443,32 @@ private:
 };
 } // namespace
 
+MeasuredGroundQueryRecorder::MeasuredGroundQueryRecorder(std::shared_ptr<const GroundQuery> source)
+    : source_(std::move(source))
+{
+    require(static_cast<bool>(source_), "measured ground recorder requires a provider");
+}
+
+std::optional<GroundHit> MeasuredGroundQueryRecorder::query_down(const GroundQueryRequest& request) const
+{
+    require(samples_.size() < kMaximumQueriesPerFrame, "ground query count exceeds frame bound");
+    GroundReplaySample sample;
+    sample.request = request;
+    try {
+        const auto hit = source_->query_down(request);
+        sample.outcome = hit ? GroundReplayOutcome::Hit : GroundReplayOutcome::NoHit;
+        if (hit) sample.hit = *hit;
+        validate_ground_sample(sample);
+        samples_.push_back(sample);
+        return hit;
+    } catch (const GroundMeasurementUnavailable&) {
+        sample.outcome = GroundReplayOutcome::Unavailable;
+        validate_ground_sample(sample);
+        samples_.push_back(sample);
+        throw;
+    }
+}
+
 std::string physics_replay_file_checksum(const std::filesystem::path& path)
 {
     std::ifstream input(path, std::ios::binary);
@@ -295,7 +484,7 @@ std::string physics_replay_file_checksum(const std::filesystem::path& path)
 
 PhysicsReplayRecorder::PhysicsReplayRecorder(const std::filesystem::path& path,
     const PhysicsReplayIdentity& identity, std::uint64_t frame_limit, std::uint64_t byte_limit)
-    : frame_limit_(frame_limit), byte_limit_(byte_limit)
+    : frame_limit_(frame_limit), byte_limit_(byte_limit), measured_ground_(identity.measured_ground)
 {
     validate_identity(identity);
     require(frame_limit > 0 && frame_limit <= kMaximumFrames, "frame limit must be in [1,216000]");
@@ -303,7 +492,7 @@ PhysicsReplayRecorder::PhysicsReplayRecorder(const std::filesystem::path& path,
     require(!std::filesystem::exists(path), "output already exists; refusing overwrite");
     output_.open(path, std::ios::binary | std::ios::out);
     require(output_.is_open(), "cannot create output (parent directory must exist)");
-    write_line("SIMCORE_PHYSICS_REPLAY 1");
+    write_line(measured_ground_ ? "SIMCORE_PHYSICS_REPLAY 2" : "SIMCORE_PHYSICS_REPLAY 1");
     write_line(identity_line(identity));
 }
 
@@ -351,15 +540,42 @@ void PhysicsReplayRecorder::event(
 void PhysicsReplayRecorder::tick(const VehicleInput& input,
     const std::vector<KinematicCollisionProxy>& proxies, const VehicleState& state)
 {
+    require(!measured_ground_, "measured-ground recorder requires tick_measured");
+    write_tick(input, proxies, state, nullptr);
+}
+
+void PhysicsReplayRecorder::tick_measured(const VehicleInput& input,
+    const std::vector<KinematicCollisionProxy>& proxies, const VehicleState& state,
+    const PhysicsReplayGroundFrame& ground)
+{
+    require(measured_ground_, "file-ground recorder does not accept measured ticks");
+    write_tick(input, proxies, state, &ground);
+}
+
+void PhysicsReplayRecorder::write_tick(const VehicleInput& input,
+    const std::vector<KinematicCollisionProxy>& proxies, const VehicleState& state,
+    const PhysicsReplayGroundFrame* ground)
+{
     if (complete_ || invalid_) return;
     validate_input(input);
     require(proxies.size() <= 255, "proxy count exceeds 255");
+    if (ground) validate_ground_frame(*ground);
     auto output = output_line();
     output << "TICK " << frames_ << ' ' << input.throttle << ' ' << input.brake << ' '
            << input.steering << ' ' << input.handbrake << ' '
            << static_cast<unsigned>(input.gear) << ' ' << proxies.size();
     write_line(output.str());
     for (const auto& proxy : proxies) write_line(proxy_line(proxy));
+    if (ground) {
+        output = output_line();
+        output << "GROUND " << ground->attempted << ' ' << ground->initialize << ' '
+            << ground->accepted << ' ' << ground->environment_epoch << ' '
+            << ground->world_revision << ' ' << ground->samples.size() << ' ' << ground->static_colliders.size()
+            << ' ' << ground->collision_coverage_valid;
+        write_line(output.str());
+        for (const auto& sample : ground->samples) write_line(ground_sample_line(sample));
+        for (const auto& collider : ground->static_colliders) write_line(static_collider_line(collider));
+    }
     output = output_line();
     output << "STATE";
     for (double value : state_values(state)) {
@@ -399,7 +615,9 @@ PhysicsReplayVerification verify_physics_replay(const std::filesystem::path& pat
 {
     validate_identity(expected_identity);
     Reader reader(path);
-    require(reader.line() == "SIMCORE_PHYSICS_REPLAY 1", "unsupported format/version");
+    require(reader.line() == (expected_identity.measured_ground
+        ? "SIMCORE_PHYSICS_REPLAY 2" : "SIMCORE_PHYSICS_REPLAY 1"),
+        "unsupported format/version or ground mode mismatch");
     // Canonical max_digits10 formatting gives an exact, locale-independent
     // scalar/config/map/executable match, not a permissive approximate one.
     require(reader.line() == identity_line(expected_identity), "build/config/map/spawn/tick identity mismatch");
@@ -411,7 +629,8 @@ PhysicsReplayVerification verify_physics_replay(const std::filesystem::path& pat
     VehiclePhysics physics(expected_identity.origin_lat, expected_identity.origin_lon,
         expected_identity.origin_alt, expected_identity.spawn_heading,
         catalog.player_parameters(parameters, RuntimeVehicleClass::Sedan),
-        std::move(ground), std::move(collision));
+        expected_identity.measured_ground ? std::make_shared<FlatGroundQuery>() : std::move(ground),
+        expected_identity.measured_ground ? std::make_shared<CollisionWorld>() : std::move(collision));
     PhysicsReplayVerification result;
     while (true) {
         const auto line = reader.line(false);
@@ -496,7 +715,49 @@ PhysicsReplayVerification verify_physics_replay(const std::filesystem::path& pat
         }
         if (!proxies.empty()) ++result.dynamic_proxy_frames;
         physics.set_input(command);
-        const auto state = physics.update(1.0 / expected_identity.physics_hz, std::move(proxies));
+        if (expected_identity.measured_ground) {
+            PhysicsReplayGroundFrame frame;
+            auto ground_input = input_line(reader.line());
+            unsigned attempted = 2, initialize = 2, accepted = 2;
+            unsigned coverage_valid = 2;
+            std::size_t query_count = MeasuredGroundQueryRecorder::kMaximumQueriesPerFrame + 1;
+            std::size_t collider_count = PhysicsReplayGroundFrame::kMaximumStaticColliders + 1;
+            ground_input >> kind >> attempted >> initialize >> accepted
+                >> frame.environment_epoch >> frame.world_revision >> query_count >> collider_count >> coverage_valid;
+            end_line(ground_input);
+            require(kind == "GROUND" && attempted <= 1 && initialize <= 1 && accepted <= 1
+                && query_count <= MeasuredGroundQueryRecorder::kMaximumQueriesPerFrame
+                && collider_count <= PhysicsReplayGroundFrame::kMaximumStaticColliders && coverage_valid <= 1,
+                "invalid measured-ground frame header");
+            frame.attempted = attempted != 0;
+            frame.initialize = initialize != 0;
+            frame.accepted = accepted != 0;
+            frame.collision_coverage_valid = coverage_valid != 0;
+            for (std::size_t index = 0; index < query_count; ++index)
+                frame.samples.push_back(parse_ground_sample(reader.line()));
+            for (std::size_t index = 0; index < collider_count; ++index)
+                frame.static_colliders.push_back(parse_static_collider(reader.line()));
+            validate_ground_frame(frame);
+            if (frame.attempted) {
+                auto recorded_ground = std::make_shared<ReplayGroundQuery>(frame.samples);
+                bool coverage_checked = false;
+                const bool actual_accepted = physics.try_update_with_ground(
+                    1.0 / expected_identity.physics_hz, std::move(proxies), recorded_ground, frame.initialize,
+                    std::make_shared<CollisionWorld>(frame.static_colliders),
+                    [&](const VehicleState&) {
+                        coverage_checked = true;
+                        if (!frame.collision_coverage_valid) throw GroundMeasurementUnavailable{};
+                    });
+                require(frame.collision_coverage_valid || coverage_checked,
+                    "recorded collision rejection did not reach coverage validation");
+                require(actual_accepted == frame.accepted, "measured-ground tick outcome mismatch");
+                recorded_ground->require_consumed();
+            } else physics.clear_tick_contacts();
+            ++result.measured_ground_frames;
+            if (!frame.accepted) ++result.measured_ground_waits;
+            result.measured_ground_queries += query_count;
+        } else physics.update(1.0 / expected_identity.physics_hz, std::move(proxies));
+        const auto state = physics.get_state();
         const auto actual = state_values(state);
         auto expected_input = input_line(reader.line());
         expected_input >> kind;

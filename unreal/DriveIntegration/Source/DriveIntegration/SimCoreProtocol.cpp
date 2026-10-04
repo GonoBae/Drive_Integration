@@ -196,7 +196,7 @@ namespace
 		{
 			uint32 Field; uint8 Wire; uint64 Integer = 0;
 			if (!Reader.ReadTag(Field, Wire)) return false;
-			if (Field <= 15)
+			if (Field <= 16)
 			{
 				const uint32 Mask = 1u << Field;
 				if (Seen & Mask) return false;
@@ -707,6 +707,8 @@ namespace
 		TSet<FString> StructureIds;
 		FString TrafficChecksum;
 		bool bHasTrafficChecksum = false;
+		TOptional<FGroundQueryBatch> GroundShadow, LivePatch, NpcTile;
+		TOptional<FWorldObstacleRequest> WorldObstacles;
 		while (!Reader.AtEnd())
 		{
 			uint32 Field; uint8 Wire;
@@ -780,6 +782,34 @@ namespace
 					return false;
 				}
 				bHasTrafficChecksum = true;
+				continue;
+			}
+			if (Field == 8)
+			{
+				TArrayView<const uint8> Data;
+				FWorldObstacleRequest Request;
+				if (Wire != 2 || WorldObstacles.IsSet() || !Reader.ReadMessage(Data)
+					|| !ParseWorldObstacleRequest(Data, Request)) return false;
+				WorldObstacles = MoveTemp(Request);
+				continue;
+			}
+			if (Field == 6 || Field == 7 || Field == 9)
+			{
+				auto& Destination = Field == 6 ? GroundShadow : Field == 7 ? LivePatch : NpcTile;
+				TArrayView<const uint8> BatchData;
+				FGroundQueryBatch Batch;
+				if (Wire != 2 || Destination.IsSet() || !Reader.ReadMessage(BatchData)
+					|| !ParseGroundQueryBatch(BatchData, Batch))
+				{
+					OutError = TEXT("WorldState contains an invalid ground shadow request");
+					return false;
+				}
+				if ((Field == 7 || Field == 9) && (Batch.OriginsEnu.Num() != 1 || Batch.QueryDistancesMeters.Num() != 1
+					|| Batch.QueryDistancesMeters[0] != 32 || Batch.MaxDistanceMeters != 0
+					|| Batch.PatchStepEnu == FVector3d::ZeroVector)) return false;
+				if (Field == 6 && Batch.PatchStepEnu != FVector3d::ZeroVector) return false;
+				if (Field == 9 && (!Batch.WorldRevision || Batch.PatchStepEnu != FVector3d(.5,.5,0))) return false;
+				Destination = MoveTemp(Batch);
 				continue;
 			}
 			if (Field == 5)
@@ -871,15 +901,271 @@ namespace
 		State.TrafficSignals = Signals;
 		State.TrafficNetworkChecksum = TrafficChecksum;
 		State.Structures = Structures;
+		State.GroundQueryShadow = MoveTemp(GroundShadow);
+		State.LiveGroundPatch = MoveTemp(LivePatch);
+		State.NpcGroundTile = MoveTemp(NpcTile);
+		State.WorldObstacles = MoveTemp(WorldObstacles);
 		for (FVehicleState& Entity : Entities)
 		{
 			Entity.ServerHealth = Health;
 			Entity.TrafficSignals = Signals;
 			Entity.TrafficNetworkChecksum = TrafficChecksum;
 			Entity.Structures = Structures;
+			if (Entity.EntityId == State.EntityId)
+			{
+				// The envelope parser copies this target back into its output state.
+				Entity.GroundQueryShadow = State.GroundQueryShadow;
+				Entity.LiveGroundPatch = State.LiveGroundPatch;
+				Entity.NpcGroundTile = State.NpcGroundTile;
+				Entity.WorldObstacles = State.WorldObstacles;
+			}
 		}
 		return bFoundTarget;
 	}
+}
+
+bool IsValidWorldObstacleRequest(const FWorldObstacleRequest& Request)
+{
+	const auto& Extent = Request.HalfExtentEnu;
+	return Request.RequestId && Request.EnvironmentEpoch && IsBoundedVector(Request.CentreEnu,1e6)
+		&& IsFiniteVector(Extent) && Extent.X >= 6 && Extent.X <= 24
+		&& Extent.Y >= 6 && Extent.Y <= 24 && Extent.Z == 8;
+}
+
+bool ParseWorldObstacleRequest(TArrayView<const uint8> Data, FWorldObstacleRequest& Out)
+{
+	Out = {};
+	if (Data.Num() > 256) return false;
+	FReader Reader(Data); uint32 Seen = 0;
+	while (!Reader.AtEnd()) {
+		uint32 Field; uint8 Wire; uint64 Value;
+		if (!Reader.ReadTag(Field, Wire)) return false;
+		if (Field <= 6) { if (Seen & (1u<<Field)) return false; Seen |= 1u<<Field; }
+		if (Field >= 1 && Field <= 4) {
+			if (Wire != 0 || !Reader.ReadVarint(Value)) return false;
+			if (Field == 1) Out.RequestId = Value;
+			if (Field == 2) Out.EnvironmentEpoch = Value;
+			if (Field == 3) Out.ReferenceSimulationTimeNs = Value;
+			if (Field == 4) Out.WorldRevision = Value;
+		} else if (Field == 5 || Field == 6) {
+			TArrayView<const uint8> Vector;
+			if (Wire != 2 || !Reader.ReadMessage(Vector)
+				|| !ParseStructureVector(Vector, Field == 5 ? Out.CentreEnu : Out.HalfExtentEnu)) return false;
+		} else if (!Reader.Skip(Wire)) return false;
+	}
+	return IsValidWorldObstacleRequest(Out);
+}
+
+TArray<uint8> SerializeWorldObstacleResult(const FWorldObstacleResult& Result, uint64 Sequence,
+	const FString& SourceId, const FString& SessionId, const FString& PlaySessionId, const FString& MapChecksum)
+{
+	if (!Result.RequestId || !Result.EnvironmentEpoch || !Result.WorldRevision || Result.Colliders.Num() > 128
+		|| (Result.Status != EWorldObstacleStatus::Complete && !Result.Colliders.IsEmpty())
+		|| static_cast<uint32>(Result.Status) < 1 || static_cast<uint32>(Result.Status) > 3) return {};
+	const auto WriteDouble = [](TArray<uint8>& Out, uint32 Field, double Value) {
+		WriteTag(Out,Field,1); uint64 Bits; FMemory::Memcpy(&Bits,&Value,sizeof(Bits));
+		for (int I=0; I<8; ++I) Out.Add(static_cast<uint8>(Bits>>(I*8)));
+	};
+	const auto WriteVector = [&](TArray<uint8>& Out, uint32 Field, const FVector3d& Value) {
+		TArray<uint8> Bytes; WriteDouble(Bytes,1,Value.X); WriteDouble(Bytes,2,Value.Y); WriteDouble(Bytes,3,Value.Z);
+		WriteBytes(Out,Field,Bytes);
+	};
+	TArray<uint8> Payload;
+	WriteTag(Payload,1,0); WriteVarint(Payload,Result.RequestId);
+	WriteTag(Payload,2,0); WriteVarint(Payload,Result.EnvironmentEpoch);
+	WriteTag(Payload,3,0); WriteVarint(Payload,Result.ReferenceSimulationTimeNs);
+	WriteTag(Payload,4,0); WriteVarint(Payload,Result.WorldRevision);
+	WriteTag(Payload,5,0); WriteVarint(Payload,static_cast<uint32>(Result.Status));
+	TSet<FString> Ids;
+	for (const auto& Box : Result.Colliders) {
+		if (Box.ColliderId.IsEmpty() || Box.ColliderId.Len() > 128 || Ids.Contains(Box.ColliderId)
+			|| Box.Semantic > 2 || !IsBoundedVector(Box.CentreEnu,1e6)
+			|| !IsBoundedVector(Box.HalfExtentEnu,1e6) || Box.HalfExtentEnu.GetMin() <= 0
+			|| !FMath::IsFinite(Box.HeadingRad) || !FMath::IsFinite(Box.Friction) || Box.Friction < 0 || Box.Friction > 4
+			|| !FMath::IsFinite(Box.Restitution) || Box.Restitution < 0 || Box.Restitution > 1) return {};
+		for (TCHAR C : Box.ColliderId)
+			if (!((C >= 'a' && C <= 'z') || (C >= 'A' && C <= 'Z') || (C >= '0' && C <= '9')
+				|| C == '_' || C == '-' || C == '.')) return {};
+		Ids.Add(Box.ColliderId);
+		TArray<uint8> Encoded;
+		WriteString(Encoded,1,Box.ColliderId); WriteTag(Encoded,2,0); WriteVarint(Encoded,Box.Semantic);
+		WriteVector(Encoded,3,Box.CentreEnu); WriteDouble(Encoded,4,Box.HeadingRad);
+		WriteVector(Encoded,5,Box.HalfExtentEnu); WriteDouble(Encoded,6,Box.Friction); WriteDouble(Encoded,7,Box.Restitution);
+		WriteBytes(Payload,6,Encoded);
+	}
+	TArray<uint8> Envelope;
+	WriteTag(Envelope,1,0); WriteVarint(Envelope,SchemaVersion); WriteTag(Envelope,2,0); WriteVarint(Envelope,Sequence);
+	WriteString(Envelope,4,SourceId); WriteString(Envelope,5,MapChecksum);
+	WriteString(Envelope,6,SessionId); WriteString(Envelope,7,PlaySessionId);
+	WriteBytes(Envelope,18,Payload);
+	return Envelope.Num() <= 64*1024 ? Envelope : TArray<uint8>{};
+}
+
+bool ParseGroundQueryBatch(TArrayView<const uint8> Data, FGroundQueryBatch& Out)
+{
+	Out = {};
+	if (Data.Num() > 4096) return false;
+	FReader Reader(Data);
+	uint32 Seen = 0;
+	while (!Reader.AtEnd())
+	{
+		uint32 Field; uint8 Wire; uint64 Value;
+		if (!Reader.ReadTag(Field, Wire)) return false;
+		if ((Field >= 1 && Field <= 6 && Field != 5) || Field == 8 || Field == 9)
+		{
+			if (Seen & (1u << Field)) return false;
+			Seen |= 1u << Field;
+		}
+		if (Field >= 1 && Field <= 4)
+		{
+			if (Wire != 0 || !Reader.ReadVarint(Value)) return false;
+			if (Field == 1) Out.RequestId = Value;
+			if (Field == 2) Out.EnvironmentEpoch = Value;
+			if (Field == 3) Out.ReferenceSimulationTimeNs = Value;
+			if (Field == 4) { if (Value != 1) return false; Out.EntityId = 1; }
+		}
+		else if (Field == 5)
+		{
+			TArrayView<const uint8> Point; FVector3d Origin = FVector3d::ZeroVector;
+			if (Wire != 2 || Out.OriginsEnu.Num() >= 64 || !Reader.ReadMessage(Point)
+				|| !ParseStructureVector(Point, Origin) || !IsBoundedVector(Origin, 1e6)) return false;
+			Out.OriginsEnu.Add(Origin);
+		}
+		else if (Field == 6)
+		{
+			if (Wire != 1 || !Reader.ReadFixed64(Out.MaxDistanceMeters)) return false;
+		}
+		else if (Field == 7)
+		{
+			if (Wire == 1)
+			{
+				double Depth;
+				if (Out.QueryDistancesMeters.Num() >= 64 || !Reader.ReadFixed64(Depth)) return false;
+				Out.QueryDistancesMeters.Add(Depth);
+			}
+			else if (Wire == 2)
+			{
+				TArrayView<const uint8> Packed;
+				if (!Reader.ReadMessage(Packed)) return false;
+				FReader DepthReader(Packed);
+				while (!DepthReader.AtEnd())
+				{
+					double Depth;
+					if (Out.QueryDistancesMeters.Num() >= 64 || !DepthReader.ReadFixed64(Depth)) return false;
+					Out.QueryDistancesMeters.Add(Depth);
+				}
+			}
+			else return false;
+		}
+		else if (Field == 8)
+		{
+			TArrayView<const uint8> Step;
+			if (Wire != 2 || !Reader.ReadMessage(Step)
+				|| !ParseStructureVector(Step, Out.PatchStepEnu)) return false;
+		}
+		else if (Field == 9)
+		{
+			if (Wire != 0 || !Reader.ReadVarint(Out.WorldRevision)) return false;
+		}
+		else if (!Reader.Skip(Wire)) return false;
+	}
+	return IsValidGroundQueryBatch(Out);
+}
+
+bool IsValidGroundQueryBatch(const FGroundQueryBatch& Batch)
+{
+	if (!Batch.RequestId || !Batch.EnvironmentEpoch || Batch.EntityId != 1
+		|| Batch.OriginsEnu.IsEmpty() || Batch.OriginsEnu.Num() > 64) return false;
+	for (const auto& Origin : Batch.OriginsEnu) if (!IsBoundedVector(Origin, 1e6)) return false;
+	if (Batch.PatchStepEnu != FVector3d::ZeroVector)
+	{
+		const auto& Step = Batch.PatchStepEnu;
+		return IsFiniteVector(Step) && Step.X >= .5 && Step.X <= 2 && Step.Y >= .5 && Step.Y <= 2
+			&& Step.Z == 0 && Batch.OriginsEnu.Num() == 1 && Batch.MaxDistanceMeters == 0
+			&& Batch.QueryDistancesMeters.Num() == 1 && Batch.QueryDistancesMeters[0] == 32;
+	}
+	if (Batch.WorldRevision != 0) return false;
+	if (Batch.QueryDistancesMeters.IsEmpty()) return Batch.OriginsEnu.Num() <= 5
+		&& FMath::IsFinite(Batch.MaxDistanceMeters) && Batch.MaxDistanceMeters > 0 && Batch.MaxDistanceMeters <= 20;
+	if (Batch.MaxDistanceMeters != 0 || Batch.QueryDistancesMeters.Num() != Batch.OriginsEnu.Num()) return false;
+	for (double Depth : Batch.QueryDistancesMeters)
+		if (!FMath::IsFinite(Depth) || Depth <= 0 || Depth > 32) return false;
+	return true;
+}
+
+TArray<uint8> SerializeGroundQueryResult(const FGroundQueryResult& Result, uint64 Sequence,
+	const FString& SourceId, const FString& SessionId, const FString& PlaySessionId, const FString& MapChecksum, bool bLivePatch, bool bNpcTile)
+{
+	if ((bNpcTile && !bLivePatch) || !Result.RequestId || !Result.EnvironmentEpoch || Result.Probes.IsEmpty()
+		|| (bLivePatch ? Result.WorldRevision == 0 : Result.WorldRevision != 0)
+		|| (bLivePatch ? Result.Probes.Num() != 625 : Result.Probes.Num() > 64)
+		|| Result.Boundaries.Num() > 128 || (!bLivePatch && !Result.Boundaries.IsEmpty())
+		|| !FMath::IsFinite(Result.MeasurementDurationMs) || Result.MeasurementDurationMs < 0
+		|| Result.MeasurementDurationMs > 500) return {};
+	const auto WriteDouble = [](TArray<uint8>& Out, uint32 Field, double Value) {
+		WriteTag(Out, Field, 1); uint64 Bits; FMemory::Memcpy(&Bits, &Value, sizeof(Bits));
+		for (int I = 0; I < 8; ++I) Out.Add(static_cast<uint8>(Bits >> (I*8)));
+	};
+	const auto WriteVector = [&](TArray<uint8>& Out, uint32 Field, const FVector3d& V) {
+		TArray<uint8> Bytes; WriteDouble(Bytes, 1, V.X); WriteDouble(Bytes, 2, V.Y); WriteDouble(Bytes, 3, V.Z);
+		WriteBytes(Out, Field, Bytes);
+	};
+	TArray<uint8> Payload;
+	WriteTag(Payload, 1, 0); WriteVarint(Payload, Result.RequestId);
+	WriteTag(Payload, 2, 0); WriteVarint(Payload, Result.EnvironmentEpoch);
+	WriteTag(Payload, 3, 0); WriteVarint(Payload, Result.ReferenceSimulationTimeNs);
+	for (const FGroundProbeResult& P : Result.Probes)
+	{
+		TArray<uint8> Probe;
+		WriteTag(Probe, 1, 0); WriteVarint(Probe, static_cast<uint8>(P.Status));
+		if (P.Status == EGroundProbeStatus::Hit)
+		{
+			if (!IsBoundedVector(P.PointEnu, 1e6) || !IsFiniteVector(P.NormalEnu)
+				|| FMath::Abs(P.NormalEnu.SizeSquared()-1.0) > 0.01 || P.NormalEnu.Z <= 0) return {};
+			WriteVector(Probe, 2, P.PointEnu); WriteVector(Probe, 3, P.NormalEnu);
+			WriteTag(Probe, 4, 0); WriteVarint(Probe, P.SurfaceMaterialId);
+		}
+		else if (P.Status != EGroundProbeStatus::NoHit && P.Status != EGroundProbeStatus::Failed) return {};
+		WriteBytes(Payload, 4, Probe);
+	}
+	WriteDouble(Payload, 5, Result.MeasurementDurationMs);
+	if (bLivePatch) { WriteTag(Payload, 7, 0); WriteVarint(Payload, Result.WorldRevision); }
+	TSet<uint32> BoundaryCells;
+	for (const auto& Boundary : Result.Boundaries)
+	{
+		if (Boundary.CellIndex >= 24*24 || BoundaryCells.Contains(Boundary.CellIndex)
+			|| !IsBoundedVector(Boundary.PointEnu, 1e6) || !IsFiniteVector(Boundary.NormalEnu)
+			|| Boundary.NormalEnu.Z != 0 || FMath::Abs(Boundary.NormalEnu.SizeSquared()-1.0) > .001) return {};
+		BoundaryCells.Add(Boundary.CellIndex);
+		TArray<uint8> Encoded;
+		WriteTag(Encoded, 1, 0); WriteVarint(Encoded, Boundary.CellIndex);
+		WriteVector(Encoded, 2, Boundary.PointEnu); WriteVector(Encoded, 3, Boundary.NormalEnu);
+		WriteBytes(Payload, 6, Encoded);
+	}
+	TArray<uint8> Envelope;
+	WriteTag(Envelope, 1, 0); WriteVarint(Envelope, SchemaVersion);
+	WriteTag(Envelope, 2, 0); WriteVarint(Envelope, Sequence);
+	WriteString(Envelope, 4, SourceId); WriteString(Envelope, 5, MapChecksum);
+	WriteString(Envelope, 6, SessionId); WriteString(Envelope, 7, PlaySessionId);
+	WriteBytes(Envelope, bNpcTile ? 19 : bLivePatch ? 16 : 15, Payload);
+	if (bLivePatch && Envelope.Num() > 64*1024) return {};
+	return Envelope;
+}
+
+TArray<uint8> SerializeGroundWorldRevision(uint64 WorldRevision, bool bMeasurementsReady, uint64 Sequence,
+	const FString& SourceId, const FString& SessionId, const FString& PlaySessionId, const FString& MapChecksum)
+{
+	if (!WorldRevision) return {};
+	TArray<uint8> Payload;
+	WriteTag(Payload, 1, 0); WriteVarint(Payload, WorldRevision);
+	WriteTag(Payload, 2, 0); WriteVarint(Payload, bMeasurementsReady ? 1 : 0);
+	TArray<uint8> Envelope;
+	WriteTag(Envelope, 1, 0); WriteVarint(Envelope, SchemaVersion);
+	WriteTag(Envelope, 2, 0); WriteVarint(Envelope, Sequence);
+	WriteString(Envelope, 4, SourceId); WriteString(Envelope, 5, MapChecksum);
+	WriteString(Envelope, 6, SessionId); WriteString(Envelope, 7, PlaySessionId);
+	WriteBytes(Envelope, 17, Payload);
+	return Envelope;
 }
 
 bool IsValidTrafficSignalState(const FTrafficSignalState& State)
@@ -1093,7 +1379,7 @@ bool TryParseHelloEnvelope(
 				return false;
 			}
 		}
-		else if (Field >= 10 && Field <= 14)
+		else if (Field >= 10 && Field <= 19)
 		{
 			if (Wire != 2)
 			{
@@ -1233,7 +1519,7 @@ bool ParseWorldStateEnvelope(TArrayView<const uint8> Data, uint32 TargetEntityId
 		{
 			if (!Reader.ReadString(PlaySessionId)) { OutError = TEXT("Invalid play session ID"); return false; }
 		}
-		else if (Field >= 10 && Field <= 14)
+		else if (Field >= 10 && Field <= 19)
 		{
 			if (Wire != 2)
 			{

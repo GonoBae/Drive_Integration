@@ -1,130 +1,111 @@
 # Drive Integration
 
-Unreal Engine 5.6과 C++ 시뮬레이션 서버를 연결해서 만든 Windows용 운전 시뮬레이션 프로젝트입니다.
+[English](README.md) | [한국어](README.ko.md)
 
-Unreal에서는 입력과 화면 표시를 담당하고, C++ 서버에서는 차량 물리와 교통 상황을 60Hz로 계산합니다. 차량 계산식은 직접 작성했으며 외부 차량 물리 SDK는 사용하지 않았습니다. 현재는 작은 가상 도심인 `L_SignalCity`에서 차량 주행, 신호, NPC, 보행자와 충돌 상황을 확인할 수 있습니다.
+A Windows driving simulation built with **Unreal Engine 5.6** and a separate **C++ simulation server**.
 
-## 현재 구현한 내용
+Unreal handles input and presentation. SimCore calculates vehicle motion and traffic at a default rate of 60 steps per second. Vehicle dynamics use custom equations, without an external vehicle physics SDK.
 
-| 구분 | 내용 |
+## Features
+
+| Area | What is implemented |
 |---|---|
-| 차량 물리 | 전진·후진, 제동, Ackermann 조향, 네 바퀴 서스펜션, 노면 마찰, 경사·연석 주행과 차체 충돌을 계산합니다. 플레이어 차종마다 질량·차체 크기·조향·구동·제동 설정이 다릅니다. |
-| 차량 설정 | 차종과 부품은 JSON으로 관리합니다. `G`에서 조합을 고르거나 `Tab`으로 개별 부품을 선택합니다. 정차 후 적용하면 출발점에서 초기화됩니다. 현재 편집 기준은 세단 조합2종입니다. 같은 차종 NPC에는 동력·접지력을 적용하며 서스펜션 진동은 계산하지 않습니다. [설정 안내](docs/architecture.md#개별-부품-선택) |
-| 서버 연동 | WebSocket과 Protobuf로 입력과 상태를 주고받습니다. 재연결, Play 초기화, 지도 변경 감지도 처리합니다. |
-| 도심 코스 | 두 개의 교차로와 북쪽 연결 루프, 합류 전 화살표·점선 안내, 직진과 구분한 좌회전 신호가 있습니다. 국내 신호·차선 표시를 일부 반영한 가상 도심이며, 주행 영역 밖에는 원경 지면과 스카이라인을 표시합니다. |
-| 교통 | NPC 차량 10대와 체형·속도를 구분한 보행자 8명이 움직입니다. NPC는 차선·신호·장애물을 다시 판단하며, 너무 가까워 바로 피할 수 없으면 후방이 안전할 때 공간을 만든 뒤 차선 변경을 시도합니다. 사고 차량이나 쓰러진 사람에게는 경적을 울리지 않습니다. |
-| 충돌 표현 | 차량·보행자·구조물 충돌을 처리합니다. 충돌 위치에 따른 차체 메시 변형, 보행자 낙상과 사고 차량 복귀는 화면상으로 표현합니다. |
-| 차량 표현 | 플레이어와 NPC에 세단·경차·트럭·오토바이를 표시합니다. 플레이어는 주행 중 `1`~`4`로 차종을 바꿀 수 있습니다. 계기판 HUD, 카메라 회전, 방향지시등과 비상등, 클락션, 차량 소리와 배기가스가 있습니다. 플레이어와 NPC가 공통 차종 설정으로 실내·운전자를 표시하며 오토바이는 탑승자를 표시합니다. 실내는 공통 부품을 차종에 맞게 배치한 축약 표현입니다. |
-| 확인 도구 | 충돌과 접지를 보는 디버그 화면, 주행 기록과 시각 재생, 서버 입력을 다시 계산하는 물리 재생 검증 기능이 있습니다. |
+| Driving | Acceleration, reverse, steering, braking, four-wheel ground contact and suspension |
+| Vehicles | Sedan, compact car, truck and motorcycle; shared JSON settings |
+| Parts | Two sedan presets and individual tire, suspension and powertrain selections |
+| Traffic | 10 NPC vehicles, 8 pedestrians, signals, route selection and obstacle avoidance |
+| Collisions | Vehicle impacts, local body deformation, pedestrian falls and structure damage |
+| Presentation | Dashboard, three camera modes, drivers, lights, horn, vehicle audio and exhaust |
+| Diagnostics | Ground/contact debug view, visual recording/playback and server physics replay |
 
-차량 물리는 직접 만든 4-corner 축약 모델입니다. 네 바퀴의 접지와 서스펜션, 타이어 힘을 각각 계산하지만 상용 완성차 해석 프로그램과 같은 정밀 모델은 아닙니다.
-오토바이도 현재는 이 모델을 사용하므로 실제 이륜차의 균형·기울기까지 재현하지는 않습니다.
+The city is a fictional test course inspired by some Korean road rules, not a complete road-system simulation.
 
-구현 범위와 검증 결과, 남은 확인 사항은 [현재 상태](./docs/status.md)에 모았습니다.
-코드 구현·자동 검사·실제 플레이 확인은 구분하며 최신 화면·청감·30분 주행 인수는 아직 완료하지 않았습니다.
-현재 게임 실행에는 Python 서버가 필요하지 않습니다. 필요한 Python 검사 도구는 `scripts/`에만 남겼습니다.
+## How it works
 
-## 실행 환경
+![Current client and server architecture](docs/images/system-overview.svg)
+
+The server owns the final vehicle state. The current driving path uses ground, obstacle and traffic data exported from Unreal. These files are called **MapPackage** in the code.
+
+A transition to live Unreal world queries is in progress. Optional modes use Unreal measurements for player ground, box obstacles, and NPC/pedestrian ground. Normal startup still uses saved map data. The live modes remain experimental. [Scope and limits — Korean](docs/architecture.md#실시간-월드-측정-전환-계획)
+
+## Requirements
 
 - Windows 64-bit
 - Unreal Engine 5.6
-- Visual Studio 2022의 **Desktop development with C++** 워크로드
-- Git
-- CMake 3.21 이상
-- PowerShell
+- Visual Studio 2022 with **Desktop development with C++**
+- CMake 3.21 or later, Git and PowerShell
 
-## 처음 빌드할 때
+Python is not needed to run the game or server. Some development tests use it.
 
-저장소 루트에서 PowerShell을 열고 다음 명령을 실행합니다.
+## Quick start
+
+Run these commands in PowerShell from the repository root:
 
 ```powershell
 .\cpp\host\scripts\setup.ps1
 .\cpp\host\scripts\build.ps1
-```
-
-첫 번째 명령은 프로젝트 안에 vcpkg를 준비하고, 두 번째 명령은 C++ 서버와 테스트를 빌드합니다. 빌드가 끝나면 서버 실행 파일이 아래 경로에 생성됩니다.
-
-```text
-cpp\host\build\Release\simcore_publisher.exe
-```
-
-Unreal 프로젝트는 `unreal\DriveIntegration\DriveIntegration.uproject`를 Unreal Engine 5.6으로 엽니다. 처음 열 때 C++ 모듈 빌드 안내가 나오면 빌드를 진행합니다.
-
-## 실행 방법
-
-### 1. 서버를 실행합니다
-
-저장소 루트의 PowerShell에서 다음 명령을 실행합니다.
-
-```powershell
 .\scripts\run_signal_city_server.ps1 -Background
 ```
 
-정상적으로 실행되면 서버 PID, 포트 `9000`, 로그 경로가 출력됩니다. 로그는 `runtime_logs` 폴더에 저장됩니다.
+The setup script prepares the project-local vcpkg dependencies. The build creates `cpp\host\build\Release\simcore_publisher.exe`.
 
-서버 로그를 창에서 바로 보고 싶으면 `-Background`를 빼고 실행합니다.
+1. Open `unreal\DriveIntegration\DriveIntegration.uproject` in Unreal Engine 5.6.
+2. Build the C++ modules if the editor prompts you.
+3. Open `/Game/SignalCity/Maps/L_SignalCity` and press **Play**.
+4. Check that the HUD connection status is **Active**.
 
-```powershell
-.\scripts\run_signal_city_server.ps1
-```
+The saved map is ready to use; you do not need to Bake it again for normal Play.
 
-### 2. Unreal에서 실행합니다
-
-1. `unreal\DriveIntegration\DriveIntegration.uproject`를 엽니다.
-2. 기본 레벨인 `/Game/SignalCity/Maps/L_SignalCity`가 열렸는지 확인합니다.
-3. **Play**를 누릅니다.
-4. HUD의 연결 상태가 `Active`인지 확인합니다.
-
-현재 저장된 `L_SignalCity`를 확인할 때는 Ground Bake를 다시 할 필요가 없습니다.
-
-### 3. 서버를 종료합니다
-
-Background로 실행했을 때 출력된 PID만 종료합니다.
+The launcher prints the server PID and log paths. Logs are saved in `runtime_logs/`. To stop that server:
 
 ```powershell
-Stop-Process -Id <출력된 PID>
+Stop-Process -Id <PID>
 ```
 
-다른 지도용 서버도 같은 포트 `9000`을 사용하므로 동시에 실행하지 않습니다.
+Only one server can use port 9000 at a time. Remove `-Background` to keep the server log in the current terminal.
 
-## 조작법
+### Optional live ground comparison
 
-| 입력 | 동작 |
+Stop the existing server, then start the diagnostic mode:
+
+```powershell
+.\scripts\run_signal_city_server.ps1 -Background -GroundQueryShadow
+```
+
+Play with the rebuilt Unreal client. The server's `[GroundShadow]` log reports response time and ground differences. This is a development check, not the completed live-physics mode. [Scope and checks — Korean](docs/guides/core_validation.md#실시간-지면-측정-비교)
+
+### Experimental player ground
+
+Stop the existing server and start `scripts/run_signal_city_server.ps1 -Background -LiveGround`.
+Use the rebuilt Unreal client. This mode samples a small area around the player and runs the existing server physics on those measurements. It needs no ground Bake for that area.
+
+This mode measures straight curb edges and adjusts the scan area to vehicle speed. Missing, expired, or ambiguous measurements pause the affected simulation. World changes invalidate old results; server physics recording includes the measurements actually used.
+
+Add `-LiveObstacles` for supported box obstacles and `-LiveNpcGround` for NPC/pedestrian ground. These flags also enable `-LiveGround`. Unsupported obstacle shapes pause the experimental simulation; they are not treated as empty space. Saved map data is still required at startup and for traffic rules and structure damage. Ground comparison cannot run at the same time. General curb/high-speed driving, overlapping surfaces, and the new packaged build still need acceptance testing. [Test guide — Korean](docs/guides/core_validation.md#실험용-플레이어-지면)
+
+## Controls
+
+| Input | Action |
 |---|---|
-| `W` | 전진 가속 |
-| `S` | 제동, 정지 후 계속 누르면 후진 |
-| `A` / `D` | 좌우 조향 |
-| `Space` | 후륜 사이드 브레이크 |
-| `Q` / `E` | 좌·우 방향지시등 |
-| `X` | 비상등 |
-| `H` | 누르는 동안 클락션, 떼면 정지 |
-| `1` / `2` / `3` / `4` | 세단 / 경차 / 트럭 / 오토바이 선택 후 출발점에서 다시 시작 |
-| `G` / `↑`·`↓` / `Enter` | 부품 조합 화면 / 선택 / 정차 후 초기화 적용. `G`로 닫기 |
-| `Tab` / `←`·`→` (조합 화면) | 개별 부품 편집 전환 / 선택한 장착 항목의 부품 변경 |
-| 마우스 이동 | 카메라 회전 |
-| 마우스 휠 | 카메라 거리 조절 |
-| `V` | 외부 추적 → 운전석 → 고정 후방 카메라 전환 |
-| `C` | 기본 외부 추적 카메라로 복귀 |
-| `F3` | 충돌체·접지 디버그 표시 |
-| `R` | 주행 기록 시작·종료 |
-| `F6` | 마지막 주행 기록을 시각 재생 |
+| `W` / `S` | Accelerate / brake; hold S after stopping to reverse |
+| `A` / `D` | Steer left / right |
+| `Space` | Rear-wheel handbrake |
+| `Q` / `E` / `X` | Left indicator / right indicator / hazard lights |
+| `H` | Horn while held |
+| `1` / `2` / `3` / `4` | Sedan / compact / truck / motorcycle; resets the drive |
+| `G` | Open or close the vehicle setup menu |
+| `↑` / `↓` / `Enter` | Select a preset or slot / apply while stopped |
+| `Tab` / `←` / `→` in the menu | Switch to individual parts / change the selected part |
+| Mouse / mouse wheel | Rotate camera / change camera distance |
+| `V` / `C` | Cycle three camera modes / return to the chase camera |
+| `F3` | Ground and collision debug view |
+| `R` / `F6` | Start or stop recording / play the last visual recording |
 
-## 확인할 수 있는 항목
+Applying a vehicle setup starts a new drive at the spawn point. Reconnecting during the same drive keeps the selected setup and simulation state.
 
-- 평지, 경사로와 연석에서 차체와 바퀴가 함께 움직이는지 확인할 수 있습니다.
-- 차량 신호와 보행 신호에 따라 NPC와 보행자가 움직이는지 확인할 수 있습니다.
-- NPC는 인접 차로뿐 아니라 차체가 지나갈 수 있는 주변 도로 공간도 검사합니다. 차선에 걸쳐 피한 뒤 원래 경로로 돌아올 수 있으며, 트럭은 자신의 차체 크기와 회전 반경을 사용합니다. 앞으로 피할 수 없을 때만 필요한 후진 거리를 0.5m 단위로 찾습니다. 실제 통과 공간이 없거나 접근 차량 때문에 위험하면 기다립니다.
-- `1`~`4`로 플레이어 차종을 바꿔 차체 크기와 가속·제동·조향 차이를 확인할 수 있습니다. 차종을 바꾸면 새 주행 세션으로 연결하고 출발점에서 다시 시작합니다.
-- 세단·경차·트럭·오토바이 NPC의 차체 크기와 가속·제동 차이를 확인할 수 있습니다.
-- 합류부 차선이 부드럽게 이어지고 멀리 보았을 때 코스 끝이 원경 지면과 건물에 가려지는지 확인할 수 있습니다.
-- `Q/E/X`의 점등·소등과 클릭음, 고속 직진과 강한 선회의 타이어 소리 차이를 확인할 수 있습니다. 차량 프레임은 현재 서스펜션과 바퀴 위치를 따라가는 축약 표현입니다.
-- 차량, 보행자, 신호등과 구조물 충돌 반응을 확인할 수 있습니다.
-- `F3`로 차량 충돌 범위와 바퀴 접지 상태를 확인할 수 있습니다.
-- `R`로 기록한 주행을 `F6`으로 다시 볼 수 있습니다.
+## Tests
 
-## 테스트
-
-C++ 서버 테스트는 빌드 후 다음 명령으로 실행합니다.
+After building the server:
 
 ```powershell
 Set-Location .\cpp\host
@@ -132,53 +113,36 @@ ctest --preset release
 Set-Location ..\..
 ```
 
-실제 주행 감각과 화면 표현은 `L_SignalCity`에서 Play하여 확인합니다.
-통신·Proto·성능 검사 도구의 설치와 실행은 [개발 검증 도구](./scripts/README.md)를 참고합니다.
+See [validation tools — Korean](scripts/README.md) for protocol, Unreal and integration checks. Automated checks do not replace manual driving, visual/audio review or a 30-minute stability run.
 
-## 서버 주소와 배포용 실행
+## Limits and current work
 
-기본 서버 주소는 `ws://127.0.0.1:9000/`입니다. 바꾸려면
-`unreal\DriveIntegration\SimCoreClient.example.ini`를 같은 폴더의 `SimCoreClient.ini`로
-복사하고 `ServerUrl`을 수정한 뒤 Play를 다시 시작합니다. 현재는 같은 PC의
-`127.0.0.1` 또는 `localhost`만 지원합니다. 잘못된 설정은 연결을 중단하고 화면과 로그에 이유를 표시합니다.
+- Vehicle physics are simplified and are not calibrated to a specific real car. Motorcycle balance is also simplified.
+- NPCs use route and obstacle rules; they do not interpret camera images or run the full player suspension model.
+- Individual parts are available through the catalog. The comparison presets are currently sedan-only. Part mass is not added to total vehicle mass or inertia.
+- Visual dents do not deform the server's collision shape.
+- Only a server on the same PC is supported: `ws://127.0.0.1:9000/` by default.
+- Live queries do not yet replace ground or collision Bake data. Final driving and packaged-build acceptance remain separate tasks.
 
-에디터 없이 실행하는 Windows 패키지의 제작·설정 방법은
-[Windows 배포 안내](./docs/guides/windows_package.md)에 정리했습니다.
-세단·경차·트럭은 공통 실내 부품을 차종별로 배치하고, 오토바이는 실내 대신 탑승자를 표시합니다. 차종별 시점과 운전자 자세의 자연스러움은 실제 플레이에서 별도로 확인합니다.
-독립 자유 이동 카메라는 아직 포함하지 않았습니다.
+To change the local server address, copy `unreal\DriveIntegration\SimCoreClient.example.ini` to `SimCoreClient.ini` in the same folder, edit `ServerUrl`, then restart Play.
 
-## 폴더 구성
+## Repository and documentation
 
-```text
-Drive_Integration/
-├── cpp/host/                 C++ 물리·교통 서버
-│   ├── src/                 서버 구현
-│   ├── tests/               자동 시험·주행 진단
-│   ├── config/              차량·지도별 실행 설정
-│   └── scripts/             Windows 설치·빌드
-├── unreal/DriveIntegration/  Unreal Engine 5.6 클라이언트
-│   ├── Source/              게임·에디터 구현
-│   ├── Content/             맵·차량·캐릭터·재질
-│   └── Config/              엔진·입력·센서 설정
-├── protocol/                 Protobuf 통신 규격
-├── map_packages/             지면·충돌·차선·신호 데이터
-├── scripts/                  서버 실행과 검증 스크립트
-└── docs/                     현재 상태, 설계, 사용·검증 안내
-```
+| Folder | Purpose |
+|---|---|
+| `cpp/host/` | C++ server, physics, traffic and tests |
+| `unreal/DriveIntegration/` | Unreal project, maps, assets and shared vehicle catalog |
+| `protocol/` | Protobuf message definitions |
+| `map_packages/` | Current server-side ground, collision and traffic data |
+| `scripts/` | Windows launchers and development checks |
+| `docs/` | Architecture, current status, guides and asset sources |
 
-교재·면접 자료·이전 제작 산출물은 프로젝트 밖에 별도로 보관합니다.
-[문서 목록과 자료 위치](./docs/README.md)를 참고하세요. 코드·테스트·맵·에셋과
-핵심 기술 문서만 Git으로 관리합니다. 이전 맵은 회귀 시험과 현재 에셋 참조에 필요해
-유지합니다. 과거 Chrono 비교 실험은 실행에 사용하지 않아 외부 보관 자료로 분리했습니다.
+Detailed documentation is currently in Korean:
 
-`build`, `Binaries`, `Intermediate`, `DerivedDataCache`, `runtime_tmp`는 빌드 결과나
-캐시입니다. 재빌드 시간을 줄이고 바로 실행할 수 있도록 필요한 항목은 유지하며 Git에서는
-제외합니다. 서버를 실행하면 `runtime_logs`가, 에디터·패키징을 실행하면 `Saved`의 로그와
-출력 폴더가 다시 생깁니다. `Saved/Autosaves`, `DriveReplays`, `Screenshots`, 개인 설정은
-사용자 작업물이므로 정리 대상에서 제외합니다.
+- [Current status and remaining work](docs/status.md)
+- [Architecture and vehicle settings](docs/architecture.md)
+- [Windows packaging](docs/guides/windows_package.md)
+- [Asset sources](docs/assets/README.md)
+- [Documentation index](docs/README.md)
 
-## 자세한 문서
-
-- [현재 상태와 남은 작업](./docs/status.md)
-- [시스템 구조](./docs/architecture.md)
-- [실행·검증·기능 문서 목록](./docs/README.md)
+Study materials and old build outputs are stored outside this repository. Generated builds, caches, logs and personal settings are excluded from Git.

@@ -1,4 +1,5 @@
 #include "traffic/npc_lane_follower.hpp"
+#include "terrain/live_ground_patch.hpp"
 #include "traffic/signal_approach.hpp"
 
 #include <algorithm>
@@ -349,6 +350,11 @@ void NpcLaneFollower::reset(double start_offset_m)
         } else {
             state_.stop_reason = NpcLaneStopReason::NoGround;
         }
+    } catch (const GroundMeasurementUnavailable&) {
+        // The route and requested station are valid. Keep them while its
+        // initial support is measured, rather than discarding the controller.
+        state_.valid = false;
+        state_.stop_reason = NpcLaneStopReason::AwaitingGround;
     } catch (...) {
         clear();
         throw;
@@ -427,7 +433,8 @@ std::optional<NpcLaneSample> NpcLaneFollower::sample_at(double progress_m) const
                 return std::nullopt;
             }
             return hit;
-        } catch (...) { return std::nullopt; }
+        } catch (const GroundMeasurementUnavailable&) { throw; }
+          catch (...) { return std::nullopt; }
     };
     const auto centre = query(sample.position_enu.east_m, sample.position_enu.north_m, true);
     if (!centre) { return std::nullopt; }
